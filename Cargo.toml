@@ -1,0 +1,27 @@
+[package]
+name = "wgpu-cpu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+derive_more = { version = "2.1.0", features = ["debug"] }
+parking_lot = "0.12.5"
+softbuffer = { version = "0.4.6", optional = true }
+thiserror = "2.0.17"
+tracing = "0.1.43"
+wgpu = { version = "27.0.0", default-features = false, features = ["custom"] }
+
+[features]
+default = ["full"]
+full = ["softbuffer"]
+softbuffer = ["dep:softbuffer"]
+
+[patch.crates-io]
+wgpu = { path = "../wgpu/wgpu" }
+
+[dev-dependencies]
+color-eyre = "0.6.5"
+dotenvy = "0.15.7"
+pollster = "0.4.0"
+tracing-subscriber = "0.3.22"
+winit = "0.30.12"

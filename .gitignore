@@ -1,0 +1,19 @@
+# OS
+Thumbs.db
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Rust
+/Cargo.lock
+/target
+/.cargo
+
+# Env vars
+.env
+
+/rustc-ice-*
+/tmp
+
