@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_variables)]
 
 mod adapter;
+mod buffer;
 mod command;
 mod device;
 mod engine;
@@ -9,6 +10,7 @@ mod queue;
 mod render_pass;
 #[cfg(feature = "softbuffer")]
 mod surface;
+mod sync;
 mod texture;
 
 pub use adapter::Adapter;

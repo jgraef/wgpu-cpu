@@ -9,7 +9,8 @@ use softbuffer::SoftBufferError;
 
 use crate::{
     Device,
-    TEXTURE_USAGES,
+    sync::wait,
+    texture::Texture,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -25,14 +26,6 @@ pub struct Surface {
     inner: Arc<Mutex<Inner>>,
 }
 
-#[derive(derive_more::Debug)]
-struct Inner {
-    #[debug(skip)]
-    context: softbuffer::Context<Display>,
-    #[debug(skip)]
-    surface: softbuffer::Surface<Display, Window>,
-}
-
 impl Surface {
     pub fn new(target: wgpu::SurfaceTargetUnsafe) -> Result<Self, Error> {
         match target {
@@ -43,7 +36,11 @@ impl Surface {
                 let context = softbuffer::Context::new(Display::from(raw_display_handle))?;
                 let surface = softbuffer::Surface::new(&context, Window::from(raw_window_handle))?;
                 Ok(Self {
-                    inner: Arc::new(Mutex::new(Inner { context, surface })),
+                    inner: Arc::new(Mutex::new(Inner {
+                        context,
+                        surface,
+                        configured: None,
+                    })),
                 })
             }
             _ => Err(Error::Unsupported),
@@ -61,13 +58,14 @@ impl wgpu::custom::SurfaceInterface for Surface {
             // that it's actually BGR and we don't get a alpha
             //
             // [1]: https://docs.rs/softbuffer/latest/softbuffer/struct.Buffer.html#data-representation
-            formats: vec![wgpu::TextureFormat::Bgra8Unorm],
+            formats: vec![TEXTURE_FORMAT],
             // Don't know. wgpu doc says wayland doesn't support immediate, so why should softbuffer
             // do this on wayland? but I don't know what softbuffer exactly does.
             present_modes: vec![wgpu::PresentMode::Immediate],
             // No alpha
             alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
-            usages: TEXTURE_USAGES,
+            //usages: TEXTURE_USAGES,
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
         }
     }
 
@@ -83,6 +81,23 @@ impl wgpu::custom::SurfaceInterface for Surface {
         tracing::debug!(?config, "configure surface");
 
         let mut inner = self.inner.lock();
+
+        inner.configured = Some(Configured {
+            width: config.width,
+            height: config.height,
+            format: config.format,
+            usage: config.usage,
+            buffer: Texture::new(
+                wgpu::Extent3d {
+                    width: config.width,
+                    height: config.height,
+                    depth_or_array_layers: 1,
+                },
+                config.format,
+            ),
+            wait: None,
+        });
+
         inner
             .surface
             .resize(
@@ -103,16 +118,49 @@ impl wgpu::custom::SurfaceInterface for Surface {
         wgpu::SurfaceStatus,
         wgpu::custom::DispatchSurfaceOutputDetail,
     ) {
+        let buffer = {
+            let mut inner = self.inner.lock();
+
+            let configured = inner
+                .configured
+                .as_mut()
+                .expect("Surface not configured yet");
+
+            let mut buffer = configured.buffer.clone();
+
+            configured.wait = Some(buffer.wait());
+
+            buffer
+        };
+
         (
-            Some(wgpu::custom::DispatchTexture::custom(SurfaceTexture {
-                inner: self.inner.clone(),
-            })),
+            Some(wgpu::custom::DispatchTexture::custom(buffer)),
             wgpu::SurfaceStatus::Good,
             wgpu::custom::DispatchSurfaceOutputDetail::custom(SurfaceOutputDetail {
                 inner: self.inner.clone(),
             }),
         )
     }
+}
+
+#[derive(derive_more::Debug)]
+struct Inner {
+    #[debug(skip)]
+    context: softbuffer::Context<Display>,
+    #[debug(skip)]
+    surface: softbuffer::Surface<Display, Window>,
+
+    configured: Option<Configured>,
+}
+
+#[derive(Debug)]
+struct Configured {
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+    buffer: Texture,
+    wait: Option<wait::Wait>,
 }
 
 #[derive(Debug)]
@@ -123,40 +171,33 @@ pub struct SurfaceOutputDetail {
 impl wgpu::custom::SurfaceOutputDetailInterface for SurfaceOutputDetail {
     fn present(&self) {
         let mut inner = self.inner.lock();
+        let inner = &mut *inner;
+
+        {
+            let configured = inner
+                .configured
+                .as_mut()
+                .expect("Surface not configured yet");
+
+            if let Some(wait) = configured.wait.take() {
+                let _ = wait.wait();
+            }
+
+            let source = configured.buffer.buffer.read();
+
+            let mut target = inner.surface.buffer_mut().unwrap();
+            let target: &mut [u8] = bytemuck::cast_slice_mut(&mut *target);
+
+            target.copy_from_slice(&*source);
+        }
+
         inner.surface.buffer_mut().unwrap().present().unwrap();
     }
 
     fn texture_discard(&self) {
-        // todo
-    }
-}
-
-#[derive(Debug)]
-pub struct SurfaceTexture {
-    inner: Arc<Mutex<Inner>>,
-}
-
-impl wgpu::custom::TextureInterface for SurfaceTexture {
-    fn create_view(
-        &self,
-        desc: &wgpu::TextureViewDescriptor<'_>,
-    ) -> wgpu::custom::DispatchTextureView {
-        wgpu::custom::DispatchTextureView::custom(SurfaceTextureView {
-            inner: self.inner.clone(),
-        })
-    }
-
-    fn destroy(&self) {
         // nop
     }
 }
-
-#[derive(Debug)]
-pub struct SurfaceTextureView {
-    inner: Arc<Mutex<Inner>>,
-}
-
-impl wgpu::custom::TextureViewInterface for SurfaceTextureView {}
 
 struct Display(wgpu::rwh::DisplayHandle<'static>);
 
@@ -200,8 +241,10 @@ fn check_surface_config(config: &wgpu::SurfaceConfiguration) -> Result<(), Surfa
     Ok(())
 }
 
+const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+
 fn check_surface_format(format: wgpu::TextureFormat) -> Result<(), SurfaceConfigError> {
-    if format == wgpu::TextureFormat::Bgra8Unorm {
+    if format == TEXTURE_FORMAT {
         Ok(())
     }
     else {

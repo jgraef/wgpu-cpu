@@ -5,7 +5,6 @@ use crate::{
     device::Device,
     engine::Engine,
     make_label_owned,
-    surface::Surface,
 };
 
 #[derive(Debug)]
@@ -42,7 +41,15 @@ impl wgpu::custom::AdapterInterface for Adapter {
     }
 
     fn is_surface_supported(&self, surface: &wgpu::custom::DispatchSurface) -> bool {
-        surface.as_custom::<Surface>().is_some()
+        #![allow(unused)]
+        let mut supported = false;
+
+        #[cfg(feature = "softbuffer")]
+        {
+            supported = surface.as_custom::<crate::surface::Surface>().is_some();
+        }
+
+        supported
     }
 
     fn features(&self) -> wgpu::Features {

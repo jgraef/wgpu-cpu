@@ -1,6 +1,9 @@
-use crate::command::{
-    Command,
-    CommandEncoder,
+use crate::{
+    command::{
+        Command,
+        CommandEncoder,
+    },
+    texture::TextureViewAttachment,
 };
 
 #[derive(Debug)]
@@ -262,20 +265,20 @@ impl Drop for RenderPass {
 
 #[derive(Debug)]
 pub struct ColorAttachment {
-    pub view: wgpu::TextureView,
+    pub view: TextureViewAttachment,
     pub depth_slice: Option<u32>,
-    pub resolve_target: Option<wgpu::TextureView>,
+    pub resolve_target: Option<TextureViewAttachment>,
     pub ops: wgpu::Operations<wgpu::Color>,
 }
 
 impl ColorAttachment {
     pub fn new(color_attachment: &wgpu::RenderPassColorAttachment) -> Self {
         Self {
-            view: color_attachment.view.clone(),
+            view: TextureViewAttachment::from_wgpu(&color_attachment.view).unwrap(),
             depth_slice: color_attachment.depth_slice,
             resolve_target: color_attachment
                 .resolve_target
-                .map(|texture| texture.clone()),
+                .map(|texture| TextureViewAttachment::from_wgpu(texture).unwrap()),
             ops: color_attachment.ops,
         }
     }
@@ -290,12 +293,34 @@ pub struct RenderPassCommand {
 
 impl RenderPassCommand {
     pub fn execute(self) {
-        for color_attachment in &self.color_attachments {
-            if let Some(color_attachment) = color_attachment {}
-        }
+        // todo: sort them in some canonical order to avoid deadlocks due to
+        // interleaving locks
+        let texture_guards = self
+            .color_attachments
+            .iter()
+            .map(|color_attachment| {
+                color_attachment.as_ref().map(|color_attachment| {
+                    let mut texture_guard = color_attachment.view.write();
+                    match color_attachment.ops.load {
+                        wgpu::LoadOp::Clear(clear_color) => {
+                            texture_guard.clear(clear_color);
+                        }
+                        wgpu::LoadOp::Load => {
+                            // nop
+                        }
+                        wgpu::LoadOp::DontCare(_) => {
+                            // nop
+                        }
+                    }
+                    texture_guard
+                })
+            })
+            .collect::<Vec<_>>();
 
         for command in self.commands {
-            match command {}
+            match command {
+                // todo
+            }
         }
     }
 }

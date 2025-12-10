@@ -7,3 +7,5 @@ Issues that can be raised with `wgpu`:
 - [x] custom `RequestAdapterError`
 - [ ] `RenderPassDescriptor` generic over label, with `map_label`
 - [ ] `RenderPassInterface::end` is never called. core implements its own Drop that calls it. But shouldn't this be called by the wrapper?
+- [ ] `TextureViewDescriptor::map_label`
+- [ ] `TextureViewInterface::create_view` has no knowledge of the texture's descriptor. It would need to store it, but the wrapping type does that already.
