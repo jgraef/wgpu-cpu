@@ -1,9 +1,16 @@
+use std::ops::Range;
+
 use crate::{
     command::{
         Command,
         CommandEncoder,
     },
-    texture::TextureViewAttachment,
+    pipeline::RenderPipeline,
+    shader::eval::run_vertex_shader,
+    texture::{
+        TextureViewAttachment,
+        TextureWriteGuard,
+    },
 };
 
 #[derive(Debug)]
@@ -34,7 +41,10 @@ impl RenderPass {
 
 impl wgpu::custom::RenderPassInterface for RenderPass {
     fn set_pipeline(&mut self, pipeline: &wgpu::custom::DispatchRenderPipeline) {
-        todo!()
+        let pipeline = pipeline.as_custom::<RenderPipeline>().unwrap();
+        self.commands.push(RenderPassSubCommand::SetPipeline {
+            pipeline: pipeline.clone(),
+        })
     }
 
     fn set_bind_group(
@@ -95,7 +105,10 @@ impl wgpu::custom::RenderPassInterface for RenderPass {
     }
 
     fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
-        todo!()
+        self.commands.push(RenderPassSubCommand::Draw {
+            vertices: vertices.clone(),
+            instances: instances.clone(),
+        })
     }
 
     fn draw_indexed(
@@ -295,7 +308,7 @@ impl RenderPassCommand {
     pub fn execute(self) {
         // todo: sort them in some canonical order to avoid deadlocks due to
         // interleaving locks
-        let texture_guards = self
+        let color_attachments = self
             .color_attachments
             .iter()
             .map(|color_attachment| {
@@ -317,15 +330,60 @@ impl RenderPassCommand {
             })
             .collect::<Vec<_>>();
 
+        let mut state = State::new(color_attachments);
+
         for command in self.commands {
             match command {
-                // todo
+                RenderPassSubCommand::SetPipeline { pipeline } => {
+                    state.pipeline = Some(pipeline);
+                }
+                RenderPassSubCommand::Draw {
+                    vertices,
+                    instances,
+                } => {
+                    state.draw(vertices, instances);
+                }
             }
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub enum RenderPassSubCommand {
-    // todo
+    SetPipeline {
+        #[debug(skip)]
+        pipeline: RenderPipeline,
+    },
+    Draw {
+        vertices: Range<u32>,
+        instances: Range<u32>,
+    },
+}
+
+#[derive(Debug)]
+struct State<'color> {
+    color_attachments: Vec<Option<TextureWriteGuard<'color>>>,
+    pipeline: Option<RenderPipeline>,
+}
+
+impl<'color> State<'color> {
+    pub fn new(color_attachments: Vec<Option<TextureWriteGuard<'color>>>) -> Self {
+        Self {
+            color_attachments,
+            pipeline: None,
+        }
+    }
+
+    pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        if let Some(pipeline) = &self.pipeline {
+            let vertex = &pipeline.descriptor.vertex;
+
+            for instance_id in instances {
+                for vertex_id in vertices.clone() {
+                    // todo
+                    run_vertex_shader(vertex, instance_id, vertex_id)
+                }
+            }
+        }
+    }
 }

@@ -92,4 +92,8 @@ impl InstanceInterface for Instance {
         let _ = backends;
         Box::pin(async { vec![DispatchAdapter::custom(Adapter::new())] })
     }
+
+    fn wgsl_language_features(&self) -> wgpu::WgslLanguageFeatures {
+        wgpu::WgslLanguageFeatures::empty()
+    }
 }

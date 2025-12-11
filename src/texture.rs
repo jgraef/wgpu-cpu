@@ -10,6 +10,11 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct Texture {
     pub buffer: Buffer,
+
+    // This is super janky and easy to use wrong. it basically notifies anyone having the Wait part
+    // when a TextureWriteGuard for this texture is dropped. This is used by the surface
+    // implementation. It attaches a Notify when handing out the texture and when present is
+    // called, it waits until the texture actually has been modified.
     notify: Option<wait::Notify>,
 }
 

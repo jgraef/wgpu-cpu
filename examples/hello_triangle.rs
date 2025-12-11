@@ -12,6 +12,7 @@ use wgpu::{
     Instance,
     LoadOp,
     Operations,
+    PipelineLayout,
     PresentMode,
     Queue,
     RenderPassColorAttachment,
@@ -61,6 +62,8 @@ struct App {
     adapter: Adapter,
     device: Device,
     queue: Queue,
+    shader_module: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
     window: Option<AppWindow>,
 }
 
@@ -74,20 +77,30 @@ impl App {
             Ok::<_, Error>((adapter, device, queue))
         })?;
 
+        let shader_module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hello_triangle pipeline layout"),
+            bind_group_layouts: &[],
+            immediates_ranges: &[],
+        });
+
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
+            shader_module,
+            pipeline_layout,
             window: None,
         })
     }
 
-    fn render(&self, target_texture: &TextureView) {
+    fn render(&self, target_texture: &TextureView, pipeline: &wgpu::RenderPipeline) {
         let mut command_encoder = self.device.create_command_encoder(&Default::default());
 
         {
-            let _render_pass = command_encoder.begin_render_pass(&RenderPassDescriptor {
+            let mut render_pass = command_encoder.begin_render_pass(&RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: target_texture,
@@ -103,15 +116,73 @@ impl App {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+
+            render_pass.set_pipeline(pipeline);
+            render_pass.draw(0..3, 0..1);
         }
 
         self.queue.submit([command_encoder.finish()]);
+    }
+
+    fn create_window(&self, event_loop: &ActiveEventLoop) -> Result<AppWindow, Error> {
+        let window = Arc::new(
+            event_loop.create_window(WindowAttributes::default().with_title("Hello Triangle"))?,
+        );
+        let window_size = window.inner_size();
+        let surface = self.instance.create_surface(window.clone())?;
+        let surface_capabilities = surface.get_capabilities(&self.adapter);
+        let format = surface_capabilities.formats[0];
+
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("hello_triangle pipeline"),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &self.shader_module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.shader_module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        let window = AppWindow {
+            window,
+            surface,
+            format,
+            pipeline,
+        };
+        window.configure(&self.device, window_size);
+        Ok(window)
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        match AppWindow::new(&self.instance, &self.device, event_loop) {
+        match self.create_window(event_loop) {
             Ok(window) => {
                 self.window = Some(window);
             }
@@ -144,7 +215,7 @@ impl ApplicationHandler for App {
                     match window.surface.get_current_texture() {
                         Ok(target_texture) => {
                             let view = target_texture.texture.create_view(&Default::default());
-                            self.render(&view);
+                            self.render(&view, &window.pipeline);
                             target_texture.present();
                         }
                         Err(error) => {
@@ -162,35 +233,18 @@ impl ApplicationHandler for App {
 #[derive(Debug)]
 struct AppWindow {
     window: Arc<Window>,
-    surface: Surface<'static>,
+    surface: wgpu::Surface<'static>,
+    format: wgpu::TextureFormat,
+    pipeline: wgpu::RenderPipeline,
 }
 
 impl AppWindow {
-    pub fn new(
-        instance: &Instance,
-        device: &Device,
-        event_loop: &ActiveEventLoop,
-    ) -> Result<Self, Error> {
-        let window = Arc::new(
-            event_loop.create_window(WindowAttributes::default().with_title("Hello Triangle"))?,
-        );
-        let window_size = window.inner_size();
-
-        let surface = instance.create_surface(window.clone())?;
-
-        let this = Self { window, surface };
-
-        this.configure(device, window_size);
-
-        Ok(this)
-    }
-
     pub fn configure(&self, device: &Device, window_size: PhysicalSize<u32>) {
         self.surface.configure(
             device,
             &SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
-                format: TextureFormat::Bgra8Unorm,
+                format: self.format,
                 width: window_size.width,
                 height: window_size.height,
                 present_mode: PresentMode::Immediate,

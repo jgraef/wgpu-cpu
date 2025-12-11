@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use softbuffer::SoftBufferError;
 
 use crate::{
-    Device,
+    device::Device,
     sync::wait,
     texture::Texture,
 };

@@ -2,8 +2,7 @@ use std::pin::Pin;
 
 use crate::{
     TEXTURE_USAGES,
-    device::Device,
-    engine::Engine,
+    device::create_device_and_queue,
     make_label_owned,
 };
 
@@ -28,10 +27,7 @@ impl wgpu::custom::AdapterInterface for Adapter {
             check_features(&descriptor.required_features)?;
             check_limits(&descriptor.required_limits)?;
 
-            let device = Device::new(descriptor);
-            // probably want to pass the device to the engine
-            let queue = Engine::spawn()
-                .map_err(|error| wgpu::RequestDeviceError::custom(error.to_string()))?;
+            let (device, queue) = create_device_and_queue(descriptor)?;
 
             Ok((
                 wgpu::custom::DispatchDevice::custom(device),
