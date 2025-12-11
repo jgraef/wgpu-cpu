@@ -136,15 +136,16 @@ pub fn main() -> Result<(), Error> {
             multiview_mask: None,
         });
 
-        //render_pass.set_pipeline(&pipeline);
-        //render_pass.draw(0..3, 0..1);
+        render_pass.set_pipeline(&pipeline);
+        render_pass.draw(0..3, 0..1);
     }
 
     let submission_index = queue.submit([command_encoder.finish()]);
-    device.poll(wgpu::PollType::Wait {
+    let poll_result = device.poll(wgpu::PollType::Wait {
         submission_index: Some(submission_index),
         timeout: None,
     });
+    tracing::debug!(?poll_result);
 
     wgpu_cpu::dump_texture(&target_texture, "tmp/test.png")?;
 

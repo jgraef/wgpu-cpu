@@ -6,7 +6,10 @@ use crate::{
         CommandEncoder,
     },
     pipeline::RenderPipeline,
-    shader::eval::run_vertex_shader,
+    shader::interpreter::{
+        BuiltinVertexInputs,
+        run_vertex_shader,
+    },
     texture::{
         TextureViewAttachment,
         TextureWriteGuard,
@@ -378,10 +381,15 @@ impl<'color> State<'color> {
         if let Some(pipeline) = &self.pipeline {
             let vertex = &pipeline.descriptor.vertex;
 
-            for instance_id in instances {
-                for vertex_id in vertices.clone() {
-                    // todo
-                    run_vertex_shader(vertex, instance_id, vertex_id)
+            for instance_index in instances {
+                for vertex_index in vertices.clone() {
+                    run_vertex_shader(
+                        vertex,
+                        &BuiltinVertexInputs {
+                            vertex_index,
+                            instance_index,
+                        },
+                    );
                 }
             }
         }

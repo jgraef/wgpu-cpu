@@ -252,10 +252,11 @@ impl wgpu::custom::DeviceInterface for Device {
                 timeout,
             } => {
                 let mut device_state = self.inner.state.lock();
-                device_state.queue_state.assert_engine_alive();
 
                 loop {
-                    if device_state.queue_state.queue.is_empty() {
+                    device_state.queue_state.assert_engine_alive();
+
+                    if device_state.queue_state.inflight_submissions.is_empty() {
                         return Ok(wgpu::PollStatus::QueueEmpty);
                     }
 
@@ -372,28 +373,18 @@ impl wgpu::custom::QueueInterface for Queue {
         let submission_index = device_state.queue_state.next_submission_index;
         device_state.queue_state.next_submission_index += 1;
 
-        let mut any_submissions = false;
-        for command_buffer in command_buffers {
-            let command_buffer = command_buffer.as_custom::<CommandBuffer>().unwrap();
-            let commands = command_buffer.take();
-            if !commands.is_empty() {
-                tracing::debug!(?commands, "submitting");
-                device_state.queue_state.queue.push_back(Submission {
-                    commands,
-                    submission_index,
-                });
-                any_submissions = true;
-            }
-        }
+        let command_buffers = command_buffers
+            .map(|command_buffer| command_buffer.as_custom::<CommandBuffer>().unwrap().take())
+            .collect::<Vec<_>>();
 
-        if !any_submissions {
-            // put in one empty submissions so we at least get feedback on when it's done
-            // todo: of course we could just mark it as done immediately
-            device_state.queue_state.queue.push_back(Submission {
-                commands: vec![],
-                submission_index,
-            });
-        }
+        device_state.queue_state.queue.push_back(Submission {
+            command_buffers,
+            submission_index,
+        });
+        device_state
+            .queue_state
+            .inflight_submissions
+            .insert(submission_index);
 
         self.inner.queue_submitted.notify_all();
 
@@ -444,7 +435,7 @@ impl QueueState {
 
 #[derive(Debug)]
 pub struct Submission {
-    pub commands: Vec<Command>,
+    pub command_buffers: Vec<Vec<Command>>,
     pub submission_index: u64,
 }
 
@@ -465,16 +456,17 @@ impl QueueReceiver {
             self.inner.queue_processed.notify_all();
         }
 
-        while device_state.queue_state.sender_count != 0 {
+        loop {
             if let Some(item) = device_state.queue_state.queue.pop_front() {
                 return Some(item);
+            }
+            else if device_state.queue_state.sender_count == 0 {
+                return None;
             }
             else {
                 self.inner.queue_submitted.wait(&mut device_state);
             }
         }
-
-        None
     }
 }
 
@@ -483,5 +475,6 @@ impl Drop for QueueReceiver {
         tracing::debug!("QueueReceiver dropped");
         let mut device_state = self.inner.state.lock();
         device_state.queue_state.has_receiver = false;
+        self.inner.queue_processed.notify_all();
     }
 }

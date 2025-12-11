@@ -27,8 +27,11 @@ impl Engine {
         let mut last_processed = None;
 
         while let Some(submission) = self.receiver.receive(last_processed) {
+            tracing::debug!(?submission.submission_index, "processing submission");
             last_processed = Some(submission.submission_index);
-            self.execute_submission(submission.commands);
+            for commands in submission.command_buffers {
+                self.execute_submission(commands);
+            }
         }
     }
 

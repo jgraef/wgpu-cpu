@@ -1,8 +1,11 @@
-pub mod eval;
+pub mod interpreter;
 
 use std::{
     collections::HashMap,
-    ops::Index,
+    ops::{
+        Deref,
+        Index,
+    },
     sync::Arc,
 };
 
@@ -11,11 +14,15 @@ use naga::{
     Function,
     Handle,
     Module,
+    Scalar,
     ShaderStage,
+    TypeInner,
     front::Typifier,
     proc::{
+        Alignment,
         Layouter,
         ResolveContext,
+        TypeLayout,
     },
     valid::{
         ModuleInfo,
@@ -24,20 +31,11 @@ use naga::{
 };
 use wgpu::custom::ShaderModuleInterface;
 
+use crate::shader::interpreter::VariableType;
+
 #[derive(Clone, Debug)]
 pub struct ShaderModule {
     inner: Arc<ShaderModuleInner>,
-}
-
-#[derive(Debug)]
-struct ShaderModuleInner {
-    module: Module,
-    module_info: ModuleInfo,
-    layouter: Layouter,
-    compilation_info: wgpu::CompilationInfo,
-    entry_points_by_name: HashMap<String, usize>,
-    unique_entry_points_by_stage: HashMap<ShaderStage, usize>,
-    expression_types: ExpressionTypes,
 }
 
 impl ShaderModule {
@@ -56,9 +54,9 @@ impl ShaderModule {
         let mut layouter = Layouter::default();
         layouter.update(module.to_ctx()).unwrap();
 
-        tracing::debug!("module: {:#?}", module);
-        tracing::debug!("module_info: {:#?}", module_info);
-        tracing::debug!("layouter: {:#?}", layouter);
+        tracing::trace!("module: {:#?}", module);
+        tracing::trace!("module_info: {:#?}", module_info);
+        tracing::trace!("layouter: {:#?}", layouter);
 
         let mut entry_points_by_name = HashMap::with_capacity(module.entry_points.len());
         let mut unique_entry_points_by_stage = HashMap::with_capacity(module.entry_points.len());
@@ -88,23 +86,6 @@ impl ShaderModule {
             }),
         })
     }
-
-    pub fn entry_point(
-        &self,
-        name: Option<&str>,
-        stage: ShaderStage,
-    ) -> Option<(EntryPointIndex, &EntryPoint)> {
-        let index = if let Some(name) = name {
-            self.inner.entry_points_by_name.get(name)?
-        }
-        else {
-            self.inner.unique_entry_points_by_stage.get(&stage)?
-        };
-        Some((
-            EntryPointIndex(*index),
-            &self.inner.module.entry_points[*index],
-        ))
-    }
 }
 
 impl ShaderModuleInterface for ShaderModule {
@@ -113,6 +94,61 @@ impl ShaderModuleInterface for ShaderModule {
     ) -> std::pin::Pin<Box<dyn wgpu::custom::ShaderCompilationInfoFuture>> {
         let compilation_info = self.inner.compilation_info.clone();
         Box::pin(async move { compilation_info })
+    }
+}
+
+#[derive(Debug)]
+pub struct ShaderModuleInner {
+    pub module: Module,
+    pub module_info: ModuleInfo,
+    pub layouter: Layouter,
+    pub compilation_info: wgpu::CompilationInfo,
+    pub entry_points_by_name: HashMap<String, usize>,
+    pub unique_entry_points_by_stage: HashMap<ShaderStage, usize>,
+    pub expression_types: ExpressionTypes,
+}
+
+impl ShaderModuleInner {
+    pub fn type_layout<'t>(&self, ty: impl Into<VariableType<'t>>) -> TypeLayout {
+        // https://gpuweb.github.io/gpuweb/wgsl/#memory-layouts
+
+        let ty = ty.into();
+        match ty {
+            VariableType::Handle(handle) => self.layouter[handle],
+            VariableType::Inner(type_inner) => {
+                match type_inner {
+                    TypeInner::Scalar(Scalar { kind, width }) => {
+                        TypeLayout {
+                            size: *width as u32,
+                            alignment: Alignment::from_width(*width),
+                        }
+                    }
+                    _ => todo!("layout for {ty:?}"),
+                }
+            }
+        }
+    }
+
+    pub fn entry_point(
+        &self,
+        name: Option<&str>,
+        stage: ShaderStage,
+    ) -> Option<(EntryPointIndex, &EntryPoint)> {
+        let index = if let Some(name) = name {
+            self.entry_points_by_name.get(name)?
+        }
+        else {
+            self.unique_entry_points_by_stage.get(&stage)?
+        };
+        Some((EntryPointIndex(*index), &self.module.entry_points[*index]))
+    }
+}
+
+impl Deref for ShaderModule {
+    type Target = ShaderModuleInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
