@@ -619,11 +619,13 @@ pub struct Rasterizer {
 
 impl Rasterizer {
     pub fn new(target_size: Vector2<u32>) -> Self {
+        let raster_size = target_size.cast::<f32>() - Vector2::repeat(1.0);
+
         let mut to_raster = Matrix2x4::default();
-        to_raster[(0, 3)] = 0.5;
-        to_raster[(1, 3)] = 0.5;
-        to_raster[(0, 0)] = 0.5 * (target_size.x - 1) as f32;
-        to_raster[(1, 1)] = 0.5 * (target_size.y - 1) as f32;
+        to_raster[(0, 3)] = 0.5 * raster_size.x;
+        to_raster[(1, 3)] = 0.5 * raster_size.y;
+        to_raster[(0, 0)] = 0.5 * raster_size.x;
+        to_raster[(1, 1)] = -0.5 * raster_size.y;
 
         Self {
             target_size,
@@ -649,6 +651,7 @@ impl Rasterizer {
         let end = self.to_raster(line.0[1]);
 
         if let (Some(start), Some(end)) = (start, end) {
+            tracing::debug!(?start, ?end);
             Either::Left(bresenham(start, end).map(move |(raster, t)| {
                 Fragment {
                     raster,

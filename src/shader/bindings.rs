@@ -229,7 +229,7 @@ impl<'a, 'color> ShaderOutput for FragmentOutput<'a, 'color> {
             } => {
                 let color_attachment = self.color_attachments[*location as usize].as_mut().unwrap();
                 let color = *variable.read::<Vector4<f32>>(stack);
-                tracing::debug!(?color, "color!");
+                tracing::trace!(?color, "color!");
 
                 color_attachment.put_pixel(self.raster, color);
             }

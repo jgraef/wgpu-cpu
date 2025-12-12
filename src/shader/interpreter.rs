@@ -113,7 +113,7 @@ impl<'a> VirtualMachine {
             }
         }
 
-        tracing::debug!(stack_size = self.stack.allocated());
+        tracing::trace!(stack_size = self.stack.allocated());
     }
 }
 
@@ -243,7 +243,7 @@ impl<'a> RunFunction<'a> {
     }
 
     pub fn evaluate(&mut self, expression: &Expression, output: Variable) {
-        tracing::debug!(?expression, "evaluate");
+        tracing::trace!(?expression, "evaluate");
 
         let mut inner = self.frame();
 
@@ -771,10 +771,7 @@ fn offset_of(
         TypeInner::Vector { size, scalar } => {
             let inner_ty_layout = module.type_layout(inner_ty);
             let inner_stride = inner_ty_layout.to_stride();
-            let offset = inner_stride * index as u32;
-            //tracing::debug!(?outer_ty, ?inner_ty, ?inner_ty_layout, ?inner_stride,
-            // ?index, ?offset);
-            offset
+            inner_stride * index as u32
         }
         TypeInner::Matrix {
             columns,
