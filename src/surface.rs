@@ -9,8 +9,8 @@ use softbuffer::SoftBufferError;
 
 use crate::{
     device::Device,
-    sync::wait,
     texture::Texture,
+    util::sync::wait,
 };
 
 #[derive(Debug, thiserror::Error)]

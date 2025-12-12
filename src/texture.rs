@@ -1,10 +1,15 @@
+use nalgebra::{
+    Point2,
+    Vector4,
+};
+
 use crate::{
     buffer::{
         Buffer,
         BufferReadGuard,
         BufferWriteGuard,
     },
-    sync::wait,
+    util::sync::wait,
 };
 
 #[derive(Clone, Debug)]
@@ -81,6 +86,7 @@ impl wgpu::custom::TextureViewInterface for TextureView {}
 #[derive(Clone, Copy, Debug)]
 pub struct TextureInfo {
     pub format: wgpu::TextureFormat,
+    pub size: wgpu::Extent3d,
     pub dimension: wgpu::TextureViewDimension,
     pub usage: wgpu::TextureUsages,
     pub aspect: wgpu::TextureAspect,
@@ -109,6 +115,7 @@ impl TextureViewAttachment {
                 format: texture_view_descriptor
                     .format
                     .unwrap_or(wgpu_texture.format()),
+                size: wgpu_texture.size(),
                 dimension: texture_view_descriptor.dimension.unwrap_or_else(|| {
                     match wgpu_texture.dimension() {
                         wgpu::TextureDimension::D1 => wgpu::TextureViewDimension::D1,
@@ -167,33 +174,21 @@ pub struct TextureWriteGuard<'a> {
 
 impl<'a> TextureWriteGuard<'a> {
     pub fn clear(&mut self, color: wgpu::Color) {
-        let mut texel = [0; 4];
-
-        fn f64_to_u8(value: f64) -> u8 {
-            (value * 255.0).clamp(0.0, 255.0) as u8
-        }
-
-        match self.info.format {
-            wgpu::TextureFormat::Rgba8Unorm
-            | wgpu::TextureFormat::Rgba8UnormSrgb
-            | wgpu::TextureFormat::Rgba8Snorm => {
-                texel[0] = f64_to_u8(color.r);
-                texel[1] = f64_to_u8(color.g);
-                texel[2] = f64_to_u8(color.b);
-                texel[3] = f64_to_u8(color.a);
-            }
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
-                texel[0] = f64_to_u8(color.b);
-                texel[1] = f64_to_u8(color.g);
-                texel[2] = f64_to_u8(color.r);
-                texel[3] = f64_to_u8(color.a);
-            }
-            _ => todo!(),
-        }
+        let color = encode_color(
+            Vector4::new(color.r, color.g, color.b, color.a).cast(),
+            self.info.format,
+        );
 
         let target: &mut [[u8; 4]] = bytemuck::cast_slice_mut(&mut *self.guard);
+        target.fill(color);
+    }
 
-        target.fill(texel);
+    pub fn put_pixel(&mut self, position: Point2<u32>, color: Vector4<f32>) {
+        // todo: proper stride calculations
+        let index = position.y as usize * self.info.size.width as usize + position.x as usize;
+
+        let target: &mut [[u8; 4]] = bytemuck::cast_slice_mut(&mut *self.guard);
+        target[index] = encode_color(color, self.info.format)
     }
 }
 
@@ -264,4 +259,32 @@ fn bytes_per_texel(format: wgpu::TextureFormat) -> usize {
         | wgpu::TextureFormat::Depth32FloatStencil8 => 16,
         _ => todo!(),
     }
+}
+
+fn encode_color(color: Vector4<f32>, format: wgpu::TextureFormat) -> [u8; 4] {
+    let mut pixel = [0; 4];
+
+    fn f32_to_u8(value: f32) -> u8 {
+        (value * 255.0).clamp(0.0, 255.0) as u8
+    }
+
+    match format {
+        wgpu::TextureFormat::Rgba8Unorm
+        | wgpu::TextureFormat::Rgba8UnormSrgb
+        | wgpu::TextureFormat::Rgba8Snorm => {
+            pixel[0] = f32_to_u8(color.x);
+            pixel[1] = f32_to_u8(color.y);
+            pixel[2] = f32_to_u8(color.z);
+            pixel[3] = f32_to_u8(color.w);
+        }
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+            pixel[0] = f32_to_u8(color.z);
+            pixel[1] = f32_to_u8(color.y);
+            pixel[2] = f32_to_u8(color.x);
+            pixel[3] = f32_to_u8(color.w);
+        }
+        _ => todo!(),
+    }
+
+    pixel
 }

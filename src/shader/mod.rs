@@ -1,3 +1,4 @@
+pub mod bindings;
 pub mod interpreter;
 
 use std::{
@@ -133,15 +134,29 @@ impl ShaderModuleInner {
         &self,
         name: Option<&str>,
         stage: ShaderStage,
-    ) -> Option<(EntryPointIndex, &EntryPoint)> {
+    ) -> Result<EntryPointIndex, EntryPointNotFound> {
         let index = if let Some(name) = name {
-            self.entry_points_by_name.get(name)?
+            self.entry_points_by_name.get(name).ok_or_else(|| {
+                EntryPointNotFound::NameNotFound {
+                    name: name.to_owned(),
+                }
+            })?
         }
         else {
-            self.unique_entry_points_by_stage.get(&stage)?
+            self.unique_entry_points_by_stage
+                .get(&stage)
+                .ok_or_else(|| EntryPointNotFound::NoUniqueForStage { stage })?
         };
-        Some((EntryPointIndex(*index), &self.module.entry_points[*index]))
+        Ok(EntryPointIndex(*index))
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EntryPointNotFound {
+    #[error("Entry point '{name}' not found")]
+    NameNotFound { name: String },
+    #[error("No unique entry point for shader stage {stage:?} found")]
+    NoUniqueForStage { stage: ShaderStage },
 }
 
 impl Deref for ShaderModule {
@@ -149,6 +164,14 @@ impl Deref for ShaderModule {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl Index<EntryPointIndex> for ShaderModuleInner {
+    type Output = EntryPoint;
+
+    fn index(&self, index: EntryPointIndex) -> &Self::Output {
+        &self.module.entry_points[index.0]
     }
 }
 

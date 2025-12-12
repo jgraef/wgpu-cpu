@@ -8,7 +8,9 @@ bytemuck = "1.24.0"
 derive_more = { version = "2.1.0", features = ["debug"] }
 half = { version = "2.7.1", features = ["bytemuck"] }
 image = { version = "0.25.9", optional = true }
+itertools = "0.14.0"
 naga = { version = "27.0.0", features = ["wgsl-in"] }
+nalgebra = { version = "0.34.1", default-features = false, features = ["bytemuck"] }
 parking_lot = "0.12.5"
 softbuffer = { version = "0.4.6", optional = true }
 thiserror = "2.0.17"

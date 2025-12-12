@@ -4,9 +4,14 @@ use std::{
     sync::Arc,
 };
 
+use naga::ShaderStage;
+
 use crate::{
     bind_group::BindGroupLayout,
-    shader::ShaderModule,
+    shader::{
+        EntryPointIndex,
+        ShaderModule,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -96,16 +101,23 @@ pub struct RenderPipelineDescriptor {
 #[derive(Debug)]
 pub struct VertexState {
     pub module: ShaderModule,
-    pub entry_point: Option<String>,
+    pub entry_point_name: Option<String>,
+    pub entry_point_index: EntryPointIndex,
     pub compilation_options: PipelineCompilationOptions,
     pub buffers: Vec<VertexBufferLayout>,
 }
 
 impl VertexState {
     pub fn new(vertex: &wgpu::VertexState) -> Self {
+        let module = vertex.module.as_custom::<ShaderModule>().unwrap().clone();
+        let entry_point_index = module
+            .entry_point(vertex.entry_point.as_deref(), ShaderStage::Vertex)
+            .unwrap();
+
         Self {
-            module: vertex.module.as_custom::<ShaderModule>().unwrap().clone(),
-            entry_point: vertex.entry_point.map(ToOwned::to_owned),
+            module,
+            entry_point_name: vertex.entry_point.map(ToOwned::to_owned),
+            entry_point_index,
             compilation_options: PipelineCompilationOptions::new(&vertex.compilation_options),
             buffers: vertex
                 .buffers
@@ -136,16 +148,23 @@ impl VertexBufferLayout {
 #[derive(Debug)]
 pub struct FragmentState {
     pub module: ShaderModule,
-    pub entry_point: Option<String>,
+    pub entry_point_name: Option<String>,
+    pub entry_point_index: EntryPointIndex,
     pub compilation_options: PipelineCompilationOptions,
     pub targets: Vec<Option<wgpu::ColorTargetState>>,
 }
 
 impl FragmentState {
     pub fn new(fragment: &wgpu::FragmentState) -> Self {
+        let module = fragment.module.as_custom::<ShaderModule>().unwrap().clone();
+        let entry_point_index = module
+            .entry_point(fragment.entry_point.as_deref(), ShaderStage::Vertex)
+            .unwrap();
+
         Self {
-            module: fragment.module.as_custom::<ShaderModule>().unwrap().clone(),
-            entry_point: fragment.entry_point.map(ToOwned::to_owned),
+            module,
+            entry_point_name: fragment.entry_point.map(ToOwned::to_owned),
+            entry_point_index,
             compilation_options: PipelineCompilationOptions::new(&fragment.compilation_options),
             targets: fragment.targets.to_vec(),
         }

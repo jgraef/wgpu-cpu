@@ -12,8 +12,8 @@ mod render_pass;
 mod shader;
 #[cfg(feature = "softbuffer")]
 mod surface;
-mod sync;
 mod texture;
+mod util;
 
 #[cfg(feature = "image")]
 pub use image::dump_texture;

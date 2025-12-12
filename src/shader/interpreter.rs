@@ -10,46 +10,35 @@ use bytemuck::Pod;
 use half::f16;
 use naga::{
     BinaryOperator,
-    Binding,
     Block,
-    BuiltIn,
     Expression,
     Function,
     Handle,
-    Interpolation,
     Literal,
-    Sampling,
     Scalar,
     ScalarKind,
-    ShaderStage,
     Statement,
+    StructMember,
     Type,
     TypeInner,
-    UniqueArena,
     front::Typifier,
     proc::TypeResolution,
 };
 
-use crate::{
-    pipeline::VertexState,
-    shader::{
-        ShaderModule,
-        ShaderModuleInner,
+use crate::shader::{
+    EntryPointIndex,
+    ShaderModule,
+    ShaderModuleInner,
+    bindings::{
+        ApplyBindings,
+        ApplyInput,
+        ApplyOutput,
+        ShaderInput,
+        ShaderOutput,
     },
 };
 
-pub fn run_vertex_shader(vertex: &VertexState, builtin_inputs: &BuiltinVertexInputs) {
-    let module = &vertex.module.inner.module;
-
-    let mut virtual_machine = VirtualMachine::new(vertex.module.clone());
-    virtual_machine.run_entry_point(
-        vertex.entry_point.as_deref(),
-        ShaderStage::Vertex,
-        builtin_inputs,
-    );
-}
-
-#[derive(derive_more::Debug)]
+#[derive(Debug)]
 pub struct VirtualMachine {
     module: ShaderModule,
     stack: Stack,
@@ -63,60 +52,68 @@ impl<'a> VirtualMachine {
         }
     }
 
-    pub fn run_entry_point(
+    pub fn run_entry_point<I, O>(
         &mut self,
-        name: Option<&str>,
-        shader_stage: ShaderStage,
-        builtin_inputs: &BuiltinVertexInputs,
-    ) {
-        let (index, entry_point) = self
-            .module
-            .entry_point(name, shader_stage)
-            .unwrap_or_else(|| panic!("Vertex shader entry point with name {:?} not found", name));
+        entry_point_index: EntryPointIndex,
+        input: &I,
+        output: &mut O,
+    ) where
+        I: ShaderInput,
+        O: ShaderOutput,
+    {
+        let entry_point = &self.module[entry_point_index];
 
-        let mut outer_frame = self.stack.frame();
+        {
+            let mut outer_frame = self.stack.frame();
 
-        let result_variable = entry_point.function.result.as_ref().map(|function_result| {
-            outer_frame.allocate_variable(function_result.ty, &self.module.inner)
-        });
+            let result_variable = entry_point.function.result.as_ref().map(|function_result| {
+                outer_frame.allocate_variable(function_result.ty, &self.module.inner)
+            });
 
-        let argument_variables = entry_point
-            .function
-            .arguments
-            .iter()
-            .map(|argument| {
-                let variable = outer_frame.allocate_variable(argument.ty, &self.module.inner);
+            let argument_variables = entry_point
+                .function
+                .arguments
+                .iter()
+                .map(|argument| {
+                    let variable = outer_frame.allocate_variable(argument.ty, &self.module.inner);
+                    ApplyBindings {
+                        types: &self.module.module.types,
+                        apply_binding: ApplyInput {
+                            stack: &mut outer_frame.stack,
+                            input,
+                        },
+                    }
+                    .apply(argument.binding.as_ref(), argument.ty, variable);
+                    variable
+                })
+                .collect::<Vec<_>>();
+
+            RunFunction {
+                module: &self.module.inner,
+                function: &entry_point.function,
+                typifier: &self.module.inner.expression_types[entry_point_index],
+                frame: outer_frame.frame(),
+                arguments: &argument_variables,
+            }
+            .run(result_variable);
+
+            if let Some(result) = &entry_point.function.result {
                 ApplyBindings {
                     types: &self.module.module.types,
-                    apply_binding: ApplyVertexInput {
-                        stack: &mut outer_frame.stack,
-                        builtins: builtin_inputs,
+                    apply_binding: ApplyOutput {
+                        stack: &outer_frame.stack,
+                        output,
                     },
                 }
-                .apply(argument.binding.as_ref(), argument.ty, variable);
-                variable
-            })
-            .collect::<Vec<_>>();
-
-        RunFunction {
-            module: &self.module.inner,
-            function: &entry_point.function,
-            typifier: &self.module.inner.expression_types[index],
-            frame: outer_frame.frame(),
-            arguments: &argument_variables,
-        }
-        .run(result_variable);
-
-        if let Some(result) = &entry_point.function.result {
-            ApplyBindings {
-                types: &self.module.module.types,
-                apply_binding: PrintBindingOutputs {
-                    module: &self.module.inner,
-                    stack: &outer_frame.stack,
-                },
+                .apply(
+                    result.binding.as_ref(),
+                    result.ty,
+                    result_variable.unwrap(),
+                );
             }
-            .apply(result.binding.as_ref(), result.ty, result_variable.unwrap());
         }
+
+        tracing::debug!(stack_size = self.stack.allocated());
     }
 }
 
@@ -580,16 +577,9 @@ impl Stack {
     }
 
     pub fn allocate(&mut self, size: u32) -> StackPointer {
-        let stack_pointer = self.stack.len();
-        let new_size = stack_pointer + size as usize;
-
-        self.stack.resize(new_size, 0);
-
-        if stack_pointer < self.stack.len() {
-            self.stack[stack_pointer..new_size].fill(0);
-        }
-
-        StackPointer(stack_pointer)
+        let top = self.stack.len();
+        self.stack.resize(top + size as usize, 0);
+        StackPointer(top)
     }
 
     pub fn read<T>(&self, pointer: StackPointer) -> &T
@@ -611,6 +601,14 @@ impl Stack {
     pub fn copy(&mut self, target: StackPointer, source: StackPointer, len: u32) {
         let source_end = source + len;
         self.stack.copy_within(source.0..source_end.0, target.0);
+    }
+
+    pub fn size(&self) -> usize {
+        self.stack.len()
+    }
+
+    pub fn allocated(&self) -> usize {
+        self.stack.capacity()
     }
 }
 
@@ -740,6 +738,13 @@ impl<'a> Variable<'a> {
         Variable {
             ty: component_ty,
             stack_address: self.stack_address + offset,
+        }
+    }
+
+    pub fn member(&self, member: &StructMember) -> Variable<'a> {
+        Variable {
+            ty: member.ty.into(),
+            stack_address: self.stack_address + member.offset,
         }
     }
 }
@@ -901,145 +906,6 @@ fn write_literal(literal: &Literal, output: Variable, stack: &mut Stack) {
     }
 
     write_literal!(F32, F16, U32, I32);
-}
-
-pub trait ApplyBinding {
-    fn apply_builtin(&mut self, builtin: &BuiltIn, ty: Handle<Type>, variable: Variable);
-    fn apply_location(
-        &mut self,
-        location: u32,
-        interpolation: Option<Interpolation>,
-        sampling: Option<Sampling>,
-        blend_src: Option<u32>,
-        per_primitive: bool,
-    );
-}
-
-#[derive(Debug)]
-struct ApplyBindings<'a, B> {
-    types: &'a UniqueArena<Type>,
-    apply_binding: B,
-}
-
-impl<'a, B> ApplyBindings<'a, B>
-where
-    B: ApplyBinding,
-{
-    fn apply(&mut self, binding: Option<&Binding>, ty: Handle<Type>, variable: Variable) {
-        if let Some(binding) = binding {
-            self.apply_variable(binding, ty, variable);
-        }
-        else {
-            let argument_ty = &self.types[ty];
-            match &argument_ty.inner {
-                TypeInner::Struct { members, span } => {
-                    for member in members {
-                        let variable = Variable {
-                            ty: member.ty.into(),
-                            stack_address: variable.stack_address + member.offset,
-                        };
-                        self.apply(member.binding.as_ref(), member.ty, variable);
-                    }
-                }
-                _ => panic!("Invalid binding type: {:?}", argument_ty.inner),
-            }
-        }
-    }
-
-    fn apply_variable(&mut self, binding: &Binding, ty: Handle<Type>, variable: Variable) {
-        match binding {
-            Binding::BuiltIn(builtin) => {
-                self.apply_binding.apply_builtin(builtin, ty, variable);
-            }
-            Binding::Location {
-                location,
-                interpolation,
-                sampling,
-                blend_src,
-                per_primitive,
-            } => {
-                self.apply_binding.apply_location(
-                    *location,
-                    *interpolation,
-                    *sampling,
-                    *blend_src,
-                    *per_primitive,
-                );
-            }
-        }
-        // todo
-    }
-
-    fn fill_builtin_input(&mut self, builtin: &BuiltIn, ty: Handle<Type>, variable: Variable) {}
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct BuiltinVertexInputs {
-    pub vertex_index: u32,
-    pub instance_index: u32,
-}
-
-struct ApplyVertexInput<'a> {
-    stack: &'a mut Stack,
-    builtins: &'a BuiltinVertexInputs,
-}
-
-impl<'a> ApplyBinding for ApplyVertexInput<'a> {
-    fn apply_builtin(&mut self, builtin: &BuiltIn, ty: Handle<Type>, variable: Variable) {
-        macro_rules! builtin_inputs {
-            ($($variant:ident => $field:ident;)*) => {
-                match builtin {
-                    $(
-                        BuiltIn::$variant => {
-                            self.stack.write(variable.stack_address, &self.builtins.$field);
-                        }
-                    )*
-                    _ => {
-                        tracing::warn!("Builtin input binidng {builtin:?} not implemented");
-                    }
-                }
-            };
-        }
-
-        builtin_inputs!(
-            VertexIndex => vertex_index;
-            InstanceIndex => instance_index;
-        );
-    }
-
-    fn apply_location(
-        &mut self,
-        location: u32,
-        interpolation: Option<Interpolation>,
-        sampling: Option<Sampling>,
-        blend_src: Option<u32>,
-        per_primitive: bool,
-    ) {
-        todo!("apply input location binding");
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PrintBindingOutputs<'a> {
-    module: &'a ShaderModuleInner,
-    stack: &'a Stack,
-}
-
-impl<'a> ApplyBinding for PrintBindingOutputs<'a> {
-    fn apply_builtin(&mut self, builtin: &BuiltIn, ty: Handle<Type>, variable: Variable) {
-        tracing::debug!(?builtin, ?ty, value = ?variable.debug(self.module, self.stack));
-    }
-
-    fn apply_location(
-        &mut self,
-        location: u32,
-        interpolation: Option<Interpolation>,
-        sampling: Option<Sampling>,
-        blend_src: Option<u32>,
-        per_primitive: bool,
-    ) {
-        todo!()
-    }
 }
 
 #[derive(Clone, Copy)]
