@@ -16,6 +16,7 @@ use naga::{
     Function,
     Handle,
     Literal,
+    Range,
     Scalar,
     ScalarKind,
     Statement,
@@ -102,6 +103,7 @@ impl<B> VirtualMachine<B> {
                 typifier: &self.module.inner.expression_types[entry_point_index],
                 stack_frame: outer_frame.frame(),
                 arguments: &argument_variables,
+                emitted_expression: vec![],
             }
             .run(result_variable);
 
@@ -120,39 +122,43 @@ impl<B> VirtualMachine<B> {
     }
 }
 
-#[derive(derive_more::Debug)]
-pub struct RunFunction<'a, B> {
-    module: &'a ShaderModuleInner,
-    function: &'a Function,
-    typifier: &'a Typifier,
-    stack_frame: StackFrame<'a, B>,
-    arguments: &'a [Variable<'a>],
+#[derive(Debug)]
+pub struct RunFunction<'module, 'memory, B> {
+    module: &'module ShaderModuleInner,
+    function: &'module Function,
+    typifier: &'module Typifier,
+    stack_frame: StackFrame<'memory, B>,
+    arguments: &'module [Variable<'module>],
+    emitted_expression: Vec<Option<Variable<'module>>>,
 }
 
-impl<'a, B> RunFunction<'a, B>
+impl<'module, 'memory, B> RunFunction<'module, 'memory, B>
 where
     B: ReadWriteMemory<BindingAddress>,
 {
-    pub fn frame(&mut self) -> RunFunction<'_, B> {
+    pub fn with_frame<R>(&mut self, f: impl FnOnce(&mut RunFunction<'module, '_, B>) -> R) -> R {
+        let mut inner = self.frame();
+        f(&mut inner)
+    }
+
+    pub fn frame(&mut self) -> RunFunction<'module, '_, B> {
         RunFunction {
             module: &self.module,
             function: &self.function,
             typifier: &self.typifier,
             stack_frame: self.stack_frame.frame(),
             arguments: self.arguments,
+            emitted_expression: vec![],
         }
     }
 
-    pub fn with_frame<R>(&mut self, f: impl FnOnce(&mut RunFunction<'_, B>) -> R) -> R {
-        let mut inner = self.frame();
-        f(&mut inner)
-    }
-
     pub fn run(&mut self, output: Option<Variable>) {
-        if let Some(result) = match self.run_block(&self.function.body) {
+        let result = match self.run_block(&self.function.body) {
             ControlFlow::Continue(()) => None,
             ControlFlow::Break(Break::Return(return_value)) => return_value,
-        } {
+        };
+
+        if let Some(result) = result {
             self.evaluate(&self.function.expressions[result], output.unwrap());
         };
     }
@@ -167,7 +173,7 @@ where
     pub fn run_statement(&mut self, statement: &Statement) -> ControlFlow<Break> {
         match statement {
             Statement::Emit(range) => {
-                // nop?
+                self.run_emit(range.clone())?;
             }
             Statement::Block(block) => self.run_block(block)?,
             Statement::If {
@@ -175,23 +181,7 @@ where
                 accept,
                 reject,
             } => {
-                let condition = self.with_frame(|inner| {
-                    let condition = &inner.function.expressions[*condition];
-                    let condition_ty = TypeResolution::Value(TypeInner::Scalar(Scalar::BOOL));
-                    let condition_output = inner
-                        .stack_frame
-                        .allocate_variable(&condition_ty, &inner.module);
-
-                    inner.evaluate(condition, condition_output);
-                    *condition_output.read::<u32, _>(&inner.stack_frame.memory)
-                });
-
-                if condition != 0 {
-                    self.run_block(accept)?;
-                }
-                else {
-                    self.run_block(reject)?;
-                }
+                self.run_if(*condition, accept, reject)?;
             }
             Statement::Switch { selector, cases } => todo!(),
             Statement::Loop {
@@ -249,9 +239,67 @@ where
         ControlFlow::Continue(())
     }
 
+    pub fn run_emit(&mut self, range: Range<Expression>) -> ControlFlow<Break> {
+        self.emitted_expression.resize(
+            self.emitted_expression
+                .len()
+                .max(range.index_range().end as usize),
+            None,
+        );
+
+        for handle in range {
+            if self.emitted_expression[handle.index() as usize].is_none() {
+                let variable = self
+                    .stack_frame
+                    .allocate_variable(&self.typifier[handle], &self.module);
+                let expression = &self.function.expressions[handle];
+
+                tracing::debug!(?handle, ?variable, ?expression, "emit");
+
+                self.evaluate(expression, variable);
+
+                self.emitted_expression[handle.index() as usize] = Some(variable);
+            }
+        }
+
+        todo!();
+    }
+
+    pub fn run_if(
+        &mut self,
+        condition: Handle<Expression>,
+        accept: &Block,
+        reject: &Block,
+    ) -> ControlFlow<Break> {
+        let condition = {
+            let mut inner = self.frame();
+
+            let condition = &inner.function.expressions[condition];
+            let condition_ty = TypeResolution::Value(TypeInner::Scalar(Scalar::BOOL));
+            let condition_output = inner
+                .stack_frame
+                .allocate_variable(&condition_ty, &inner.module);
+
+            inner.evaluate(condition, condition_output);
+
+            *condition_output.read::<u32, _>(&inner.stack_frame.memory)
+        };
+
+        if condition != 0 {
+            self.run_block(accept)?;
+        }
+        else {
+            self.run_block(reject)?;
+        }
+
+        ControlFlow::Continue(())
+    }
+
     pub fn evaluate(&mut self, expression: &Expression, output: Variable) {
         tracing::trace!(?expression, "evaluate");
 
+        // this always creates a new stack frame and cleans it up at the end of the
+        // evaluation
         let mut inner = self.frame();
 
         match expression {
@@ -265,7 +313,19 @@ where
                 inner.evaluate_compose(*ty, &components, output);
             }
             Expression::Access { base, index } => todo!(),
-            Expression::AccessIndex { base, index } => todo!(),
+            Expression::AccessIndex { base, index } => {
+                let base_ty = &inner.typifier[*base];
+                let base_variable = inner.stack_frame.allocate_variable(base_ty, &inner.module);
+                let base_expression = &inner.function.expressions[*base];
+
+                tracing::debug!(?base, ?base_ty, ?base_expression, ?index);
+
+                //self.evaluate(expression, output);
+
+                todo!();
+                //self.evaluate_access_index(*base, *index);
+                // todo
+            }
             Expression::Splat { size, value } => todo!(),
             Expression::Swizzle {
                 size,
