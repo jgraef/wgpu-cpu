@@ -161,7 +161,6 @@ impl ReadMemory<Binding> for FragmentInput {
 pub struct FragmentOutput<C> {
     pub color_attachments: C,
     pub raster: Point2<u32>,
-    pub t: f32,
 }
 
 impl<C> WriteMemory<Binding> for FragmentOutput<C>

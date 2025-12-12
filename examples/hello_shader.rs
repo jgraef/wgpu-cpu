@@ -1,8 +1,15 @@
 #![allow(unused)]
 
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::Arc,
+};
 
-use color_eyre::eyre::Error;
+use clap::Parser;
+use color_eyre::{
+    Section,
+    eyre::Error,
+};
 use dotenvy::dotenv;
 use wgpu::{
     Adapter,
@@ -40,12 +47,28 @@ use winit::{
     },
 };
 
+#[derive(Debug, Parser)]
+struct Args {
+    #[clap(short, long, default_value = "3")]
+    vertices: u32,
+
+    #[clap(short, long, default_value = "examples/triangle.wgsl")]
+    shader: PathBuf,
+
+    #[clap(short, long)]
+    output: Option<PathBuf>,
+}
+
 pub fn main() -> Result<(), Error> {
     let _ = dotenv();
     color_eyre::install()?;
     tracing_subscriber::fmt::init();
 
-    tracing::info!("Hello Shader!");
+    let args = Args::parse();
+    let shader_source = std::fs::read_to_string(&args.shader)
+        .with_section(|| format!("Path: {}", args.shader.display()))?;
+
+    tracing::info!(?args, "Hello Shader!");
 
     let instance = Instance::from_custom(wgpu_cpu::Instance::default());
 
@@ -55,7 +78,10 @@ pub fn main() -> Result<(), Error> {
         Ok::<_, Error>((adapter, device, queue))
     })?;
 
-    let shader_module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(&args.shader.display().to_string()),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("hello_shader pipeline layout"),
@@ -147,7 +173,10 @@ pub fn main() -> Result<(), Error> {
     });
     tracing::debug!(?poll_result);
 
-    wgpu_cpu::dump_texture(&target_texture, "tmp/test.png")?;
+    if let Some(output) = &args.output {
+        tracing::info!(path = %output.display(), "Writing rendered image");
+        wgpu_cpu::dump_texture(&target_texture, output)?;
+    }
 
     tracing::info!("Example quitting");
 

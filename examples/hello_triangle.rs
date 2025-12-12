@@ -77,7 +77,7 @@ impl App {
             Ok::<_, Error>((adapter, device, queue))
         })?;
 
-        let shader_module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let shader_module = device.create_shader_module(wgpu::include_wgsl!("triangle.wgsl"));
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("hello_triangle pipeline layout"),
