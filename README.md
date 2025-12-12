@@ -13,3 +13,4 @@ Issues that can be raised with `wgpu`:
 - [ ] `InstanceInterface::new` doesn't serve a purpose?
 - [ ] naga really needs something that returns `TypeLayout` for a `TypeInner`. type resolution sometimes can't give you a handle, so `Layouter` won't always do.
 - [ ] naga: can matrices and vectors really only be multiplied by floats, or by their scalar type? (http://localhost:8001/wgpu/naga/ir/enum.BinaryOperator.html#arithmetic-type-rules)
+- [x] naga: make `naga::ir::Binding` `Copy`

@@ -25,6 +25,7 @@ use crate::{
             VertexOutput,
         },
         interpreter::VirtualMachine,
+        memory::NullMemory,
     },
     texture::{
         TextureInfo,
@@ -480,10 +481,10 @@ impl<'color> State<'color> {
             );
 
             let vertex_state = &pipeline.descriptor.vertex;
-            let mut vertex_vm = VirtualMachine::new(vertex_state.module.clone());
+            let mut vertex_vm = VirtualMachine::new(vertex_state.module.clone(), NullMemory);
 
             let mut fragment_state = pipeline.descriptor.fragment.as_ref().map(|fragment_state| {
-                let vm = VirtualMachine::new(fragment_state.module.clone());
+                let vm = VirtualMachine::new(fragment_state.module.clone(), NullMemory);
                 (fragment_state, vm)
             });
 
@@ -529,7 +530,7 @@ impl<'color> State<'color> {
                                         sample_mask: !0,
                                     },
                                     &mut FragmentOutput {
-                                        color_attachments: &mut self.color_attachments,
+                                        color_attachments: &mut *self.color_attachments,
                                         raster: fragment.raster,
                                         t: fragment.t,
                                     },

@@ -10,6 +10,7 @@ use bytemuck::Pod;
 use half::f16;
 use naga::{
     BinaryOperator,
+    Binding,
     Block,
     Expression,
     Function,
@@ -30,41 +31,52 @@ use crate::shader::{
     ShaderModule,
     ShaderModuleInner,
     bindings::{
-        ApplyBindings,
-        ApplyInput,
-        ApplyOutput,
-        ShaderInput,
-        ShaderOutput,
+        BindingAddress,
+        copy_shader_inputs_to_stack,
+        copy_shader_outputs_from_stack,
+    },
+    memory::{
+        Memory,
+        ReadMemory,
+        ReadWriteMemory,
+        Slice,
+        Stack,
+        StackFrame,
+        WriteMemory,
     },
 };
 
 #[derive(Debug)]
-pub struct VirtualMachine {
+pub struct VirtualMachine<B> {
     module: ShaderModule,
-    stack: Stack,
+    memory: Memory<B>,
 }
 
-impl<'a> VirtualMachine {
-    pub fn new(module: ShaderModule) -> Self {
+impl<B> VirtualMachine<B> {
+    pub fn new(module: ShaderModule, bindings: B) -> Self {
         Self {
             module,
-            stack: Stack::new(0x1000),
+            memory: Memory {
+                stack: Stack::new(0x1000),
+                bindings,
+            },
         }
     }
 
     pub fn run_entry_point<I, O>(
         &mut self,
         entry_point_index: EntryPointIndex,
-        input: &I,
-        output: &mut O,
+        inputs: I,
+        outputs: O,
     ) where
-        I: ShaderInput,
-        O: ShaderOutput,
+        I: ReadMemory<Binding>,
+        O: WriteMemory<Binding>,
+        B: ReadWriteMemory<BindingAddress>,
     {
         let entry_point = &self.module[entry_point_index];
 
         {
-            let mut outer_frame = self.stack.frame();
+            let mut outer_frame = self.memory.stack_frame();
 
             let result_variable = entry_point.function.result.as_ref().map(|function_result| {
                 outer_frame.allocate_variable(function_result.ty, &self.module.inner)
@@ -75,16 +87,12 @@ impl<'a> VirtualMachine {
                 .arguments
                 .iter()
                 .map(|argument| {
-                    let variable = outer_frame.allocate_variable(argument.ty, &self.module.inner);
-                    ApplyBindings {
-                        types: &self.module.module.types,
-                        apply_binding: ApplyInput {
-                            stack: &mut outer_frame.stack,
-                            input,
-                        },
-                    }
-                    .apply(argument.binding.as_ref(), argument.ty, variable);
-                    variable
+                    copy_shader_inputs_to_stack(
+                        &mut outer_frame,
+                        &self.module.inner,
+                        &inputs,
+                        argument,
+                    )
                 })
                 .collect::<Vec<_>>();
 
@@ -92,52 +100,50 @@ impl<'a> VirtualMachine {
                 module: &self.module.inner,
                 function: &entry_point.function,
                 typifier: &self.module.inner.expression_types[entry_point_index],
-                frame: outer_frame.frame(),
+                stack_frame: outer_frame.frame(),
                 arguments: &argument_variables,
             }
             .run(result_variable);
 
             if let Some(result) = &entry_point.function.result {
-                ApplyBindings {
-                    types: &self.module.module.types,
-                    apply_binding: ApplyOutput {
-                        stack: &outer_frame.stack,
-                        output,
-                    },
-                }
-                .apply(
-                    result.binding.as_ref(),
-                    result.ty,
+                copy_shader_outputs_from_stack(
+                    &outer_frame,
+                    &self.module.inner,
+                    outputs,
+                    &result,
                     result_variable.unwrap(),
                 );
             }
         }
 
-        tracing::trace!(stack_size = self.stack.allocated());
+        tracing::trace!(stack_size = self.memory.stack.allocated());
     }
 }
 
 #[derive(derive_more::Debug)]
-pub struct RunFunction<'a> {
+pub struct RunFunction<'a, B> {
     module: &'a ShaderModuleInner,
     function: &'a Function,
     typifier: &'a Typifier,
-    frame: StackFrame<'a>,
+    stack_frame: StackFrame<'a, B>,
     arguments: &'a [Variable<'a>],
 }
 
-impl<'a> RunFunction<'a> {
-    pub fn frame(&mut self) -> RunFunction<'_> {
+impl<'a, B> RunFunction<'a, B>
+where
+    B: ReadWriteMemory<BindingAddress>,
+{
+    pub fn frame(&mut self) -> RunFunction<'_, B> {
         RunFunction {
             module: &self.module,
             function: &self.function,
             typifier: &self.typifier,
-            frame: self.frame.frame(),
+            stack_frame: self.stack_frame.frame(),
             arguments: self.arguments,
         }
     }
 
-    pub fn with_frame<R>(&mut self, f: impl FnOnce(&mut RunFunction) -> R) -> R {
+    pub fn with_frame<R>(&mut self, f: impl FnOnce(&mut RunFunction<'_, B>) -> R) -> R {
         let mut inner = self.frame();
         f(&mut inner)
     }
@@ -172,11 +178,12 @@ impl<'a> RunFunction<'a> {
                 let condition = self.with_frame(|inner| {
                     let condition = &inner.function.expressions[*condition];
                     let condition_ty = TypeResolution::Value(TypeInner::Scalar(Scalar::BOOL));
-                    let condition_output =
-                        inner.frame.allocate_variable(&condition_ty, &inner.module);
+                    let condition_output = inner
+                        .stack_frame
+                        .allocate_variable(&condition_ty, &inner.module);
 
                     inner.evaluate(condition, condition_output);
-                    *condition_output.read::<u32>(&inner.frame.stack)
+                    *condition_output.read::<u32, _>(&inner.stack_frame.memory)
                 });
 
                 if condition != 0 {
@@ -249,7 +256,7 @@ impl<'a> RunFunction<'a> {
 
         match expression {
             Expression::Literal(literal) => {
-                write_literal(literal, output, &mut inner.frame.stack);
+                write_literal(literal, output, &mut inner.stack_frame.memory);
             }
             Expression::Constant(handle) => todo!(),
             Expression::Override(handle) => todo!(),
@@ -269,7 +276,7 @@ impl<'a> RunFunction<'a> {
                 let index = *index as usize;
                 let input_variable = inner.arguments[index];
                 let function_argument = &inner.function.arguments[index];
-                output.copy_from(input_variable, &mut inner.frame.stack, &inner.module);
+                output.copy_from(input_variable, &mut inner.stack_frame.memory);
             }
             Expression::GlobalVariable(handle) => todo!(),
             Expression::LocalVariable(handle) => todo!(),
@@ -356,7 +363,7 @@ impl<'a> RunFunction<'a> {
 
         let input_variable = if let Some(new_width) = convert {
             // allocate some temporary variable for this
-            self.frame.allocate_variable(input_ty, self.module)
+            self.stack_frame.allocate_variable(input_ty, self.module)
         }
         else {
             // this is a bitcast, so we can evaluate to the same output variable
@@ -375,7 +382,7 @@ impl<'a> RunFunction<'a> {
                     *input_scalar,
                     output_variable,
                     *output_scalar,
-                    &mut self.frame.stack,
+                    &mut self.stack_frame.memory,
                 );
             }
             (
@@ -403,12 +410,12 @@ impl<'a> RunFunction<'a> {
     ) {
         let left_ty = &self.typifier[left];
         let left_expression = &self.function.expressions[left];
-        let left_variable = self.frame.allocate_variable(left_ty, self.module);
+        let left_variable = self.stack_frame.allocate_variable(left_ty, self.module);
         self.evaluate(left_expression, left_variable);
 
         let right_ty = &self.typifier[right];
         let right_expression = &self.function.expressions[right];
-        let right_variable = self.frame.allocate_variable(right_ty, self.module);
+        let right_variable = self.stack_frame.allocate_variable(right_ty, self.module);
         self.evaluate(right_expression, right_variable);
 
         let left_ty_inner = left_ty.inner_with(&self.module.module.types);
@@ -422,7 +429,7 @@ impl<'a> RunFunction<'a> {
                     left_variable,
                     right_variable,
                     output,
-                    &mut self.frame.stack,
+                    &mut self.stack_frame.memory,
                 );
             }
 
@@ -541,113 +548,6 @@ pub enum Break {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Value {
-    F64(f64),
-    F32(f32),
-    F16(f16),
-    U32(u32),
-    I32(i32),
-    U64(u64),
-    I64(i64),
-    Bool(bool),
-    Stack {
-        stack_pointer: StackPointer,
-        ty: Handle<Type>,
-    },
-}
-
-#[derive(derive_more::Debug)]
-pub struct Stack {
-    #[debug("[... {} bytes]", self.stack.len())]
-    stack: Vec<u8>,
-    limit: usize,
-}
-
-impl Stack {
-    pub fn new(limit: u32) -> Self {
-        Self {
-            stack: vec![],
-            limit: limit.try_into().unwrap(),
-        }
-    }
-
-    pub fn frame(&mut self) -> StackFrame<'_> {
-        let start = self.stack.len();
-        StackFrame { stack: self, start }
-    }
-
-    pub fn allocate(&mut self, size: u32) -> StackPointer {
-        let top = self.stack.len();
-        self.stack.resize(top + size as usize, 0);
-        StackPointer(top)
-    }
-
-    pub fn read<T>(&self, pointer: StackPointer) -> &T
-    where
-        T: Pod,
-    {
-        let n = std::mem::size_of::<T>();
-        bytemuck::from_bytes(&self.stack[pointer.0..][..n])
-    }
-
-    pub fn write<T>(&mut self, pointer: StackPointer, value: &T)
-    where
-        T: Pod,
-    {
-        let n = std::mem::size_of::<T>();
-        self.stack[pointer.0..][..n].copy_from_slice(bytemuck::bytes_of(value));
-    }
-
-    pub fn copy(&mut self, target: StackPointer, source: StackPointer, len: u32) {
-        let source_end = source + len;
-        self.stack.copy_within(source.0..source_end.0, target.0);
-    }
-
-    pub fn size(&self) -> usize {
-        self.stack.len()
-    }
-
-    pub fn allocated(&self) -> usize {
-        self.stack.capacity()
-    }
-}
-
-#[derive(Debug)]
-pub struct StackFrame<'a> {
-    stack: &'a mut Stack,
-    start: usize,
-}
-
-impl<'a> StackFrame<'a> {
-    pub fn frame(&mut self) -> StackFrame<'_> {
-        self.stack.frame()
-    }
-
-    pub fn allocate(&mut self, size: u32) -> StackPointer {
-        self.stack.allocate(size)
-    }
-
-    pub fn allocate_variable<'ty>(
-        &mut self,
-        ty: impl Into<VariableType<'ty>>,
-        module: &ShaderModuleInner,
-    ) -> Variable<'ty> {
-        let ty = ty.into();
-        let inner = ty.inner_with(module);
-        let size = inner.size(module.module.to_ctx());
-        let stack_address = self.allocate(size);
-        Variable { ty, stack_address }
-    }
-}
-
-impl<'a> Drop for StackFrame<'a> {
-    fn drop(&mut self) {
-        assert!(self.start <= self.stack.stack.len());
-        self.stack.stack.resize(self.start, 0);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 pub enum VariableType<'a> {
     Handle(Handle<Type>),
     Inner(&'a TypeInner),
@@ -685,45 +585,51 @@ impl<'a> From<&'a TypeResolution> for VariableType<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Variable<'a> {
-    ty: VariableType<'a>,
-    stack_address: StackPointer,
+    pub ty: VariableType<'a>,
+    pub slice: Slice,
 }
 
 impl<'a> Variable<'a> {
-    pub fn read<'b, T>(&self, stack: &'b Stack) -> &'b T
+    pub fn read<'m, T, M>(&self, memory: &'m M) -> &'m T
     where
         T: Pod,
+        M: ReadMemory<Slice>,
     {
-        stack.read::<T>(self.stack_address)
+        let n = size_of::<T>();
+        bytemuck::from_bytes(&memory.read(self.slice.slice(..n)))
     }
 
-    pub fn write<T>(&self, stack: &mut Stack, value: &T)
+    pub fn write<T, M>(&self, memory: &mut M, value: &T)
     where
         T: Pod,
+        M: WriteMemory<Slice>,
     {
-        stack.write::<T>(self.stack_address, value);
+        let n = size_of::<T>();
+        memory.write(self.slice.slice(..n), bytemuck::bytes_of(value))
     }
 
-    pub fn copy_from(&self, source: Variable, stack: &mut Stack, module: &ShaderModuleInner) {
-        let target_size = self.ty.inner_with(module).size(module.module.to_ctx());
-        let source_size = source.ty.inner_with(module).size(module.module.to_ctx());
-        assert_eq!(target_size, source_size);
-
-        stack.copy(self.stack_address, source.stack_address, target_size);
+    pub fn copy_from<M>(&self, source: Variable, memory: &mut M)
+    where
+        M: ReadWriteMemory<Slice>,
+    {
+        memory.copy(source.slice, self.slice);
     }
 
     pub fn cast(&self, ty: impl Into<VariableType<'a>>) -> Self {
         Self {
             ty: ty.into(),
-            stack_address: self.stack_address,
+            slice: self.slice,
         }
     }
 
-    pub fn debug(&self, module: &'a ShaderModuleInner, stack: &'a Stack) -> VariableDebug<'a> {
+    pub fn debug<M>(&self, module: &'a ShaderModuleInner, memory: &'a M) -> VariableDebug<'a, M>
+    where
+        M: ReadMemory<Slice>,
+    {
         VariableDebug {
             variable: *self,
             module,
-            stack,
+            memory,
         }
     }
 
@@ -737,14 +643,14 @@ impl<'a> Variable<'a> {
         let offset = offset_of(self.ty, component_ty, index, module);
         Variable {
             ty: component_ty,
-            stack_address: self.stack_address + offset,
+            slice: self.slice.slice(offset..),
         }
     }
 
     pub fn member(&self, member: &StructMember) -> Variable<'a> {
         Variable {
             ty: member.ty.into(),
-            stack_address: self.stack_address + member.offset,
+            slice: self.slice.slice(member.offset..),
         }
     }
 }
@@ -784,14 +690,16 @@ fn offset_of(
     }
 }
 
-fn scalar_binary_op(
+fn scalar_binary_op<M>(
     op: BinaryOperator,
     scalar_ty: Scalar,
     left: Variable,
     right: Variable,
     output: Variable,
-    stack: &mut Stack,
-) {
+    memory: &mut M,
+) where
+    M: ReadWriteMemory<Slice>,
+{
     use std::ops::*;
 
     macro_rules! binary_ops {
@@ -799,10 +707,10 @@ fn scalar_binary_op(
             match (scalar_ty.kind, scalar_ty.width, op) {
                 $(
                     (ScalarKind::$scalar, $width, BinaryOperator::$op) => {
-                        let left = left.read::<$ty>(stack);
-                        let right = right.read::<$ty>(stack);
+                        let left = left.read::<$ty, M>(memory);
+                        let right = right.read::<$ty, M>(memory);
                         let result = $func(left, right);
-                        output.write::<$ty>(stack, &result);
+                        output.write::<$ty, M>(memory, &result);
                         return;
                     },
                 )*
@@ -853,13 +761,15 @@ fn scalar_binary_op(
     );
 }
 
-fn convert_scalar(
+fn convert_scalar<M>(
     input_variable: Variable,
     input_scalar: Scalar,
     output_variable: Variable,
     output_scalar: Scalar,
-    stack: &mut Stack,
-) {
+    memory: &mut M,
+) where
+    M: ReadWriteMemory<Slice>,
+{
     macro_rules! convert_scalar {
         ($(($scalar_in:ident @ $width_in:pat) as ($scalar_out:ident @ $width_out:pat) => $func:expr;)*) => {
             match (
@@ -870,9 +780,9 @@ fn convert_scalar(
             ) {
                 $(
                     (ScalarKind::$scalar_in, $width_in, ScalarKind::$scalar_out, $width_out) => {
-                        let input = input_variable.read(stack);
+                        let input = input_variable.read(memory);
                         let output = ($func)(*input);
-                        output_variable.write(stack, &output);
+                        output_variable.write(memory, &output);
                     }
                 )*
                 _ => panic!("Unsupported cast from {input_scalar:?} to {output_scalar:?}"),
@@ -888,13 +798,16 @@ fn convert_scalar(
     );
 }
 
-fn write_literal(literal: &Literal, output: Variable, stack: &mut Stack) {
+fn write_literal<M>(literal: &Literal, output: Variable, memory: &mut M)
+where
+    M: WriteMemory<Slice>,
+{
     macro_rules! write_literal {
         ($($variant:ident),*) => {
             match literal {
                 $(
                     Literal::$variant(value) => {
-                        output.write(stack, value);
+                        output.write(memory, value);
                     }
                 )*
                 _ => panic!("Unsupported literal: {literal:?}"),
@@ -906,13 +819,16 @@ fn write_literal(literal: &Literal, output: Variable, stack: &mut Stack) {
 }
 
 #[derive(Clone, Copy)]
-pub struct VariableDebug<'a> {
+pub struct VariableDebug<'a, M> {
     variable: Variable<'a>,
     module: &'a ShaderModuleInner,
-    stack: &'a Stack,
+    memory: &'a M,
 }
 
-impl<'a> VariableDebug<'a> {
+impl<'a, M> VariableDebug<'a, M>
+where
+    M: ReadMemory<Slice>,
+{
     fn write_scalar(
         &self,
         variable: Variable,
@@ -927,7 +843,7 @@ impl<'a> VariableDebug<'a> {
                     ) {
                         $(
                             (ScalarKind::$scalar, $width) => {
-                                let input = variable.read::<$ty>(self.stack);
+                                let input = variable.read::<$ty, M>(self.memory);
                                 write!(f, "{input:?}")?;
                             }
                         )*
@@ -949,7 +865,10 @@ impl<'a> VariableDebug<'a> {
     }
 }
 
-impl<'a> Debug for VariableDebug<'a> {
+impl<'a, M> Debug for VariableDebug<'a, M>
+where
+    M: ReadMemory<Slice>,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ty = self.variable.ty.inner_with(&self.module);
 
