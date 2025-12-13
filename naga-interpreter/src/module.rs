@@ -1,17 +1,6 @@
-pub mod bindings;
-pub mod interpreter;
-pub mod memory;
-#[cfg(test)]
-mod tests;
-pub mod util;
-
 use std::{
     collections::HashMap,
-    ops::{
-        Deref,
-        Index,
-    },
-    sync::Arc,
+    ops::Index,
 };
 
 use naga::{
@@ -34,11 +23,10 @@ use naga::{
         Validator,
     },
 };
-use wgpu::custom::ShaderModuleInterface;
 
-use crate::shader::{
+use crate::{
     bindings::{
-        UserDefinedInterStageLayout,
+        UserDefinedIoLayout,
         collect_user_defined_inter_stage_layout_from_function_arguments,
         collect_user_defined_inter_stage_layout_from_function_result,
     },
@@ -49,21 +37,20 @@ use crate::shader::{
     },
 };
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ShaderModule {
-    inner: Arc<ShaderModuleInner>,
+    pub(crate) module: Module,
+    #[allow(unused)]
+    module_info: ModuleInfo,
+    layouter: Layouter,
+    entry_points_by_name: HashMap<String, usize>,
+    unique_entry_points_by_stage: HashMap<ShaderStage, usize>,
+    pub(crate) expression_types: ExpressionTypes,
+    user_defined_io_layouts: UserDefinedIoLayouts,
 }
 
 impl ShaderModule {
-    pub fn new(
-        shader_source: wgpu::ShaderSource,
-        shader_bound_checks: wgpu::ShaderRuntimeChecks,
-    ) -> Result<Self, Error> {
-        let module = match shader_source {
-            wgpu::ShaderSource::Wgsl(wgsl) => naga::front::wgsl::parse_str(&wgsl)?,
-            _ => return Err(Error::Unsupported),
-        };
-
+    pub fn new(module: naga::Module) -> Self {
         let mut validator = Validator::new(Default::default(), Default::default());
         let module_info = validator.validate(&module).unwrap();
 
@@ -133,45 +120,19 @@ impl ShaderModule {
         }
         unique_entry_points_by_stage.retain(|_, index| *index != usize::MAX);
 
-        Ok(Self {
-            inner: Arc::new(ShaderModuleInner {
-                module,
-                module_info,
-                layouter,
-                compilation_info: wgpu::CompilationInfo { messages: vec![] },
-                entry_points_by_name,
-                unique_entry_points_by_stage,
-                expression_types,
-                user_defined_io_layouts: UserDefinedIoLayouts {
-                    inner: user_defined_io_layouts,
-                },
-            }),
-        })
+        Self {
+            module,
+            module_info,
+            layouter,
+            entry_points_by_name,
+            unique_entry_points_by_stage,
+            expression_types,
+            user_defined_io_layouts: UserDefinedIoLayouts {
+                inner: user_defined_io_layouts,
+            },
+        }
     }
-}
 
-impl ShaderModuleInterface for ShaderModule {
-    fn get_compilation_info(
-        &self,
-    ) -> std::pin::Pin<Box<dyn wgpu::custom::ShaderCompilationInfoFuture>> {
-        let compilation_info = self.inner.compilation_info.clone();
-        Box::pin(async move { compilation_info })
-    }
-}
-
-#[derive(Debug)]
-pub struct ShaderModuleInner {
-    pub module: Module,
-    pub module_info: ModuleInfo,
-    pub layouter: Layouter,
-    pub compilation_info: wgpu::CompilationInfo,
-    pub entry_points_by_name: HashMap<String, usize>,
-    pub unique_entry_points_by_stage: HashMap<ShaderStage, usize>,
-    pub expression_types: ExpressionTypes,
-    pub user_defined_io_layouts: UserDefinedIoLayouts,
-}
-
-impl ShaderModuleInner {
     pub fn type_layout<'t>(&self, ty: impl Into<VariableType<'t>>) -> TypeLayout {
         // https://gpuweb.github.io/gpuweb/wgsl/#memory-layouts
 
@@ -193,7 +154,7 @@ impl ShaderModuleInner {
         }
     }
 
-    pub fn entry_point(
+    pub fn find_entry_point(
         &self,
         name: Option<&str>,
         stage: ShaderStage,
@@ -245,6 +206,10 @@ impl ShaderModuleInner {
         let inner = ty.into().inner_with(self);
         inner.size(self.module.to_ctx())
     }
+
+    pub fn user_defined_io_layout(&self, entry_point: EntryPointIndex) -> &UserDefinedIoLayout {
+        &self.user_defined_io_layouts[entry_point]
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -255,29 +220,12 @@ pub enum EntryPointNotFound {
     NoUniqueForStage { stage: ShaderStage },
 }
 
-impl Deref for ShaderModule {
-    type Target = ShaderModuleInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl Index<EntryPointIndex> for ShaderModuleInner {
+impl Index<EntryPointIndex> for ShaderModule {
     type Output = EntryPoint;
 
     fn index(&self, index: EntryPointIndex) -> &Self::Output {
         &self.module.entry_points[index.0]
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Provided shader source variant is not supported")]
-    Unsupported,
-
-    #[error(transparent)]
-    ParseError(#[from] naga::front::wgsl::ParseError),
 }
 
 #[derive(Debug)]
@@ -320,7 +268,7 @@ fn typifier_from_function(module: &Module, function: &Function) -> Typifier {
 pub struct EntryPointIndex(pub usize);
 
 #[derive(Clone, Debug)]
-pub struct UserDefinedIoLayouts {
+struct UserDefinedIoLayouts {
     inner: SparseVec<UserDefinedIoLayout>,
 }
 
@@ -330,16 +278,4 @@ impl Index<EntryPointIndex> for UserDefinedIoLayouts {
     fn index(&self, index: EntryPointIndex) -> &Self::Output {
         &self.inner[index.0]
     }
-}
-
-#[derive(Clone, Debug)]
-pub enum UserDefinedIoLayout {
-    Vertex {
-        // todo: input
-        output: UserDefinedInterStageLayout,
-    },
-    Fragment {
-        input: UserDefinedInterStageLayout,
-        // output: don't need it, but would be handy for verification
-    },
 }

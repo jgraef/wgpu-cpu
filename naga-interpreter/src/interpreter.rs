@@ -35,10 +35,7 @@ use num_traits::{
     Zero,
 };
 
-use crate::shader::{
-    EntryPointIndex,
-    ShaderModule,
-    ShaderModuleInner,
+use crate::{
     bindings::{
         BindingAddress,
         ShaderInput,
@@ -56,6 +53,10 @@ use crate::shader::{
         StackFrame,
         WriteMemory,
     },
+    module::{
+        EntryPointIndex,
+        ShaderModule,
+    },
     util::{
         CoArena,
         SparseCoArena,
@@ -63,13 +64,13 @@ use crate::shader::{
 };
 
 #[derive(Debug)]
-pub struct VirtualMachine<B> {
-    module: ShaderModule,
-    memory: Memory<B>,
+pub struct Interpreter<Module, Bindings> {
+    pub module: Module,
+    pub memory: Memory<Bindings>,
 }
 
-impl<B> VirtualMachine<B> {
-    pub fn new(module: ShaderModule, bindings: B) -> Self {
+impl<Module, Bindings> Interpreter<Module, Bindings> {
+    pub fn new(module: Module, bindings: Bindings) -> Self {
         Self {
             module,
             memory: Memory {
@@ -78,7 +79,12 @@ impl<B> VirtualMachine<B> {
             },
         }
     }
+}
 
+impl<Module, Bindings> Interpreter<Module, Bindings>
+where
+    Module: AsRef<ShaderModule>,
+{
     pub fn run_entry_point<I, O>(
         &mut self,
         entry_point_index: EntryPointIndex,
@@ -87,28 +93,25 @@ impl<B> VirtualMachine<B> {
     ) where
         I: ShaderInput,
         O: ShaderOutput,
-        B: ReadWriteMemory<BindingAddress>,
+        Bindings: ReadWriteMemory<BindingAddress>,
     {
-        let entry_point = &self.module[entry_point_index];
+        let module = self.module.as_ref();
+        let entry_point = &module[entry_point_index];
 
         {
             let mut outer_frame = self.memory.stack_frame();
 
-            let result_variable = entry_point.function.result.as_ref().map(|function_result| {
-                outer_frame.allocate_variable(function_result.ty, &self.module.inner)
-            });
+            let result_variable =
+                entry_point.function.result.as_ref().map(|function_result| {
+                    outer_frame.allocate_variable(function_result.ty, module)
+                });
 
             let argument_variables = entry_point
                 .function
                 .arguments
                 .iter()
                 .map(|argument| {
-                    copy_shader_inputs_to_stack(
-                        &mut outer_frame,
-                        &self.module.inner,
-                        &inputs,
-                        argument,
-                    )
+                    copy_shader_inputs_to_stack(&mut outer_frame, module, &inputs, argument)
                 })
                 .collect::<Vec<_>>();
 
@@ -117,15 +120,15 @@ impl<B> VirtualMachine<B> {
 
             let local_variables = CoArena::from_arena(
                 &entry_point.function.local_variables,
-                |handle, local_variable| {
-                    outer_frame.allocate_variable(local_variable.ty, &self.module.inner)
+                |handle, local_variable: &LocalVariable| {
+                    outer_frame.allocate_variable(local_variable.ty, module)
                 },
             );
 
             let mut function_context = FunctionContext {
-                module: &self.module.inner,
+                module,
                 function: &entry_point.function,
-                typifier: &self.module.inner.expression_types[entry_point_index],
+                typifier: &module.expression_types[entry_point_index],
                 emitted_expression: SparseCoArena::default(),
                 argument_variables,
                 local_variables,
@@ -140,7 +143,7 @@ impl<B> VirtualMachine<B> {
             if let Some(result) = &entry_point.function.result {
                 copy_shader_outputs_from_stack(
                     &outer_frame,
-                    &self.module.inner,
+                    module,
                     outputs,
                     &result,
                     result_variable.unwrap(),
@@ -154,7 +157,7 @@ impl<B> VirtualMachine<B> {
 
 #[derive(Debug)]
 pub struct FunctionContext<'module> {
-    module: &'module ShaderModuleInner,
+    module: &'module ShaderModule,
     function: &'module Function,
     typifier: &'module Typifier,
     emitted_expression: SparseCoArena<Expression, Variable<'module>>,
@@ -667,7 +670,7 @@ pub enum VariableType<'a> {
 }
 
 impl<'a> VariableType<'a> {
-    pub fn inner_with(&self, module: &'a ShaderModuleInner) -> &'a TypeInner {
+    pub fn inner_with(&self, module: &'a ShaderModule) -> &'a TypeInner {
         match self {
             VariableType::Handle(handle) => &module.module.types[*handle].inner,
             VariableType::Inner(type_inner) => *type_inner,
@@ -741,7 +744,7 @@ impl<'a> Variable<'a> {
         }
     }
 
-    pub fn debug<M>(&self, module: &'a ShaderModuleInner, memory: &'a M) -> VariableDebug<'a, M>
+    pub fn debug<M>(&self, module: &'a ShaderModule, memory: &'a M) -> VariableDebug<'a, M>
     where
         M: ReadMemory<Slice>,
     {
@@ -756,7 +759,7 @@ impl<'a> Variable<'a> {
         &self,
         index: usize,
         component_ty: impl Into<VariableType<'a>>,
-        module: &ShaderModuleInner,
+        module: &ShaderModule,
     ) -> Variable<'a> {
         let component_ty = component_ty.into();
         let offset = module.offset_of(self.ty, component_ty, index);
@@ -777,7 +780,7 @@ impl<'a> Variable<'a> {
         Pointer::from(self.slice)
     }
 
-    pub fn try_deref<M>(&self, memory: &M, module: &ShaderModuleInner) -> Option<Variable<'a>>
+    pub fn try_deref<M>(&self, memory: &M, module: &ShaderModule) -> Option<Variable<'a>>
     where
         M: ReadMemory<Slice>,
     {
@@ -1055,7 +1058,7 @@ where
 #[derive(Clone, Copy)]
 pub struct VariableDebug<'a, M> {
     variable: Variable<'a>,
-    module: &'a ShaderModuleInner,
+    module: &'a ShaderModule,
     memory: &'a M,
 }
 

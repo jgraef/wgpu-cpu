@@ -5,6 +5,17 @@ use std::{
 
 use derive_more::Debug;
 use itertools::Either;
+use naga_interpreter::{
+    Interpreter,
+    bindings::{
+        FragmentInput,
+        FragmentOutput,
+        UserDefinedIoLayout,
+        VertexInput,
+        VertexOutput,
+    },
+    memory::NullMemory,
+};
 use nalgebra::{
     Matrix2x4,
     Point2,
@@ -18,18 +29,7 @@ use crate::{
         CommandEncoder,
     },
     pipeline::RenderPipeline,
-    shader::{
-        UserDefinedIoLayout,
-        bindings::{
-            FragmentInput,
-            FragmentOutput,
-            UserDefinedIoBufferPool,
-            VertexInput,
-            VertexOutput,
-        },
-        interpreter::VirtualMachine,
-        memory::NullMemory,
-    },
+    shader::UserDefinedIoBufferPool,
     texture::{
         TextureInfo,
         TextureViewAttachment,
@@ -491,10 +491,12 @@ impl<'color> State<'color> {
             );
 
             let vertex_state = &pipeline.descriptor.vertex;
-            let mut vertex_vm = VirtualMachine::new(vertex_state.module.clone(), NullMemory);
+            let mut vertex_vm = Interpreter::new(vertex_state.module.clone(), NullMemory);
 
-            let vertex_output_layout = match &vertex_state.module.user_defined_io_layouts
-                [vertex_state.entry_point_index]
+            let vertex_output_layout = match &vertex_state
+                .module
+                .as_ref()
+                .user_defined_io_layout(vertex_state.entry_point_index)
             {
                 UserDefinedIoLayout::Vertex { output } => output,
                 _ => panic!("user defined io layouts for entry point are not for vertex stage"),
@@ -503,7 +505,7 @@ impl<'color> State<'color> {
             let vertex_output_pool = UserDefinedIoBufferPool::new(vertex_output_layout.clone());
 
             let mut fragment_state = pipeline.descriptor.fragment.as_ref().map(|fragment_state| {
-                let vm = VirtualMachine::new(fragment_state.module.clone(), NullMemory);
+                let vm = Interpreter::new(fragment_state.module.clone(), NullMemory);
                 (fragment_state, vm)
             });
 
@@ -572,7 +574,9 @@ impl<'color> State<'color> {
                                         vertex_outputs: vertex_outputs.clone(),
                                     },
                                     &mut FragmentOutput {
-                                        color_attachments: &mut *self.color_attachments,
+                                        color_attachments: ColorAttachmentBinding {
+                                            states: &mut *self.color_attachments,
+                                        },
                                         raster: fragment.raster,
                                     },
                                 );
@@ -768,5 +772,19 @@ impl Rasterizer {
             })
             .into_iter()
             .flatten()
+    }
+}
+
+#[derive(Debug)]
+struct ColorAttachmentBinding<'a, 'color> {
+    states: &'a mut [Option<ColorAttachmentState<'color>>],
+}
+
+impl<'a, 'color> naga_interpreter::bindings::ColorAttachments
+    for ColorAttachmentBinding<'a, 'color>
+{
+    fn put_pixel(&mut self, location: u32, position: Point2<u32>, color: Vector4<f32>) {
+        let color_attachment = self.states[location as usize].as_mut().unwrap();
+        color_attachment.put_pixel(position, color);
     }
 }

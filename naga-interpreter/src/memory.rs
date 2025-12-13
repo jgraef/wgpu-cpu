@@ -15,13 +15,13 @@ use naga::{
     proc::Alignment,
 };
 
-use crate::shader::{
-    ShaderModuleInner,
+use crate::{
     bindings::BindingAddress,
     interpreter::{
         Variable,
         VariableType,
     },
+    module::ShaderModule,
 };
 
 pub trait ReadMemory<A> {
@@ -218,7 +218,13 @@ impl Stack {
     pub fn allocate(&mut self, size: u32, alignment: Alignment) -> StackSlice {
         let size = size as usize;
         let offset = alignment.round_up(self.data.len() as u32) as usize;
-        self.data.resize(offset + size, 0);
+
+        let new_size = offset + size;
+        if new_size > self.limit {
+            todo!("stack limit reached. return an error here");
+        }
+
+        self.data.resize(new_size, 0);
         StackSlice { offset, len: size }
     }
 
@@ -304,7 +310,7 @@ impl<'a, B> StackFrame<'a, B> {
     pub fn allocate_variable<'ty>(
         &mut self,
         ty: impl Into<VariableType<'ty>>,
-        module: &ShaderModuleInner,
+        module: &ShaderModule,
     ) -> Variable<'ty> {
         let ty = ty.into();
         let type_layout = module.type_layout(ty);

@@ -4,14 +4,14 @@ use std::{
     sync::Arc,
 };
 
-use naga::ShaderStage;
+use naga_interpreter::{
+    EntryPointIndex,
+    ShaderStage,
+};
 
 use crate::{
     bind_group::BindGroupLayout,
-    shader::{
-        EntryPointIndex,
-        ShaderModule,
-    },
+    shader::ShaderModule,
 };
 
 #[derive(Clone, Debug)]
@@ -110,8 +110,10 @@ pub struct VertexState {
 impl VertexState {
     pub fn new(vertex: &wgpu::VertexState) -> Self {
         let module = vertex.module.as_custom::<ShaderModule>().unwrap().clone();
+
         let entry_point_index = module
-            .entry_point(vertex.entry_point.as_deref(), ShaderStage::Vertex)
+            .as_ref()
+            .find_entry_point(vertex.entry_point.as_deref(), ShaderStage::Vertex)
             .unwrap();
 
         Self {
@@ -158,7 +160,8 @@ impl FragmentState {
     pub fn new(fragment: &wgpu::FragmentState) -> Self {
         let module = fragment.module.as_custom::<ShaderModule>().unwrap().clone();
         let entry_point_index = module
-            .entry_point(fragment.entry_point.as_deref(), ShaderStage::Vertex)
+            .as_ref()
+            .find_entry_point(fragment.entry_point.as_deref(), ShaderStage::Vertex)
             .unwrap();
 
         Self {

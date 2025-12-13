@@ -46,6 +46,15 @@ impl<const N: usize> Barycentric<N> {
     }
 }
 
+impl<const N: usize> naga_interpreter::bindings::Interpolate<N> for Barycentric<N> {
+    fn interpolate<T>(&self, values: impl AsRef<[T]>) -> T
+    where
+        T: Mul<f32, Output = T> + AddAssign<T> + Copy + Zero,
+    {
+        Barycentric::interpolate(&self, values)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ArrayChunksIter<const N: usize, I> {
     inner: I,

@@ -1,7 +1,9 @@
 use std::{
     marker::PhantomData,
     ops::{
+        AddAssign,
         Index,
+        Mul,
         Range,
     },
     sync::Arc,
@@ -26,22 +28,18 @@ use nalgebra::{
     SVector,
     Vector4,
 };
-use parking_lot::Mutex;
+use num_traits::Zero;
 
 use crate::{
-    render_pass::ColorAttachmentState,
-    shader::{
-        ShaderModuleInner,
-        interpreter::Variable,
-        memory::{
-            ReadMemory,
-            Slice,
-            StackFrame,
-            WriteMemory,
-        },
-        util::SparseVec,
+    interpreter::Variable,
+    memory::{
+        ReadMemory,
+        Slice,
+        StackFrame,
+        WriteMemory,
     },
-    util::Barycentric,
+    module::ShaderModule,
+    util::SparseVec,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -144,20 +142,39 @@ where
     }
 }
 
+pub trait Interpolate<const N: usize> {
+    fn interpolate<T>(&self, values: impl AsRef<[T]>) -> T
+    where
+        T: Mul<f32, Output = T> + AddAssign<T> + Copy + Zero;
+}
+
+impl<const N: usize, I> Interpolate<N> for &I
+where
+    I: Interpolate<N>,
+{
+    fn interpolate<T>(&self, values: impl AsRef<[T]>) -> T
+    where
+        T: Mul<f32, Output = T> + AddAssign<T> + Copy + Zero,
+    {
+        I::interpolate(self, values)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
-pub struct FragmentInput<const N: usize, User> {
+pub struct FragmentInput<const N: usize, User, Interpolator> {
     pub position: Vector4<f32>,
     pub front_facing: bool,
     pub primitive_index: u32,
     pub sample_index: u32,
     pub sample_mask: u32,
-    pub barycentric: Barycentric<N>,
+    pub barycentric: Interpolator,
     pub vertex_outputs: [User; N],
 }
 
-impl<const N: usize, User> ShaderInput for FragmentInput<N, User>
+impl<const N: usize, User, Interpolator> ShaderInput for FragmentInput<N, User, Interpolator>
 where
     User: ReadMemory<BindingLocation>,
+    Interpolator: Interpolate<N>,
 {
     fn write_into(&self, binding: &Binding, ty: &Type, target: &mut [u8]) {
         match binding {
@@ -184,7 +201,7 @@ where
                 });
 
                 let interpolation = Interpolation::from_naga(*interpolation, *sampling);
-                interpolation.interpolate_user(self.barycentric, inputs, ty, target);
+                interpolation.interpolate_user(&self.barycentric, inputs, ty, target);
             }
         }
     }
@@ -240,9 +257,9 @@ impl Interpolation {
         }
     }
 
-    pub fn interpolate_user<const N: usize>(
+    pub fn interpolate_user<const N: usize, Interpolator: Interpolate<N>>(
         &self,
-        barycentric: Barycentric<N>,
+        barycentric: Interpolator,
         inputs: [&[u8]; N],
         ty: &Type,
         output: &mut [u8],
@@ -266,8 +283,8 @@ impl Interpolation {
                         todo!();
                     }
                     Interpolation::Linear { sampling } => {
-                        fn linear<const N: usize, const M: usize>(
-                            barycentric: Barycentric<N>,
+                        fn linear<const N: usize, const M: usize, Interpolator: Interpolate<N>>(
+                            barycentric: Interpolator,
                             inputs: [&[u8]; N],
                             output: &mut [u8],
                         ) {
@@ -279,10 +296,16 @@ impl Interpolation {
                         }
 
                         match vector_size {
-                            None => linear::<N, 1>(barycentric, inputs, output),
-                            Some(VectorSize::Bi) => linear::<N, 2>(barycentric, inputs, output),
-                            Some(VectorSize::Tri) => linear::<N, 3>(barycentric, inputs, output),
-                            Some(VectorSize::Quad) => linear::<N, 4>(barycentric, inputs, output),
+                            None => linear::<N, 1, Interpolator>(barycentric, inputs, output),
+                            Some(VectorSize::Bi) => {
+                                linear::<N, 2, Interpolator>(barycentric, inputs, output)
+                            }
+                            Some(VectorSize::Tri) => {
+                                linear::<N, 3, Interpolator>(barycentric, inputs, output)
+                            }
+                            Some(VectorSize::Quad) => {
+                                linear::<N, 4, Interpolator>(barycentric, inputs, output)
+                            }
                         }
 
                         // todo: implement the sampling behavior properly. right
@@ -457,92 +480,8 @@ impl WriteMemory<BindingLocation> for UserDefinedInterStageBuffer {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct UserDefinedIoBufferPool {
-    layout: UserDefinedInterStageLayout,
-    free: Arc<Mutex<Vec<UserDefinedInterStageBuffer>>>,
-}
-
-impl UserDefinedIoBufferPool {
-    pub fn new(layout: UserDefinedInterStageLayout) -> Self {
-        Self {
-            layout,
-            free: Default::default(),
-        }
-    }
-
-    pub fn allocate(&self) -> UserDefinedInterStagePoolBufferMut {
-        let mut free = self.free.lock();
-        let buffer = free
-            .pop()
-            .unwrap_or_else(|| UserDefinedInterStageBuffer::new(self.layout.clone()));
-        UserDefinedInterStagePoolBufferMut {
-            inner: UserDefinedInterStagePoolBufferInner {
-                buffer,
-                free: self.free.clone(),
-            },
-        }
-    }
-}
-
-#[derive(Debug)]
-struct UserDefinedInterStagePoolBufferInner {
-    buffer: UserDefinedInterStageBuffer,
-    free: Arc<Mutex<Vec<UserDefinedInterStageBuffer>>>,
-}
-
-impl Drop for UserDefinedInterStagePoolBufferInner {
-    fn drop(&mut self) {
-        let mut free = self.free.lock();
-        free.push(std::mem::take(&mut self.buffer));
-    }
-}
-
-#[derive(Debug)]
-pub struct UserDefinedInterStagePoolBufferMut {
-    inner: UserDefinedInterStagePoolBufferInner,
-}
-
-impl UserDefinedInterStagePoolBufferMut {
-    pub fn read_only(self) -> UserDefinedInterStagePoolBuffer {
-        UserDefinedInterStagePoolBuffer {
-            inner: Arc::new(self.inner),
-        }
-    }
-}
-
-impl ReadMemory<BindingLocation> for UserDefinedInterStagePoolBufferMut {
-    fn read(&self, address: BindingLocation) -> &[u8] {
-        self.inner.buffer.read(address)
-    }
-}
-
-impl WriteMemory<BindingLocation> for UserDefinedInterStagePoolBufferMut {
-    fn write(&mut self, address: BindingLocation) -> &mut [u8] {
-        self.inner.buffer.write(address)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct UserDefinedInterStagePoolBuffer {
-    inner: Arc<UserDefinedInterStagePoolBufferInner>,
-}
-
-impl ReadMemory<BindingLocation> for UserDefinedInterStagePoolBuffer {
-    fn read(&self, address: BindingLocation) -> &[u8] {
-        self.inner.buffer.read(address)
-    }
-}
-
 pub trait ColorAttachments {
     fn put_pixel(&mut self, location: u32, position: Point2<u32>, color: Vector4<f32>);
-}
-
-impl<'a, 'color> ColorAttachments for &'a mut [Option<ColorAttachmentState<'color>>] {
-    fn put_pixel(&mut self, location: u32, position: Point2<u32>, color: Vector4<f32>) {
-        let color_attachment = self[location as usize].as_mut().unwrap();
-        color_attachment.put_pixel(position, color);
-    }
 }
 
 #[track_caller]
@@ -561,7 +500,7 @@ fn bytes_of_bool_as_u32(b: bool) -> &'static [u8] {
 
 pub fn copy_shader_inputs_to_stack<'a, B, I>(
     stack_frame: &mut StackFrame<B>,
-    module: &'a ShaderModuleInner,
+    module: &'a ShaderModule,
     inputs: I,
     argument: &FunctionArgument,
 ) -> Variable<'a>
@@ -586,7 +525,7 @@ where
 
 pub fn copy_shader_outputs_from_stack<B, O>(
     stack_frame: &StackFrame<B>,
-    module: &ShaderModuleInner,
+    module: &ShaderModule,
     outputs: O,
     result: &FunctionResult,
     variable: Variable,
@@ -828,4 +767,16 @@ pub fn collect_user_defined_inter_stage_layout_from_function_result<'a>(
         locations: visit.locations.into_vec().into(),
         size: visit.buffer_offset,
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum UserDefinedIoLayout {
+    Vertex {
+        // todo: input
+        output: UserDefinedInterStageLayout,
+    },
+    Fragment {
+        input: UserDefinedInterStageLayout,
+        // output: don't need it, but would be handy for verification
+    },
 }

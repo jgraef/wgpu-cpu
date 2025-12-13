@@ -55,7 +55,7 @@ struct Args {
     #[clap(short, long, default_value = "3")]
     vertices: u32,
 
-    #[clap(short, long, default_value = "examples/hello_shader.wgsl")]
+    #[clap(short, long, default_value = "wgpu-cpu/examples/hello_shader.wgsl")]
     shader: PathBuf,
 
     #[clap(short, long)]
