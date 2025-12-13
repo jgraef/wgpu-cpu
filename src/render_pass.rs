@@ -1,4 +1,7 @@
-use std::ops::Range;
+use std::{
+    ops::Range,
+    time::Instant,
+};
 
 use derive_more::Debug;
 use itertools::Either;
@@ -333,6 +336,8 @@ pub struct RenderPassCommand {
 
 impl RenderPassCommand {
     pub fn execute(self) {
+        let t_start = Instant::now();
+
         let mut state = State::new(&self.color_attachments);
         state.load();
 
@@ -351,6 +356,9 @@ impl RenderPassCommand {
         }
 
         state.store();
+
+        let elapsed = t_start.elapsed();
+        tracing::debug!(?elapsed, "render pass time");
     }
 }
 
