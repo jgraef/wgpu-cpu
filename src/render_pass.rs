@@ -1,14 +1,11 @@
 use std::ops::Range;
 
-use itertools::{
-    Either,
-    Itertools,
-};
+use derive_more::Debug;
+use itertools::Either;
 use nalgebra::{
     Matrix2x4,
     Point2,
     Vector2,
-    Vector3,
     Vector4,
 };
 
@@ -19,9 +16,11 @@ use crate::{
     },
     pipeline::RenderPipeline,
     shader::{
+        UserDefinedIoLayout,
         bindings::{
             FragmentInput,
             FragmentOutput,
+            UserDefinedIoBufferPool,
             VertexInput,
             VertexOutput,
         },
@@ -34,10 +33,10 @@ use crate::{
         TextureWriteGuard,
     },
     util::{
+        Barycentric,
         bresenham::bresenham,
         lerp,
         scanline::scanlines,
-        trilinear_interpolation,
     },
 };
 
@@ -486,30 +485,60 @@ impl<'color> State<'color> {
             let vertex_state = &pipeline.descriptor.vertex;
             let mut vertex_vm = VirtualMachine::new(vertex_state.module.clone(), NullMemory);
 
+            let vertex_output_layout = match &vertex_state.module.user_defined_io_layouts
+                [vertex_state.entry_point_index]
+            {
+                UserDefinedIoLayout::Vertex { output } => output,
+                _ => panic!("user defined io layouts for entry point are not for vertex stage"),
+            };
+
+            let vertex_output_pool = UserDefinedIoBufferPool::new(vertex_output_layout.clone());
+
             let mut fragment_state = pipeline.descriptor.fragment.as_ref().map(|fragment_state| {
                 let vm = VirtualMachine::new(fragment_state.module.clone(), NullMemory);
                 (fragment_state, vm)
             });
 
-            for instance_index in instances {
-                for (primitive_index, primitive) in
-                    vertices.clone().chunks(3).into_iter().enumerate()
-                {
-                    let mut outputs = [VertexOutput::default(); 3];
+            const PRIMITIVE_SIZE: usize = 3;
+            let last_possible_primitive_start = vertices.end - PRIMITIVE_SIZE as u32;
 
-                    for (i, vertex_index) in primitive.enumerate() {
+            for instance_index in instances {
+                let mut vertex_index = vertices.start;
+                let mut primitive_index = 0;
+
+                while vertex_index <= last_possible_primitive_start {
+                    // create vertex outputs. this allocates buffers for the user-defined vertex
+                    // outputs.
+                    let mut vertex_outputs = std::array::from_fn::<_, PRIMITIVE_SIZE, _>(|_| {
+                        VertexOutput {
+                            position: Default::default(),
+                            user_defined: vertex_output_pool.allocate(),
+                        }
+                    });
+
+                    // run vertex shaders
+                    for i in 0..PRIMITIVE_SIZE {
                         vertex_vm.run_entry_point(
                             vertex_state.entry_point_index,
                             &VertexInput {
                                 vertex_index,
                                 instance_index,
+                                user_defined: NullMemory,
                             },
-                            &mut outputs[i],
+                            &mut vertex_outputs[i],
                         );
+
+                        vertex_index += 1;
                     }
 
-                    let tri = Tri(outputs.map(|output| output.position));
-                    tracing::debug!(?tri, "triangle!");
+                    let (tri, vertex_outputs) = {
+                        let tri = Tri(vertex_outputs.each_ref().map(|output| output.position));
+                        tracing::debug!(?tri, "triangle!");
+
+                        let vertex_outputs = vertex_outputs
+                            .map(|vertex_output| vertex_output.user_defined.read_only());
+                        (tri, vertex_outputs)
+                    };
 
                     if let Some((fragment_state, fragment_vm)) = &mut fragment_state {
                         for tri in self.clipper.clip(tri) {
@@ -531,6 +560,8 @@ impl<'color> State<'color> {
                                         primitive_index: primitive_index as u32,
                                         sample_index: 0,
                                         sample_mask: !0,
+                                        barycentric: fragment.barycentric,
+                                        vertex_outputs: vertex_outputs.clone(),
                                     },
                                     &mut FragmentOutput {
                                         color_attachments: &mut *self.color_attachments,
@@ -540,13 +571,15 @@ impl<'color> State<'color> {
                             }
                         }
                     }
+
+                    primitive_index += 1;
                 }
             }
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, derive_more::From, derive_more::Into)]
 pub struct Tri(pub [Vector4<f32>; 3]);
 
 impl Tri {
@@ -578,8 +611,20 @@ impl Tri {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+impl AsRef<[Vector4<f32>]> for Tri {
+    fn as_ref(&self) -> &[Vector4<f32>] {
+        self.0.as_slice()
+    }
+}
+
+#[derive(Clone, Copy, Debug, derive_more::From, derive_more::Into)]
 pub struct Line(pub [Vector4<f32>; 2]);
+
+impl AsRef<[Vector4<f32>]> for Line {
+    fn as_ref(&self) -> &[Vector4<f32>] {
+        self.0.as_slice()
+    }
+}
 
 #[derive(Debug)]
 pub struct Clipper {
@@ -597,7 +642,8 @@ impl Clipper {
 
         if any {
             tracing::debug!(?tri, "clipped");
-            // todo only discard if all clip. otherwise we need to split it
+            // todo only discard if all clip. otherwise we need to split it.
+            // splitting needs to fix the interpolation somehow.
             Either::Left(std::iter::empty())
         }
         else {
@@ -641,7 +687,7 @@ impl Rasterizer {
         }
     }
 
-    pub fn tri_fill(&self, tri: Tri) -> impl Iterator<Item = Fragment<Vector3<f32>>> {
+    pub fn tri_fill(&self, tri: Tri) -> impl Iterator<Item = Fragment<Barycentric<3>>> {
         let tri_raster_f32 = tri.0.map(|x| Point2::from(self.to_raster * x));
 
         let tri_raster_u32 = move || {
@@ -667,17 +713,17 @@ impl Rasterizer {
 
                     let raster_f32 = Point2::from(raster_u32.coords.cast::<f32>());
 
-                    Vector3::new(
-                        shoelace([raster_f32, tri_raster_f32[1], tri_raster_f32[2]]),
-                        shoelace([raster_f32, tri_raster_f32[2], tri_raster_f32[0]]),
-                        shoelace([raster_f32, tri_raster_f32[0], tri_raster_f32[1]]),
-                    ) / total_area
+                    Barycentric::from([
+                        shoelace([raster_f32, tri_raster_f32[1], tri_raster_f32[2]]) / total_area,
+                        shoelace([raster_f32, tri_raster_f32[2], tri_raster_f32[0]]) / total_area,
+                        shoelace([raster_f32, tri_raster_f32[0], tri_raster_f32[1]]) / total_area,
+                    ])
                 };
 
                 scanlines(tri_raster_u32).flat_map(move |scanline| {
                     scanline.into_iter().map(move |raster| {
                         let barycentric = barycentric(raster);
-                        let position = trilinear_interpolation(barycentric, tri.0);
+                        let position = barycentric.interpolate(tri);
 
                         Fragment {
                             raster,

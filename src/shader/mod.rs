@@ -34,7 +34,18 @@ use naga::{
 };
 use wgpu::custom::ShaderModuleInterface;
 
-use crate::shader::interpreter::VariableType;
+use crate::shader::{
+    bindings::{
+        UserDefinedInterStageLayout,
+        collect_user_defined_inter_stage_layout_from_function_arguments,
+        collect_user_defined_inter_stage_layout_from_function_result,
+    },
+    interpreter::VariableType,
+    util::{
+        CoArena,
+        SparseVec,
+    },
+};
 
 #[derive(Clone, Debug)]
 pub struct ShaderModule {
@@ -57,10 +68,19 @@ impl ShaderModule {
         let mut layouter = Layouter::default();
         layouter.update(module.to_ctx()).unwrap();
 
-        tracing::trace!("module: {:#?}", module);
-        tracing::trace!("module_info: {:#?}", module_info);
-        tracing::trace!("layouter: {:#?}", layouter);
+        //tracing::trace!("module: {module:#?}");
+        //tracing::trace!("module_info: {module_info:#?}");
+        //tracing::trace!("layouter: {layouter:#?}");
+        tracing::debug!("types: {:#?}", module.types);
 
+        let mut expression_types = ExpressionTypes {
+            entry_points: Vec::with_capacity(module.entry_points.len()),
+            per_function: CoArena::from_arena(&module.functions, |handle, function| {
+                typifier_from_function(&module, function)
+            }),
+        };
+
+        let mut user_defined_io_layouts = SparseVec::with_capacity(module.entry_points.len());
         let mut entry_points_by_name = HashMap::with_capacity(module.entry_points.len());
         let mut unique_entry_points_by_stage = HashMap::with_capacity(module.entry_points.len());
         for (i, entry_point) in module.entry_points.iter().enumerate() {
@@ -72,10 +92,44 @@ impl ShaderModule {
             else {
                 unique_entry_points_by_stage.insert(entry_point.stage, i);
             }
+
+            expression_types
+                .entry_points
+                .push(typifier_from_function(&module, &entry_point.function));
+
+            match entry_point.stage {
+                ShaderStage::Vertex => {
+                    user_defined_io_layouts.insert(
+                        i,
+                        UserDefinedIoLayout::Vertex {
+                            output: collect_user_defined_inter_stage_layout_from_function_result(
+                                &module,
+                                &layouter,
+                                &entry_point.function.result,
+                            ),
+                        },
+                    )
+                }
+                ShaderStage::Task => todo!(),
+                ShaderStage::Mesh => todo!(),
+                ShaderStage::Fragment => {
+                    user_defined_io_layouts.insert(
+                        i,
+                        UserDefinedIoLayout::Fragment {
+                            input: collect_user_defined_inter_stage_layout_from_function_arguments(
+                                &module,
+                                &layouter,
+                                &entry_point.function.arguments,
+                            ),
+                        },
+                    );
+                }
+                ShaderStage::Compute => {
+                    // nop: these can't have user-defined io bindings
+                }
+            }
         }
         unique_entry_points_by_stage.retain(|_, index| *index != usize::MAX);
-
-        let expression_types = ExpressionTypes::new(&module);
 
         Ok(Self {
             inner: Arc::new(ShaderModuleInner {
@@ -86,6 +140,9 @@ impl ShaderModule {
                 entry_points_by_name,
                 unique_entry_points_by_stage,
                 expression_types,
+                user_defined_io_layouts: UserDefinedIoLayouts {
+                    inner: user_defined_io_layouts,
+                },
             }),
         })
     }
@@ -109,6 +166,7 @@ pub struct ShaderModuleInner {
     pub entry_points_by_name: HashMap<String, usize>,
     pub unique_entry_points_by_stage: HashMap<ShaderStage, usize>,
     pub expression_types: ExpressionTypes,
+    pub user_defined_io_layouts: UserDefinedIoLayouts,
 }
 
 impl ShaderModuleInner {
@@ -119,6 +177,7 @@ impl ShaderModuleInner {
         match ty {
             VariableType::Handle(handle) => self.layouter[handle],
             VariableType::Inner(type_inner) => {
+                // todo: type_inner has a size method
                 match type_inner {
                     TypeInner::Scalar(Scalar { kind, width }) => {
                         TypeLayout {
@@ -150,6 +209,39 @@ impl ShaderModuleInner {
                 .ok_or_else(|| EntryPointNotFound::NoUniqueForStage { stage })?
         };
         Ok(EntryPointIndex(*index))
+    }
+
+    pub fn offset_of<'ty>(
+        &self,
+        outer_ty: impl Into<VariableType<'ty>>,
+        inner_ty: impl Into<VariableType<'ty>>,
+        index: usize,
+    ) -> u32 {
+        let outer_ty = outer_ty.into().inner_with(self);
+        match outer_ty {
+            TypeInner::Vector { size, scalar } => {
+                let inner_ty_layout = self.type_layout(inner_ty);
+                let inner_stride = inner_ty_layout.to_stride();
+                inner_stride * index as u32
+            }
+            TypeInner::Matrix {
+                columns,
+                rows,
+                scalar,
+            } => todo!(),
+            TypeInner::Array { base, size, stride } => {
+                let inner_ty_layout = self.type_layout(*base);
+                let inner_stride = inner_ty_layout.to_stride();
+                inner_stride * index as u32
+            }
+            TypeInner::Struct { members, span } => members[index].offset,
+            _ => panic!("Can't produce offset into {outer_ty:?}"),
+        }
+    }
+
+    pub fn size_of<'ty>(&self, ty: impl Into<VariableType<'ty>>) -> u32 {
+        let inner = ty.into().inner_with(self);
+        inner.size(self.module.to_ctx())
     }
 }
 
@@ -189,30 +281,7 @@ pub enum Error {
 #[derive(Debug)]
 pub struct ExpressionTypes {
     entry_points: Vec<Typifier>,
-    per_function: Vec<Typifier>,
-}
-
-impl ExpressionTypes {
-    pub fn new(module: &Module) -> Self {
-        let entry_points = module
-            .entry_points
-            .iter()
-            .map(|entry_point| typifier_from_function(module, &entry_point.function))
-            .collect();
-
-        let mut per_function = Vec::with_capacity(module.functions.len());
-
-        for (handle, function) in module.functions.iter() {
-            let i = handle.index();
-            assert_eq!(per_function.len(), i);
-            per_function.push(typifier_from_function(&module, function))
-        }
-
-        Self {
-            entry_points,
-            per_function,
-        }
-    }
+    per_function: CoArena<Function, Typifier>,
 }
 
 impl Index<EntryPointIndex> for ExpressionTypes {
@@ -227,7 +296,7 @@ impl Index<Handle<Function>> for ExpressionTypes {
     type Output = Typifier;
 
     fn index(&self, index: Handle<Function>) -> &Self::Output {
-        &self.per_function[index.index()]
+        &self.per_function[index]
     }
 }
 
@@ -247,3 +316,28 @@ fn typifier_from_function(module: &Module, function: &Function) -> Typifier {
 
 #[derive(Clone, Copy, Debug)]
 pub struct EntryPointIndex(pub usize);
+
+#[derive(Clone, Debug)]
+pub struct UserDefinedIoLayouts {
+    inner: SparseVec<UserDefinedIoLayout>,
+}
+
+impl Index<EntryPointIndex> for UserDefinedIoLayouts {
+    type Output = UserDefinedIoLayout;
+
+    fn index(&self, index: EntryPointIndex) -> &Self::Output {
+        &self.inner[index.0]
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum UserDefinedIoLayout {
+    Vertex {
+        // todo: input
+        output: UserDefinedInterStageLayout,
+    },
+    Fragment {
+        input: UserDefinedInterStageLayout,
+        // output: don't need it, but would be handy for verification
+    },
+}

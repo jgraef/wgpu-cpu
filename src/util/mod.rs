@@ -5,10 +5,12 @@ pub mod sync;
 
 use std::ops::{
     Add,
+    AddAssign,
     Mul,
 };
 
-use nalgebra::Vector3;
+use arrayvec::ArrayVec;
+use num_traits::Zero;
 
 pub fn lerp<T>(x0: T, x1: T, t: f32) -> T
 where
@@ -17,10 +19,74 @@ where
     x0 * (1.0 - t) + x1 * t
 }
 
-pub fn trilinear_interpolation<C, T>(coefficients: Vector3<C>, points: [T; 3]) -> T
-where
-    C: Copy,
-    T: Mul<C, Output = T> + Add<T, Output = T> + Copy,
-{
-    points[0] * coefficients[0] + points[1] * coefficients[1] + points[2] * coefficients[2]
+#[derive(Clone, Copy, Debug)]
+pub struct Barycentric<const N: usize> {
+    pub coefficients: [f32; N],
 }
+
+impl<const N: usize> From<[f32; N]> for Barycentric<N> {
+    fn from(value: [f32; N]) -> Self {
+        Self {
+            coefficients: value,
+        }
+    }
+}
+
+impl<const N: usize> Barycentric<N> {
+    pub fn interpolate<T>(&self, values: impl AsRef<[T]>) -> T
+    where
+        T: Mul<f32, Output = T> + AddAssign<T> + Copy + Zero,
+    {
+        let values = values.as_ref();
+        let mut output = Zero::zero();
+        for i in 0..N {
+            output += values[i] * self.coefficients[i];
+        }
+        output
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ArrayChunksIter<const N: usize, I> {
+    inner: I,
+}
+
+impl<const N: usize, I> Iterator for ArrayChunksIter<N, I>
+where
+    I: Iterator,
+{
+    type Item = [I::Item; N];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut buf = ArrayVec::new();
+
+        for i in 0..N {
+            if let Some(item) = self.inner.next() {
+                buf.push(item);
+            }
+            else {
+                return None;
+            }
+        }
+
+        Some(buf.into_inner().ok().unwrap())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (min, max) = self.inner.size_hint();
+        (min / N, max.map(|max| max / N))
+    }
+}
+
+impl<const N: usize, I> ExactSizeIterator for ArrayChunksIter<N, I> where I: ExactSizeIterator {}
+
+pub trait IteratorExt: Iterator {
+    fn array_chunks_<const N: usize>(self) -> ArrayChunksIter<N, Self>
+    where
+        Self: Sized,
+    {
+        ArrayChunksIter { inner: self }
+    }
+}
+
+impl<T> IteratorExt for T where T: Iterator {}

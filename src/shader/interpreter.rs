@@ -7,7 +7,6 @@ use bytemuck::Pod;
 use half::f16;
 use naga::{
     BinaryOperator,
-    Binding,
     Block,
     Expression,
     Function,
@@ -31,6 +30,8 @@ use crate::shader::{
     ShaderModuleInner,
     bindings::{
         BindingAddress,
+        ShaderInput,
+        ShaderOutput,
         copy_shader_inputs_to_stack,
         copy_shader_outputs_from_stack,
     },
@@ -44,7 +45,10 @@ use crate::shader::{
         StackFrame,
         WriteMemory,
     },
-    util::CoArena,
+    util::{
+        CoArena,
+        SparseCoArena,
+    },
 };
 
 #[derive(Debug)]
@@ -70,8 +74,8 @@ impl<B> VirtualMachine<B> {
         inputs: I,
         outputs: O,
     ) where
-        I: ReadMemory<Binding>,
-        O: WriteMemory<Binding>,
+        I: ShaderInput,
+        O: ShaderOutput,
         B: ReadWriteMemory<BindingAddress>,
     {
         let entry_point = &self.module[entry_point_index];
@@ -97,7 +101,10 @@ impl<B> VirtualMachine<B> {
                 })
                 .collect::<Vec<_>>();
 
-            let local_variables = CoArena::new(
+            // drop inputs now. if they're a pooled resource it can be freed early
+            drop(inputs);
+
+            let local_variables = CoArena::from_arena(
                 &entry_point.function.local_variables,
                 |handle, local_variable| {
                     outer_frame.allocate_variable(local_variable.ty, &self.module.inner)
@@ -108,7 +115,7 @@ impl<B> VirtualMachine<B> {
                 module: &self.module.inner,
                 function: &entry_point.function,
                 typifier: &self.module.inner.expression_types[entry_point_index],
-                emitted_expression: vec![],
+                emitted_expression: SparseCoArena::default(),
                 argument_variables,
                 local_variables,
             };
@@ -139,7 +146,7 @@ pub struct FunctionContext<'module> {
     module: &'module ShaderModuleInner,
     function: &'module Function,
     typifier: &'module Typifier,
-    emitted_expression: Vec<Option<Variable<'module>>>,
+    emitted_expression: SparseCoArena<Expression, Variable<'module>>,
     argument_variables: Vec<Variable<'module>>,
     local_variables: CoArena<LocalVariable, Variable<'module>>,
 }
@@ -168,7 +175,7 @@ where
         };
 
         if let Some(result) = result {
-            self.evaluate(&self.context.function.expressions[result], output.unwrap());
+            self.evaluate(result, output.unwrap());
         };
     }
 
@@ -249,26 +256,19 @@ where
     }
 
     pub fn run_emit(&mut self, range: Range<Expression>) {
-        self.context.emitted_expression.resize(
-            self.context
-                .emitted_expression
-                .len()
-                .max(range.index_range().end as usize),
-            None,
-        );
+        self.context.emitted_expression.reserve_range(&range);
 
         for handle in range {
-            if self.context.emitted_expression[handle.index() as usize].is_none() {
+            if self.context.emitted_expression.contains(handle) {
                 let variable = self
                     .stack_frame
                     .allocate_variable(&self.context.typifier[handle], &self.context.module);
-                let expression = &self.context.function.expressions[handle];
 
                 //tracing::debug!(?handle, ?variable, ?expression, "emit");
 
-                self.evaluate(expression, variable);
+                self.evaluate(handle, variable);
 
-                self.context.emitted_expression[handle.index() as usize] = Some(variable);
+                self.context.emitted_expression.insert(handle, variable);
             }
         }
     }
@@ -282,7 +282,6 @@ where
         let condition = {
             let mut inner = self.frame();
 
-            let condition = &inner.context.function.expressions[condition];
             let condition_ty = TypeResolution::Value(TypeInner::Scalar(Scalar::BOOL));
             let condition_output = inner
                 .stack_frame
@@ -303,11 +302,19 @@ where
         ControlFlow::Continue(())
     }
 
-    pub fn evaluate(&mut self, expression: &Expression, output: Variable) {
-        // this always creates a new stack frame and cleans it up at the end of the
-        // evaluation
-        let mut inner = self.frame();
-        inner.evaluate_inner(expression, output);
+    pub fn evaluate(&mut self, expression: Handle<Expression>, output: Variable) {
+        if let Some(variable) = self.context.emitted_expression.get(expression) {
+            // expression was emitted before, so we just need to copy from there
+            output.copy_from(*variable, &mut self.stack_frame.memory);
+        }
+        else {
+            let expression = &self.context.function.expressions[expression];
+
+            // this always creates a new stack frame and cleans it up at the end of the
+            // evaluation
+            let mut inner = self.frame();
+            inner.evaluate_inner(expression, output);
+        }
     }
 
     fn evaluate_inner(&mut self, expression: &Expression, output: Variable) {
@@ -325,50 +332,36 @@ where
             }
             Expression::Access { base, index } => todo!(),
             Expression::AccessIndex { base, index } => {
+                tracing::trace!(?base, ?index, ?output, "access index");
+
                 let base_ty = &self.context.typifier[*base];
-                let base_variable = self
+                let mut base_variable = self
                     .stack_frame
                     .allocate_variable(base_ty, &self.context.module);
-                let base_expression = &self.context.function.expressions[*base];
 
-                tracing::debug!(
-                    ?base,
-                    ?base_ty,
-                    ?base_expression,
-                    ?index,
-                    ?output,
-                    "access index"
-                );
+                tracing::trace!(?base_ty, ?base_variable, "evaluating base");
+                self.evaluate(*base, base_variable);
 
-                self.evaluate(base_expression, base_variable);
+                let mut produce_pointer = false;
+                if let Some(base_deref) =
+                    base_variable.try_deref(&self.stack_frame.memory, &self.context.module)
+                {
+                    tracing::trace!(?base_variable, "deref");
+                    base_variable = base_deref;
+                    produce_pointer = true;
+                }
 
-                /*let base_ty_inner = base_ty.inner_with(&self.context.module.module.types);
-                match base_ty_inner {
-                    TypeInner::Vector { size, scalar } => {
+                let component_variable =
+                    base_variable.component(*index as usize, output.ty, &self.context.module);
+                tracing::trace!(?component_variable, "index");
 
-                    },
-                    TypeInner::Matrix {
-                        columns,
-                        rows,
-                        scalar,
-                    } => todo!(),
-                    TypeInner::Pointer { base, space } => todo!(),
-                    TypeInner::ValuePointer {
-                        size,
-                        scalar,
-                        space,
-                    } => todo!(),
-                    TypeInner::Array { base, size, stride } => todo!(),
-                    TypeInner::Struct { members, span } => todo!(),
-                    _ => panic!("Can't access index {index} in a {base_ty_inner:?}"),
-                }*/
-
-                //let base_ty_inner = base_ty.inner_with(&self.context.module.module.types);
-                //let component_variable =
-                //    base_variable.component(*index as usize, output.ty, &self.context.module);
-                //tracing::debug!(?component_variable);
-
-                todo!();
+                if produce_pointer {
+                    let pointer = component_variable.pointer();
+                    *output.write(&mut self.stack_frame.memory) = pointer;
+                }
+                else {
+                    output.copy_from(component_variable, &mut self.stack_frame.memory);
+                }
             }
             Expression::Splat { size, value } => todo!(),
             Expression::Swizzle {
@@ -385,7 +378,7 @@ where
             Expression::GlobalVariable(handle) => todo!(),
             Expression::LocalVariable(handle) => {
                 let local_variable = &self.context.local_variables[*handle];
-                output.write(self.stack_frame.memory, &local_variable.pointer());
+                *output.write(self.stack_frame.memory) = local_variable.pointer();
             }
             Expression::Load { pointer } => todo!(),
             Expression::ImageSample {
@@ -451,10 +444,9 @@ where
         output: Variable,
     ) {
         for (i, component_handle) in components.into_iter().enumerate() {
-            let component_expr = &self.context.function.expressions[*component_handle];
             let component_ty = &self.context.typifier[*component_handle];
             let variable = output.component(i, component_ty, self.context.module);
-            self.evaluate(component_expr, variable);
+            self.evaluate(*component_handle, variable);
         }
     }
 
@@ -478,10 +470,7 @@ where
             output_variable.cast(input_ty)
         };
 
-        self.evaluate(
-            &self.context.function.expressions[expression],
-            input_variable,
-        );
+        self.evaluate(expression, input_variable);
 
         let input_ty_inner = input_variable.ty.inner_with(&self.context.module);
         let output_ty_inner = output_variable.ty.inner_with(&self.context.module);
@@ -520,18 +509,16 @@ where
         output: Variable,
     ) {
         let left_ty = &self.context.typifier[left];
-        let left_expression = &self.context.function.expressions[left];
         let left_variable = self
             .stack_frame
             .allocate_variable(left_ty, self.context.module);
-        self.evaluate(left_expression, left_variable);
+        self.evaluate(left, left_variable);
 
         let right_ty = &self.context.typifier[right];
-        let right_expression = &self.context.function.expressions[right];
         let right_variable = self
             .stack_frame
             .allocate_variable(right_ty, self.context.module);
-        self.evaluate(right_expression, right_variable);
+        self.evaluate(right, right_variable);
 
         let left_ty_inner = left_ty.inner_with(&self.context.module.module.types);
         let right_ty_inner = left_ty.inner_with(&self.context.module.module.types);
@@ -662,6 +649,8 @@ pub enum Break {
     Return(Option<Handle<Expression>>),
 }
 
+// todo: this could always contain a `&'a TypeInner` because we have the
+// life-time anyway and we can make the lookup at construction
 #[derive(Clone, Copy, Debug)]
 pub enum VariableType<'a> {
     Handle(Handle<Type>),
@@ -680,6 +669,12 @@ impl<'a> VariableType<'a> {
 impl From<Handle<Type>> for VariableType<'static> {
     fn from(value: Handle<Type>) -> Self {
         Self::Handle(value)
+    }
+}
+
+impl<'a> From<&'a Handle<Type>> for VariableType<'static> {
+    fn from(value: &'a Handle<Type>) -> Self {
+        Self::from(*value)
     }
 }
 
@@ -710,17 +705,17 @@ impl<'a> Variable<'a> {
         T: Pod,
         M: ReadMemory<Slice>,
     {
-        let n = size_of::<T>();
+        let n = std::mem::size_of::<T>();
         bytemuck::from_bytes(&memory.read(self.slice.slice(..n)))
     }
 
-    pub fn write<T, M>(&self, memory: &mut M, value: &T)
+    pub fn write<'m, T, M>(&self, memory: &'m mut M) -> &'m mut T
     where
         T: Pod,
         M: WriteMemory<Slice>,
     {
-        let n = size_of::<T>();
-        memory.write(self.slice.slice(..n), bytemuck::bytes_of(value))
+        let n = std::mem::size_of::<T>();
+        bytemuck::from_bytes_mut(memory.write(self.slice.slice(..n)))
     }
 
     pub fn copy_from<M>(&self, source: Variable, memory: &mut M)
@@ -755,7 +750,7 @@ impl<'a> Variable<'a> {
         module: &ShaderModuleInner,
     ) -> Variable<'a> {
         let component_ty = component_ty.into();
-        let offset = offset_of(self.ty, component_ty, index, module);
+        let offset = module.offset_of(self.ty, component_ty, index);
         Variable {
             ty: component_ty,
             slice: self.slice.slice(offset..),
@@ -772,33 +767,36 @@ impl<'a> Variable<'a> {
     pub fn pointer(&self) -> Pointer {
         Pointer::from(self.slice)
     }
-}
 
-fn offset_of(
-    outer_ty: VariableType,
-    inner_ty: VariableType,
-    index: usize,
-    module: &ShaderModuleInner,
-) -> u32 {
-    let outer_ty = outer_ty.inner_with(module);
-    match outer_ty {
-        TypeInner::Vector { size, scalar } => {
-            let inner_ty_layout = module.type_layout(inner_ty);
-            let inner_stride = inner_ty_layout.to_stride();
-            inner_stride * index as u32
+    pub fn try_deref<M>(&self, memory: &M, module: &ShaderModuleInner) -> Option<Variable<'a>>
+    where
+        M: ReadMemory<Slice>,
+    {
+        let ty_inner = self.ty.inner_with(module);
+        match ty_inner {
+            TypeInner::Pointer { base, space } => {
+                let ty = base.into();
+                let pointer = self.read::<Pointer, M>(memory);
+                let size = module.size_of(ty);
+                let slice = pointer.deref(*space, size);
+
+                Some(Variable { ty, slice })
+            }
+            TypeInner::ValuePointer {
+                size,
+                scalar,
+                space,
+            } => {
+                /*let ty = scalar.into();
+                let pointer = self.read::<Pointer, M>(memory);
+                let size = module.size_of(ty);
+                let slice = pointer.deref(*space, size);
+
+                Some(Variable { ty, slice })*/
+                todo!("pain!");
+            }
+            _ => None,
         }
-        TypeInner::Matrix {
-            columns,
-            rows,
-            scalar,
-        } => todo!(),
-        TypeInner::Array { base, size, stride } => {
-            let inner_ty_layout = module.type_layout(*base);
-            let inner_stride = inner_ty_layout.to_stride();
-            inner_stride * index as u32
-        }
-        TypeInner::Struct { members, span } => members[index].offset,
-        _ => panic!("Can't produce offset into {outer_ty:?}"),
     }
 }
 
@@ -822,7 +820,7 @@ fn scalar_binary_op<M>(
                         let left = left.read::<$ty, M>(memory);
                         let right = right.read::<$ty, M>(memory);
                         let result = $func(left, right);
-                        output.write::<$ty, M>(memory, &result);
+                        *output.write::<$ty, M>(memory) = result;
                         return;
                     },
                 )*
@@ -894,7 +892,7 @@ fn convert_scalar<M>(
                     (ScalarKind::$scalar_in, $width_in, ScalarKind::$scalar_out, $width_out) => {
                         let input = input_variable.read(memory);
                         let output = ($func)(*input);
-                        output_variable.write(memory, &output);
+                        *output_variable.write(memory) = output;
                     }
                 )*
                 _ => panic!("Unsupported cast from {input_scalar:?} to {output_scalar:?}"),
@@ -919,7 +917,7 @@ where
             match literal {
                 $(
                     Literal::$variant(value) => {
-                        output.write(memory, value);
+                        *output.write(memory) = *value;
                     }
                 )*
                 _ => panic!("Unsupported literal: {literal:?}"),

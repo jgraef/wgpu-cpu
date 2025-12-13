@@ -10,6 +10,10 @@ use bytemuck::{
     Pod,
     Zeroable,
 };
+use naga::{
+    AddressSpace,
+    proc::Alignment,
+};
 
 use crate::shader::{
     ShaderModuleInner,
@@ -43,15 +47,15 @@ where
 }
 
 pub trait WriteMemory<A> {
-    fn write(&mut self, address: A, data: &[u8]);
+    fn write(&mut self, address: A) -> &mut [u8];
 }
 
 impl<T, A> WriteMemory<A> for &mut T
 where
     T: WriteMemory<A>,
 {
-    fn write(&mut self, address: A, data: &[u8]) {
-        T::write(self, address, data)
+    fn write(&mut self, address: A) -> &mut [u8] {
+        T::write(self, address)
     }
 }
 
@@ -100,10 +104,10 @@ impl<B> WriteMemory<Slice> for Memory<B>
 where
     B: WriteMemory<BindingAddress>,
 {
-    fn write(&mut self, address: Slice, data: &[u8]) {
+    fn write(&mut self, address: Slice) -> &mut [u8] {
         match address {
-            Slice::Stack(slice) => self.stack.write(slice, data),
-            Slice::Binding(binding) => self.bindings.write(binding, data),
+            Slice::Stack(slice) => self.stack.write(slice),
+            Slice::Binding(binding) => self.bindings.write(binding),
         }
     }
 }
@@ -137,8 +141,9 @@ pub fn copy<Source, SourceAddress, Target, TargetAddress>(
     Source: ReadMemory<SourceAddress>,
     Target: WriteMemory<TargetAddress>,
 {
-    let data = source.read(source_address);
-    target.write(target_address, data);
+    let source = source.read(source_address);
+    let target = target.write(target_address);
+    target.copy_from_slice(source);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -210,11 +215,11 @@ impl Stack {
         }
     }
 
-    pub fn allocate(&mut self, len: u32) -> StackSlice {
-        let len = len as usize;
-        let offset = self.data.len();
-        self.data.resize(offset + len, 0);
-        StackSlice { offset, len }
+    pub fn allocate(&mut self, size: u32, alignment: Alignment) -> StackSlice {
+        let size = size as usize;
+        let offset = alignment.round_up(self.data.len() as u32) as usize;
+        self.data.resize(offset + size, 0);
+        StackSlice { offset, len: size }
     }
 
     pub fn size(&self) -> usize {
@@ -233,8 +238,8 @@ impl ReadMemory<StackSlice> for Stack {
 }
 
 impl WriteMemory<StackSlice> for Stack {
-    fn write(&mut self, address: StackSlice, data: &[u8]) {
-        self.data[address.offset..][..address.len].copy_from_slice(data);
+    fn write(&mut self, address: StackSlice) -> &mut [u8] {
+        &mut self.data[address.offset..][..address.len]
     }
 }
 
@@ -296,19 +301,17 @@ impl<'a, B> StackFrame<'a, B> {
         self.memory.stack_frame()
     }
 
-    pub fn allocate(&mut self, size: u32) -> StackSlice {
-        self.memory.stack.allocate(size)
-    }
-
     pub fn allocate_variable<'ty>(
         &mut self,
         ty: impl Into<VariableType<'ty>>,
         module: &ShaderModuleInner,
     ) -> Variable<'ty> {
         let ty = ty.into();
-        let inner = ty.inner_with(module);
-        let size = inner.size(module.module.to_ctx());
-        let slice = self.allocate(size);
+        let type_layout = module.type_layout(ty);
+        let slice = self
+            .memory
+            .stack
+            .allocate(type_layout.size, type_layout.alignment);
         Variable {
             ty,
             slice: slice.into(),
@@ -339,11 +342,8 @@ impl<A> WriteMemory<A> for NullMemory
 where
     A: Debug,
 {
-    fn write(&mut self, address: A, data: &[u8]) {
-        panic!(
-            "Attempt to write to NullMemory: {address:?}, {} bytes",
-            data.len()
-        );
+    fn write(&mut self, address: A) -> &mut [u8] {
+        panic!("Attempt to write to NullMemory: {address:?}",);
     }
 }
 
@@ -361,6 +361,26 @@ where
 #[repr(C)]
 pub struct Pointer(u32);
 
+impl Pointer {
+    pub fn deref(&self, address_space: AddressSpace, len: u32) -> Slice {
+        match address_space {
+            AddressSpace::Function => {
+                Slice::Stack(StackSlice {
+                    offset: self.0 as usize,
+                    len: len as usize,
+                })
+            }
+            AddressSpace::Private => todo!(),
+            AddressSpace::WorkGroup => todo!(),
+            AddressSpace::Uniform => todo!(),
+            AddressSpace::Storage { access } => todo!(),
+            AddressSpace::Handle => todo!(),
+            AddressSpace::Immediate => todo!(),
+            AddressSpace::TaskPayload => todo!(),
+        }
+    }
+}
+
 impl From<Slice> for Pointer {
     fn from(value: Slice) -> Self {
         match value {
@@ -374,12 +394,4 @@ impl From<StackSlice> for Pointer {
     fn from(value: StackSlice) -> Self {
         Self(value.offset.try_into().unwrap())
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
-#[repr(C)]
-pub struct AddressSpace(u8);
-
-impl AddressSpace {
-    const STACK: Self = Self(1);
 }
