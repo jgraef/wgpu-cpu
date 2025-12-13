@@ -542,7 +542,9 @@ impl<'color> State<'color> {
                     }
 
                     let (tri, vertex_outputs) = {
-                        let tri = Tri(vertex_outputs.each_ref().map(|output| output.position));
+                        let tri = Tri(vertex_outputs
+                            .each_ref()
+                            .map(|output| output.position.into()));
                         tracing::debug!(?tri, "triangle!");
 
                         let vertex_outputs = vertex_outputs
@@ -565,7 +567,7 @@ impl<'color> State<'color> {
                                 fragment_vm.run_entry_point(
                                     fragment_state.entry_point_index,
                                     &FragmentInput {
-                                        position: fragment.position,
+                                        position: fragment.position.into(),
                                         front_facing: face == wgpu::Face::Front,
                                         primitive_index: primitive_index as u32,
                                         sample_index: 0,
@@ -577,7 +579,7 @@ impl<'color> State<'color> {
                                         color_attachments: ColorAttachmentBinding {
                                             states: &mut *self.color_attachments,
                                         },
-                                        raster: fragment.raster,
+                                        raster: fragment.raster.into(),
                                     },
                                 );
                             }
@@ -783,8 +785,8 @@ struct ColorAttachmentBinding<'a, 'color> {
 impl<'a, 'color> naga_interpreter::bindings::ColorAttachments
     for ColorAttachmentBinding<'a, 'color>
 {
-    fn put_pixel(&mut self, location: u32, position: Point2<u32>, color: Vector4<f32>) {
+    fn put_pixel(&mut self, location: u32, position: [u32; 2], color: [f32; 4]) {
         let color_attachment = self.states[location as usize].as_mut().unwrap();
-        color_attachment.put_pixel(position, color);
+        color_attachment.put_pixel(position.into(), color.into());
     }
 }

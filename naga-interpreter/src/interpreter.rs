@@ -30,10 +30,6 @@ use naga::{
     front::Typifier,
     proc::TypeResolution,
 };
-use num_traits::{
-    One,
-    Zero,
-};
 
 use crate::{
     bindings::{
@@ -1016,11 +1012,8 @@ fn convert_scalar<M>(
         };
     }
 
-    fn one_or_zero<T>(x: Bool) -> T
-    where
-        T: One + Zero,
-    {
-        if bool::from(x) { T::one() } else { T::zero() }
+    fn switch<T>(x: Bool, accept: T, reject: T) -> T {
+        if bool::from(x) { accept } else { reject }
     }
 
     // these are specified here: https://gpuweb.github.io/gpuweb/wgsl/#value-constructor-builtin-function
@@ -1029,9 +1022,9 @@ fn convert_scalar<M>(
         (Uint@4) as (Sint@4) => (|x: u32| x as i32);
         (Sint@4) as (Float@4) => (|x: i32| x as f32);
         (Uint@4) as (Float@4) => (|x: u32| x as f32);
-        (Bool@1) as (Uint@4) => (|x: Bool| one_or_zero::<u32>(x));
-        (Bool@1) as (Sint@4) => (|x: Bool| one_or_zero::<i32>(x));
-        (Bool@1) as (Float@4) => (|x: Bool| one_or_zero::<f32>(x));
+        (Bool@1) as (Uint@4) => (|x: Bool| switch(x, 1u32, 0u32));
+        (Bool@1) as (Sint@4) => (|x: Bool| switch(x, 1i32, 0i32));
+        (Bool@1) as (Float@4) => (|x: Bool| switch(x, 1.0f32, 0.0f32));
     );
 }
 

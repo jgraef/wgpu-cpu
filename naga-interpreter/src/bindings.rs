@@ -1,9 +1,7 @@
 use std::{
     marker::PhantomData,
     ops::{
-        AddAssign,
         Index,
-        Mul,
         Range,
     },
     sync::Arc,
@@ -23,12 +21,6 @@ use naga::{
     VectorSize,
     proc::Layouter,
 };
-use nalgebra::{
-    Point2,
-    SVector,
-    Vector4,
-};
-use num_traits::Zero;
 
 use crate::{
     interpreter::Variable,
@@ -116,7 +108,7 @@ where
 
 #[derive(Clone, Debug, Default)]
 pub struct VertexOutput<User> {
-    pub position: Vector4<f32>,
+    pub position: [f32; 4],
     pub user_defined: User,
 }
 
@@ -143,26 +135,36 @@ where
 }
 
 pub trait Interpolate<const N: usize> {
-    fn interpolate<T>(&self, values: impl AsRef<[T]>) -> T
-    where
-        T: Mul<f32, Output = T> + AddAssign<T> + Copy + Zero;
+    fn interpolate_scalar(&self, scalars: [f32; N]) -> f32;
+    fn interpolate_vec2(&self, vectors: [[f32; 2]; N]) -> [f32; 2];
+    fn interpolate_vec3(&self, vectors: [[f32; 3]; N]) -> [f32; 3];
+    fn interpolate_vec4(&self, vectors: [[f32; 4]; N]) -> [f32; 4];
 }
 
 impl<const N: usize, I> Interpolate<N> for &I
 where
     I: Interpolate<N>,
 {
-    fn interpolate<T>(&self, values: impl AsRef<[T]>) -> T
-    where
-        T: Mul<f32, Output = T> + AddAssign<T> + Copy + Zero,
-    {
-        I::interpolate(self, values)
+    fn interpolate_scalar(&self, scalars: [f32; N]) -> f32 {
+        I::interpolate_scalar(self, scalars)
+    }
+
+    fn interpolate_vec2(&self, vectors: [[f32; 2]; N]) -> [f32; 2] {
+        I::interpolate_vec2(self, vectors)
+    }
+
+    fn interpolate_vec3(&self, vectors: [[f32; 3]; N]) -> [f32; 3] {
+        I::interpolate_vec3(self, vectors)
+    }
+
+    fn interpolate_vec4(&self, vectors: [[f32; 4]; N]) -> [f32; 4] {
+        I::interpolate_vec4(self, vectors)
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct FragmentInput<const N: usize, User, Interpolator> {
-    pub position: Vector4<f32>,
+    pub position: [f32; 4],
     pub front_facing: bool,
     pub primitive_index: u32,
     pub sample_index: u32,
@@ -283,30 +285,27 @@ impl Interpolation {
                         todo!();
                     }
                     Interpolation::Linear { sampling } => {
-                        fn linear<const N: usize, const M: usize, Interpolator: Interpolate<N>>(
-                            barycentric: Interpolator,
-                            inputs: [&[u8]; N],
-                            output: &mut [u8],
-                        ) {
-                            let inputs =
-                                inputs.map(|input| *bytemuck::from_bytes::<SVector<f32, M>>(input));
-                            let output = bytemuck::from_bytes_mut::<SVector<f32, M>>(output);
-
-                            *output = barycentric.interpolate(inputs);
+                        macro_rules! interpolate_linear {
+                            ($($pat:pat => $ty:ty as $method:ident,)*) => {
+                                match vector_size {
+                                    $(
+                                        $pat => {
+                                            let inputs =
+                                                inputs.map(|input| *bytemuck::from_bytes::<$ty>(input));
+                                            let output = bytemuck::from_bytes_mut::<$ty>(output);
+                                            *output = barycentric.$method(inputs);
+                                        }
+                                    )*
+                                }
+                            };
                         }
 
-                        match vector_size {
-                            None => linear::<N, 1, Interpolator>(barycentric, inputs, output),
-                            Some(VectorSize::Bi) => {
-                                linear::<N, 2, Interpolator>(barycentric, inputs, output)
-                            }
-                            Some(VectorSize::Tri) => {
-                                linear::<N, 3, Interpolator>(barycentric, inputs, output)
-                            }
-                            Some(VectorSize::Quad) => {
-                                linear::<N, 4, Interpolator>(barycentric, inputs, output)
-                            }
-                        }
+                        interpolate_linear!(
+                            None => f32 as interpolate_scalar,
+                            Some(VectorSize::Bi) => [f32; 2] as interpolate_vec2,
+                            Some(VectorSize::Tri) => [f32; 3] as interpolate_vec3,
+                            Some(VectorSize::Quad) => [f32; 4] as interpolate_vec4,
+                        );
 
                         // todo: implement the sampling behavior properly. right
                         // now we run the fragment shader once per sample anyway
@@ -358,7 +357,7 @@ pub enum InterpolationSampling {
 #[derive(Clone, Copy, Debug)]
 pub struct FragmentOutput<Color> {
     pub color_attachments: Color,
-    pub raster: Point2<u32>,
+    pub raster: [u32; 2],
 }
 
 impl<Color> ShaderOutput for FragmentOutput<Color>
@@ -371,7 +370,7 @@ where
                 todo!()
             }
             Binding::Location { location, .. } => {
-                let color: &Vector4<f32> = bytemuck::from_bytes(source);
+                let color: &[f32; 4] = bytemuck::from_bytes(source);
                 self.color_attachments
                     .put_pixel(*location, self.raster, *color);
             }
@@ -481,7 +480,7 @@ impl WriteMemory<BindingLocation> for UserDefinedInterStageBuffer {
 }
 
 pub trait ColorAttachments {
-    fn put_pixel(&mut self, location: u32, position: Point2<u32>, color: Vector4<f32>);
+    fn put_pixel(&mut self, location: u32, position: [u32; 2], color: [f32; 4]);
 }
 
 #[track_caller]
