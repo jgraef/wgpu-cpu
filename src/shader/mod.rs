@@ -1,6 +1,7 @@
 pub mod bindings;
 pub mod interpreter;
 pub mod memory;
+pub mod util;
 
 use std::{
     collections::HashMap,

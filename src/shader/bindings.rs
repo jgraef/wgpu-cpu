@@ -68,13 +68,14 @@ impl WriteMemory<Binding> for VertexOutput {
     fn write(&mut self, address: Binding, data: &[u8]) {
         match address {
             Binding::BuiltIn(builtin) => {
-                match builtin {
+                let target = match builtin {
                     BuiltIn::Position { invariant: _ } => {
                         bytemuck::bytes_of_mut(&mut self.position)
                     }
                     _ => unsupported_binding(address),
-                }
-                .copy_from_slice(data);
+                };
+
+                target.copy_from_slice(&data[..target.len()]);
             }
             Binding::Location {
                 location,

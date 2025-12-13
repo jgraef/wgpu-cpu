@@ -6,6 +6,11 @@ use std::{
     },
 };
 
+use bytemuck::{
+    Pod,
+    Zeroable,
+};
+
 use crate::shader::{
     ShaderModuleInner,
     bindings::BindingAddress,
@@ -149,6 +154,7 @@ impl From<StackSlice> for Slice {
 }
 
 impl Slice {
+    #[track_caller]
     pub fn slice<R, T>(&self, range: R) -> Self
     where
         R: RangeBounds<T>,
@@ -188,56 +194,6 @@ impl Offset for u32 {
         *self as usize
     }
 }
-
-/*
-macro_rules! impl_slice {
-    (@impl_index($index:ty)) => {
-        impl Index<$range<$int>> for Slice {
-            type Output = Slice;
-
-            fn index(&self, index: $index) => &Self::Output {
-
-            }
-        }
-    }
-    (@impl_range($range:path, [$($int:ty),*])) => {
-        $(
-            impl_slice!(@impl_index($range<$int>));
-        )*
-    }
-    ([$($range:path),*], $ints:tt) => {
-        $(
-            impl_slice!(@impl_range($range, $ints));
-        )*
-    };
-}
-
-impl<R: RangeBounds<usize>> Index<R> for Slice {
-    type Output = Slice;
-
-    fn index(&self, index: R) -> &Self::Output {
-        self.slice_impl(index)
-    }
-}
-
-impl<R: RangeBounds<u32>> Index<R> for Slice {
-    type Output = Slice;
-
-    fn index(&self, index: R) -> &Self::Output {
-        todo!()
-    }
-}
-
-impl Add<u32> for Slice {
-    type Output = Slice;
-
-    fn add(self, rhs: u32) -> Self::Output {
-        match self {
-            Slice::Stack(slice) => (slice + rhs).into(),
-            Slice::Binding(_binding) => todo!(),
-        }
-    }
-} */
 
 #[derive(Clone, derive_more::Debug)]
 pub struct Stack {
@@ -296,6 +252,7 @@ pub struct StackSlice {
 }
 
 impl StackSlice {
+    #[track_caller]
     fn slice_impl(&self, start: usize, end: Option<usize>) -> Self {
         if let Some(end) = end {
             assert!(start <= end);
@@ -397,4 +354,32 @@ where
     fn copy(&mut self, source: A, target: A) {
         panic!("Attempt to copy in NullMemory: From {source:?} to {target:?}");
     }
+}
+
+// Do wgsl pointers have to be 32 bit? naga returns that size for a pointer type
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[repr(C)]
+pub struct Pointer(u32);
+
+impl From<Slice> for Pointer {
+    fn from(value: Slice) -> Self {
+        match value {
+            Slice::Stack(stack_slice) => Self::from(stack_slice),
+            Slice::Binding(binding_address) => todo!(),
+        }
+    }
+}
+
+impl From<StackSlice> for Pointer {
+    fn from(value: StackSlice) -> Self {
+        Self(value.offset.try_into().unwrap())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+#[repr(C)]
+pub struct AddressSpace(u8);
+
+impl AddressSpace {
+    const STACK: Self = Self(1);
 }
