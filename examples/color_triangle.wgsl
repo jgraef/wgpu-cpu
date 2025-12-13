@@ -14,12 +14,18 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
-    let x = f32(i32(input.vertex_index) - 1);
-    let y = f32(i32(input.vertex_index & 1u) * 2 - 1);
+    let x = 0.8 * f32(i32(input.vertex_index) - 1);
+    let y = 0.8 * f32(i32(input.vertex_index & 1u) * 2 - 1);
+    let position = vec4f(x, y, 0.0, 1.0);
+
+    let r = f32(input.vertex_index == 0);
+    let g = f32(input.vertex_index == 1);
+    let b = f32(input.vertex_index == 2);
+    let color = vec4f(r, g, b, 1.0);
 
     return VertexOutput(
-        vec4f(x, y, 0.0, 1.0),
-        vec4f(x, y, 0.0, 1.0),
+        position,
+        color,
     );
 }
 

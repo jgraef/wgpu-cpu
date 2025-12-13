@@ -1,9 +1,16 @@
 use std::{
     fmt::Debug,
-    ops::ControlFlow,
+    ops::{
+        BitAnd,
+        BitOr,
+        ControlFlow,
+    },
 };
 
-use bytemuck::Pod;
+use bytemuck::{
+    Pod,
+    Zeroable,
+};
 use half::f16;
 use naga::{
     BinaryOperator,
@@ -22,6 +29,10 @@ use naga::{
     TypeInner,
     front::Typifier,
     proc::TypeResolution,
+};
+use num_traits::{
+    One,
+    Zero,
 };
 
 use crate::shader::{
@@ -263,8 +274,6 @@ where
                 let variable = self
                     .stack_frame
                     .allocate_variable(&self.context.typifier[handle], &self.context.module);
-
-                //tracing::debug!(?handle, ?variable, ?expression, "emit");
 
                 self.evaluate(handle, variable);
 
@@ -820,7 +829,7 @@ fn scalar_binary_op<M>(
                         let left = left.read::<$ty, M>(memory);
                         let right = right.read::<$ty, M>(memory);
                         let result = $func(left, right);
-                        *output.write::<$ty, M>(memory) = result;
+                        *output.write::<_, M>(memory) = result;
                         return;
                     },
                 )*
@@ -844,8 +853,30 @@ fn scalar_binary_op<M>(
         };
     }
 
+    macro_rules! impl_comparisions {
+        ($($func:ident => $trait:ident :: $method:ident,)*) => {
+            $(
+                fn $func<L, R>(left: &L, right: &R) -> Bool
+                where
+                    L: $trait<R>
+                {
+                    Bool::from($trait::$method(left, right))
+                }
+            )*
+        };
+    }
+
+    impl_comparisions!(
+        equal => PartialEq::eq,
+        not_equal => PartialEq::ne,
+        less => PartialEq::eq,
+        less_equal => PartialEq::eq,
+        greater => PartialEq::eq,
+        greater_equal => PartialEq::eq,
+    );
+
     binary_ops!(
-        [Bool@_ => u32]: [LogicalAnd => BitAnd::bitand, LogicalOr => BitOr::bitor];
+        [Bool@1 => Bool]: [LogicalAnd => BitAnd::bitand, LogicalOr => BitOr::bitor];
         [
             Sint@4 => i32,
             Uint@4 => u32,
@@ -868,7 +899,89 @@ fn scalar_binary_op<M>(
             ShiftLeft => Shl::shl,
             ShiftRight => Shr::shr
         ];
+        [
+            Bool@1 => Bool,
+            Sint@4 => i32,
+            Uint@4 => u32,
+            Float@2 => f16,
+            Float@4 => f32
+        ]: [
+            Equal => equal,
+            NotEqual => not_equal
+        ];
+        [
+            Sint@4 => i32,
+            Uint@4 => u32,
+            Float@2 => f16,
+            Float@4 => f32
+        ]: [
+            Less => less,
+            LessEqual => less_equal,
+            Greater => greater,
+            GreaterEqual => greater_equal
+        ];
     );
+}
+
+/// # FIXME
+///
+/// Naga makes bools 1 byte wide, although WebGPU specifies them to be 4 byte.
+/// This might be a bug, or not. bools don't specify an internal layout though,
+/// so we can just use an `u8`. See [`super::tests::naga_bool_width_is_32bit`].
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+pub struct Bool(u8);
+
+impl From<bool> for Bool {
+    fn from(value: bool) -> Self {
+        if value { Self(1) } else { Self(0) }
+    }
+}
+
+impl From<Bool> for bool {
+    fn from(value: Bool) -> Self {
+        value.0 != 0
+    }
+}
+
+impl BitAnd for Bool {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self::from(bool::from(self) && bool::from(rhs))
+    }
+}
+
+impl BitOr for Bool {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self::from(bool::from(self) || bool::from(rhs))
+    }
+}
+
+impl BitAnd for &Bool {
+    type Output = Bool;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Bool::from(bool::from(*self) && bool::from(*rhs))
+    }
+}
+
+impl BitOr for &Bool {
+    type Output = Bool;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Bool::from(bool::from(*self) || bool::from(*rhs))
+    }
+}
+
+impl Eq for Bool {}
+
+impl PartialEq for Bool {
+    fn eq(&self, other: &Self) -> bool {
+        bool::from(*self) == bool::from(*other)
+    }
 }
 
 fn convert_scalar<M>(
@@ -891,7 +1004,7 @@ fn convert_scalar<M>(
                 $(
                     (ScalarKind::$scalar_in, $width_in, ScalarKind::$scalar_out, $width_out) => {
                         let input = input_variable.read(memory);
-                        let output = ($func)(*input);
+                        let output = $func(*input);
                         *output_variable.write(memory) = output;
                     }
                 )*
@@ -900,11 +1013,22 @@ fn convert_scalar<M>(
         };
     }
 
+    fn one_or_zero<T>(x: Bool) -> T
+    where
+        T: One + Zero,
+    {
+        if bool::from(x) { T::one() } else { T::zero() }
+    }
+
+    // these are specified here: https://gpuweb.github.io/gpuweb/wgsl/#value-constructor-builtin-function
     convert_scalar!(
         (Sint@4) as (Uint@4) => (|x: i32| x as u32);
         (Uint@4) as (Sint@4) => (|x: u32| x as i32);
         (Sint@4) as (Float@4) => (|x: i32| x as f32);
         (Uint@4) as (Float@4) => (|x: u32| x as f32);
+        (Bool@1) as (Uint@4) => (|x: Bool| one_or_zero::<u32>(x));
+        (Bool@1) as (Sint@4) => (|x: Bool| one_or_zero::<i32>(x));
+        (Bool@1) as (Float@4) => (|x: Bool| one_or_zero::<f32>(x));
     );
 }
 

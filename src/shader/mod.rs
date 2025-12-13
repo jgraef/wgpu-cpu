@@ -1,6 +1,8 @@
 pub mod bindings;
 pub mod interpreter;
 pub mod memory;
+#[cfg(test)]
+mod tests;
 pub mod util;
 
 use std::{

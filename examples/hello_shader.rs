@@ -152,7 +152,7 @@ pub fn main() -> Result<(), Error> {
                 depth_slice: None,
                 resolve_target: None,
                 ops: Operations {
-                    load: LoadOp::Clear(Color::BLUE),
+                    load: LoadOp::Clear(Color::BLACK),
                     store: StoreOp::Store,
                 },
             })],

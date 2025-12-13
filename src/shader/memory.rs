@@ -308,6 +308,7 @@ impl<'a, B> StackFrame<'a, B> {
     ) -> Variable<'ty> {
         let ty = ty.into();
         let type_layout = module.type_layout(ty);
+
         let slice = self
             .memory
             .stack
