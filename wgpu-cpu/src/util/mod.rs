@@ -51,24 +51,6 @@ impl<const N: usize> Barycentric<N> {
     }
 }
 
-impl<const N: usize> naga_interpreter::bindings::Interpolate<N> for Barycentric<N> {
-    fn interpolate_scalar(&self, scalars: [f32; N]) -> f32 {
-        self.interpolate(scalars)
-    }
-
-    fn interpolate_vec2(&self, vectors: [[f32; 2]; N]) -> [f32; 2] {
-        self.interpolate(vectors.map(array_to_vector)).into()
-    }
-
-    fn interpolate_vec3(&self, vectors: [[f32; 3]; N]) -> [f32; 3] {
-        self.interpolate(vectors.map(array_to_vector)).into()
-    }
-
-    fn interpolate_vec4(&self, vectors: [[f32; 4]; N]) -> [f32; 4] {
-        self.interpolate(vectors.map(array_to_vector)).into()
-    }
-}
-
 fn array_to_vector<const N: usize>(array: [f32; N]) -> SVector<f32, N> {
     // yes, this is just an into, but it helps the compiler to figure out the types
     // since Barycentric::interpolate is generic

@@ -6,6 +6,7 @@ use std::{
 use approx::assert_abs_diff_eq;
 use bytemuck::Pod;
 use naga::{
+    BuiltIn,
     Scalar,
     ScalarKind,
     TypeInner,
@@ -20,8 +21,8 @@ use crate::{
     Interpreter,
     ShaderModule,
     bindings::{
+        ShaderInput,
         ShaderOutput,
-        VertexInput,
     },
     memory::NullMemory,
 };
@@ -97,19 +98,27 @@ fn run_vertex_shader(source: &str, vertices: Range<u32>) -> Vec<[f32; 4]> {
         panic!("{e}");
     });
     let module = ShaderModule::new(module).unwrap();
-    let mut interpreter = Interpreter::new(module, NullMemory);
+    let mut interpreter = Interpreter::new(module, NullMemory, EntryPointIndex::from(0));
     let mut output = CollectVertices::default();
 
+    #[derive(Debug)]
+    struct VertexInput {
+        vertex_index: u32,
+    }
+
+    impl ShaderInput for VertexInput {
+        fn write_into(&self, binding: &naga::Binding, ty: &naga::Type, target: &mut [u8]) {
+            match binding {
+                naga::Binding::BuiltIn(BuiltIn::VertexIndex) => {
+                    *bytemuck::from_bytes_mut(target) = self.vertex_index;
+                }
+                _ => {}
+            }
+        }
+    }
+
     for i in vertices {
-        interpreter.run_entry_point(
-            EntryPointIndex::from(0),
-            VertexInput {
-                vertex_index: i,
-                instance_index: 0,
-                user_defined: NullMemory,
-            },
-            &mut output,
-        );
+        interpreter.run_entry_point(VertexInput { vertex_index: i }, &mut output);
     }
 
     output.positions
@@ -162,13 +171,21 @@ where
         panic!("{e}");
     });
     let module = ShaderModule::new(module).unwrap();
-    let mut interpreter = Interpreter::new(module, NullMemory);
+    let mut interpreter = Interpreter::new(module, NullMemory, EntryPointIndex::from(0));
 
-    struct TestOutput<T> {
+    struct EvalInput;
+
+    impl ShaderInput for EvalInput {
+        fn write_into(&self, binding: &naga::Binding, ty: &naga::Type, target: &mut [u8]) {
+            // nop
+        }
+    }
+
+    struct EvalOutput<T> {
         output: T,
     }
 
-    impl<T> ShaderOutput for TestOutput<T>
+    impl<T> ShaderOutput for EvalOutput<T>
     where
         T: Pod,
     {
@@ -182,19 +199,11 @@ where
         }
     }
 
-    let mut output = TestOutput {
+    let mut output = EvalOutput {
         output: T::zeroed(),
     };
 
-    interpreter.run_entry_point(
-        EntryPointIndex::from(0),
-        VertexInput {
-            vertex_index: 0,
-            instance_index: 0,
-            user_defined: NullMemory,
-        },
-        &mut output,
-    );
+    interpreter.run_entry_point(EvalInput, &mut output);
 
     output.output
 }

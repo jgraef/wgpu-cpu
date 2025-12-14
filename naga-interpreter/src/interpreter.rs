@@ -17,6 +17,7 @@ use half::f16;
 use naga::{
     BinaryOperator,
     Block,
+    EarlyDepthTest,
     Expression,
     Function,
     Handle,
@@ -68,19 +69,21 @@ use crate::{
 pub struct Interpreter<Module, Bindings> {
     pub module: Module,
     pub memory: Memory<Bindings>,
+    pub entry_point_index: EntryPointIndex,
 }
 
 impl<Module, Bindings> Interpreter<Module, Bindings>
 where
     Module: AsRef<ShaderModule>,
 {
-    pub fn new(module: Module, bindings: Bindings) -> Self {
+    pub fn new(module: Module, bindings: Bindings, entry_point_index: EntryPointIndex) -> Self {
         Self {
             module,
             memory: Memory {
                 stack: Stack::new(0x1000),
                 bindings,
             },
+            entry_point_index,
         }
     }
 }
@@ -89,18 +92,23 @@ impl<Module, Bindings> Interpreter<Module, Bindings>
 where
     Module: AsRef<ShaderModule>,
 {
-    pub fn run_entry_point<I, O>(
-        &mut self,
-        entry_point_index: EntryPointIndex,
-        inputs: I,
-        outputs: O,
-    ) where
+    pub fn early_depth_test(&self, evaluate: impl FnOnce() -> bool) -> bool {
+        let entry_point = &self.module.as_ref()[self.entry_point_index];
+        match entry_point.early_depth_test {
+            None => true,
+            Some(EarlyDepthTest::Force) => evaluate(),
+            Some(EarlyDepthTest::Allow { conservative }) => todo!("EarlyDepthTest::Allow"),
+        }
+    }
+
+    pub fn run_entry_point<I, O>(&mut self, inputs: I, outputs: O)
+    where
         I: ShaderInput,
         O: ShaderOutput,
         Bindings: ReadWriteMemory<BindingAddress>,
     {
         let module = self.module.as_ref();
-        let entry_point = &module[entry_point_index];
+        let entry_point = &module[self.entry_point_index];
 
         {
             let mut outer_frame = self.memory.stack_frame();
@@ -132,7 +140,7 @@ where
             let mut function_context = FunctionContext {
                 module,
                 function: &entry_point.function,
-                typifier: &module.expression_types[entry_point_index],
+                typifier: &module.expression_types[self.entry_point_index],
                 emitted_expression: SparseCoArena::default(),
                 argument_variables,
                 local_variables,

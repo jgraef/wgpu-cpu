@@ -213,7 +213,7 @@ impl App {
                     wgpu::RenderPassDepthStencilAttachment {
                         view: depth_texture,
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(0.0),
+                            load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Discard,
                         }),
                         stencil_ops: None,

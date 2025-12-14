@@ -1,4 +1,6 @@
 pub mod clipper;
+pub mod color_attachment;
+pub mod depth_stencil_attachment;
 pub mod primitive;
 pub mod rasterizer;
 pub mod state;
@@ -16,37 +18,42 @@ use crate::{
         CommandEncoder,
     },
     pipeline::RenderPipeline,
-    render_pass::state::State,
-    texture::TextureViewAttachment,
+    render_pass::{
+        color_attachment::ColorAttachment,
+        depth_stencil_attachment::DepthStencilAttachment,
+        state::State,
+    },
 };
 
 #[derive(Debug)]
-pub struct RenderPass {
+pub struct RenderPassEncoder {
     command_encoder: CommandEncoder,
     commands: Vec<RenderPassSubCommand>,
-    ended: bool,
-    label: Option<String>,
-    color_attachments: Vec<Option<ColorAttachment>>,
-    // todo: depth_stencil_attachment
+    descriptor: Option<RenderPassDescriptor>,
 }
 
-impl RenderPass {
+impl RenderPassEncoder {
     pub fn new(command_encoder: CommandEncoder, desc: &wgpu::RenderPassDescriptor) -> Self {
         Self {
             command_encoder,
             commands: vec![],
-            ended: false,
-            label: desc.label.map(ToOwned::to_owned),
-            color_attachments: desc
-                .color_attachments
-                .into_iter()
-                .map(|color_attachment| color_attachment.as_ref().map(ColorAttachment::new))
-                .collect(),
+            descriptor: Some(RenderPassDescriptor {
+                label: desc.label.map(ToOwned::to_owned),
+                color_attachments: desc
+                    .color_attachments
+                    .into_iter()
+                    .map(|color_attachment| color_attachment.as_ref().map(ColorAttachment::new))
+                    .collect(),
+                depth_stencil_attachment: desc
+                    .depth_stencil_attachment
+                    .as_ref()
+                    .map(DepthStencilAttachment::new),
+            }),
         }
     }
 }
 
-impl wgpu::custom::RenderPassInterface for RenderPass {
+impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
     fn set_pipeline(&mut self, pipeline: &wgpu::custom::DispatchRenderPipeline) {
         let pipeline = pipeline.as_custom::<RenderPipeline>().unwrap();
         self.commands.push(RenderPassSubCommand::SetPipeline {
@@ -261,53 +268,35 @@ impl wgpu::custom::RenderPassInterface for RenderPass {
     fn end(&mut self) {
         // somehow this is not called when the render pass is dropped. is this a bug?
 
-        if !self.ended {
-            let color_attachments = std::mem::take(&mut self.color_attachments);
+        if let Some(descriptor) = self.descriptor.take() {
             let commands = std::mem::take(&mut self.commands);
 
             self.command_encoder
                 .push(Command::RenderPass(RenderPassCommand {
-                    label: self.label.clone(),
-                    color_attachments,
+                    descriptor,
                     commands,
                 }));
-            self.ended = true;
         }
     }
 }
 
 // todo: this might be a bug that we have to call it ourself
-impl Drop for RenderPass {
+impl Drop for RenderPassEncoder {
     fn drop(&mut self) {
         wgpu::custom::RenderPassInterface::end(self)
     }
 }
 
 #[derive(Debug)]
-pub struct ColorAttachment {
-    pub view: TextureViewAttachment,
-    pub depth_slice: Option<u32>,
-    pub resolve_target: Option<TextureViewAttachment>,
-    pub ops: wgpu::Operations<wgpu::Color>,
-}
-
-impl ColorAttachment {
-    pub fn new(color_attachment: &wgpu::RenderPassColorAttachment) -> Self {
-        Self {
-            view: TextureViewAttachment::from_wgpu(&color_attachment.view).unwrap(),
-            depth_slice: color_attachment.depth_slice,
-            resolve_target: color_attachment
-                .resolve_target
-                .map(|texture| TextureViewAttachment::from_wgpu(texture).unwrap()),
-            ops: color_attachment.ops,
-        }
-    }
+pub struct RenderPassDescriptor {
+    pub label: Option<String>,
+    pub color_attachments: Vec<Option<ColorAttachment>>,
+    pub depth_stencil_attachment: Option<DepthStencilAttachment>,
 }
 
 #[derive(Debug)]
 pub struct RenderPassCommand {
-    label: Option<String>,
-    color_attachments: Vec<Option<ColorAttachment>>,
+    descriptor: RenderPassDescriptor,
     commands: Vec<RenderPassSubCommand>,
 }
 
@@ -315,7 +304,7 @@ impl RenderPassCommand {
     pub fn execute(self) {
         let t_start = Instant::now();
 
-        let mut state = State::new(&self.color_attachments);
+        let mut state = State::new(&self.descriptor);
         state.load();
 
         for command in self.commands {

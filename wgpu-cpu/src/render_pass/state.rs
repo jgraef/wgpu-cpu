@@ -2,51 +2,51 @@ use std::ops::Range;
 
 use naga_interpreter::{
     Interpreter,
-    bindings::{
-        FragmentInput,
-        FragmentOutput,
-        UserDefinedIoLayout,
-        VertexInput,
-        VertexOutput,
-    },
+    bindings::UserDefinedIoLayout,
     memory::NullMemory,
 };
-use nalgebra::{
-    Point2,
-    Vector2,
-    Vector4,
-};
+use nalgebra::Vector2;
 
 use crate::{
     pipeline::RenderPipeline,
     render_pass::{
-        ColorAttachment,
+        RenderPassDescriptor,
         clipper::Clipper,
+        color_attachment::AcquiredColorAttachment,
+        depth_stencil_attachment::AcquiredDepthStencilAttachment,
         primitive::Tri,
         rasterizer::Rasterizer,
     },
-    shader::UserDefinedIoBufferPool,
-    texture::{
-        TextureInfo,
-        TextureWriteGuard,
+    shader::{
+        UserDefinedIoBufferPool,
+        fragment::{
+            FragmentInput,
+            FragmentOutput,
+        },
+        vertex::{
+            VertexInput,
+            VertexOutput,
+        },
     },
 };
 
 #[derive(Debug)]
-pub struct State<'color> {
-    pub color_attachments: Vec<Option<ColorAttachmentState<'color>>>,
+pub struct State<'pass> {
+    pub color_attachments: Vec<Option<AcquiredColorAttachment<'pass>>>,
+    pub depth_stencil_attachment: Option<AcquiredDepthStencilAttachment<'pass>>,
     pub clipper: Clipper,
     pub rasterizer: Rasterizer,
     pub pipeline: Option<RenderPipeline>,
 }
 
-impl<'color> State<'color> {
-    pub fn new(color_attachments: &'color [Option<ColorAttachment>]) -> Self {
+impl<'pass> State<'pass> {
+    pub fn new(descriptor: &'pass RenderPassDescriptor) -> Self {
         // todo: sort them in some canonical order to avoid deadlocks due to
         // interleaving locks
         let mut target_size = None;
 
-        let color_attachments = color_attachments
+        let color_attachments = descriptor
+            .color_attachments
             .iter()
             .map(|color_attachment| {
                 color_attachment.as_ref().map(|color_attachment| {
@@ -64,16 +64,22 @@ impl<'color> State<'color> {
                         target_size = Some(size);
                     }
 
-                    ColorAttachmentState::new(color_attachment)
+                    AcquiredColorAttachment::new(color_attachment)
                 })
             })
             .collect::<Vec<_>>();
+
+        let depth_stencil_attachment = descriptor
+            .depth_stencil_attachment
+            .as_ref()
+            .map(AcquiredDepthStencilAttachment::new);
 
         let clipper = Clipper {};
         let rasterizer = Rasterizer::new(target_size.unwrap_or_default(), None);
 
         Self {
             color_attachments,
+            depth_stencil_attachment,
             clipper,
             rasterizer,
             pipeline: None,
@@ -86,6 +92,10 @@ impl<'color> State<'color> {
                 color_attachment.load();
             }
         }
+
+        if let Some(depth_stencil_attachment) = &mut self.depth_stencil_attachment {
+            depth_stencil_attachment.load();
+        }
     }
 
     pub fn store(&mut self) {
@@ -93,6 +103,10 @@ impl<'color> State<'color> {
             if let Some(color_attachment) = color_attachment {
                 color_attachment.store();
             }
+        }
+
+        if let Some(depth_stencil_attachment) = &mut self.depth_stencil_attachment {
+            depth_stencil_attachment.store();
         }
     }
 
@@ -103,7 +117,11 @@ impl<'color> State<'color> {
             );
 
             let vertex_state = &pipeline.descriptor.vertex;
-            let mut vertex_vm = Interpreter::new(vertex_state.module.clone(), NullMemory);
+            let mut vertex_vm = Interpreter::new(
+                vertex_state.module.clone(),
+                NullMemory,
+                vertex_state.entry_point_index,
+            );
 
             let vertex_output_layout = match &vertex_state
                 .module
@@ -117,7 +135,11 @@ impl<'color> State<'color> {
             let vertex_output_pool = UserDefinedIoBufferPool::new(vertex_output_layout.clone());
 
             let mut fragment_state = pipeline.descriptor.fragment.as_ref().map(|fragment_state| {
-                let vm = Interpreter::new(fragment_state.module.clone(), NullMemory);
+                let vm = Interpreter::new(
+                    fragment_state.module.clone(),
+                    NullMemory,
+                    fragment_state.entry_point_index,
+                );
                 (fragment_state, vm)
             });
 
@@ -141,7 +163,6 @@ impl<'color> State<'color> {
                     // run vertex shaders
                     for i in 0..PRIMITIVE_SIZE {
                         vertex_vm.run_entry_point(
-                            vertex_state.entry_point_index,
                             &VertexInput {
                                 vertex_index,
                                 instance_index,
@@ -176,24 +197,39 @@ impl<'color> State<'color> {
                             }
 
                             for fragment in self.rasterizer.tri_fill(tri) {
-                                fragment_vm.run_entry_point(
-                                    fragment_state.entry_point_index,
-                                    &FragmentInput {
-                                        position: fragment.position.into(),
-                                        front_facing: face == wgpu::Face::Front,
-                                        primitive_index: primitive_index as u32,
-                                        sample_index: 0,
-                                        sample_mask: !0,
-                                        barycentric: fragment.barycentric,
-                                        vertex_outputs: vertex_outputs.clone(),
-                                    },
-                                    &mut FragmentOutput {
-                                        color_attachments: ColorAttachmentBinding {
-                                            states: &mut *self.color_attachments,
-                                        },
-                                        raster: fragment.raster.into(),
-                                    },
-                                );
+                                // setup inputs and outputs
+                                let sample_index = 0;
+                                let sample_mask = !0;
+
+                                let input = FragmentInput {
+                                    position: fragment.position,
+                                    front_facing: face == wgpu::Face::Front,
+                                    primitive_index: primitive_index as u32,
+                                    sample_index,
+                                    sample_mask,
+                                    barycentric: fragment.barycentric,
+                                    vertex_outputs: vertex_outputs.clone(),
+                                };
+
+                                let mut output = FragmentOutput {
+                                    position: fragment.raster,
+                                    frag_depth: fragment.position.z,
+                                    sample_mask,
+                                    color_attachments: &mut self.color_attachments,
+                                    depth_stencil_attachment: self
+                                        .depth_stencil_attachment
+                                        .as_mut(),
+                                    depth_stencil_state: pipeline.descriptor.depth_stencil.as_ref(),
+                                };
+
+                                // perform early depth test
+                                if !fragment_vm.early_depth_test(|| output.depth_test()) {
+                                    // early depth test rejected
+                                    continue;
+                                }
+
+                                // run fragment shader
+                                fragment_vm.run_entry_point(&input, &mut output);
                             }
                         }
                     }
@@ -202,65 +238,5 @@ impl<'color> State<'color> {
                 }
             }
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct ColorAttachmentState<'a> {
-    texture_guard: TextureWriteGuard<'a>,
-    texture_info: &'a TextureInfo,
-    ops: wgpu::Operations<wgpu::Color>,
-}
-
-impl<'a> ColorAttachmentState<'a> {
-    pub fn new(color_attachment: &'a ColorAttachment) -> Self {
-        let texture_guard = color_attachment.view.write();
-        let texture_info = &color_attachment.view.info;
-
-        Self {
-            texture_guard,
-            texture_info,
-            ops: color_attachment.ops,
-        }
-    }
-
-    pub fn load(&mut self) {
-        match self.ops.load {
-            wgpu::LoadOp::Clear(clear_color) => {
-                self.texture_guard.clear(clear_color);
-            }
-            wgpu::LoadOp::Load => {
-                // nop
-            }
-            wgpu::LoadOp::DontCare(_) => {
-                // nop
-            }
-        }
-    }
-
-    pub fn store(&mut self) {
-        // todo: what to do?
-        match self.ops.store {
-            wgpu::StoreOp::Store => {}
-            wgpu::StoreOp::Discard => {}
-        }
-    }
-
-    pub fn put_pixel(&mut self, raster: Point2<u32>, color: Vector4<f32>) {
-        self.texture_guard.put_pixel(raster, color);
-    }
-}
-
-#[derive(Debug)]
-struct ColorAttachmentBinding<'a, 'color> {
-    states: &'a mut [Option<ColorAttachmentState<'color>>],
-}
-
-impl<'a, 'color> naga_interpreter::bindings::ColorAttachments
-    for ColorAttachmentBinding<'a, 'color>
-{
-    fn put_pixel(&mut self, location: u32, position: [u32; 2], color: [f32; 4]) {
-        let color_attachment = self.states[location as usize].as_mut().unwrap();
-        color_attachment.put_pixel(position.into(), color.into());
     }
 }

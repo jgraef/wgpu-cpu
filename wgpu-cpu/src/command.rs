@@ -3,8 +3,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::render_pass::{
-    RenderPass,
     RenderPassCommand,
+    RenderPassEncoder,
 };
 
 #[derive(Clone, Debug)]
@@ -83,7 +83,7 @@ impl wgpu::custom::CommandEncoderInterface for CommandEncoder {
         &self,
         desc: &wgpu::RenderPassDescriptor<'_>,
     ) -> wgpu::custom::DispatchRenderPass {
-        wgpu::custom::DispatchRenderPass::custom(RenderPass::new(self.clone(), desc))
+        wgpu::custom::DispatchRenderPass::custom(RenderPassEncoder::new(self.clone(), desc))
     }
 
     fn finish(&mut self) -> wgpu::custom::DispatchCommandBuffer {

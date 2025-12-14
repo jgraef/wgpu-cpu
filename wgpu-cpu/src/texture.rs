@@ -1,5 +1,6 @@
 use nalgebra::{
     Point2,
+    Point3,
     Vector4,
 };
 
@@ -83,6 +84,15 @@ pub struct TextureInfo {
     pub array_layer_count: u32,
 }
 
+impl TextureInfo {
+    pub fn pixel_index(&self, position: Point3<u32>) -> usize {
+        // todo: proper stride calculations
+        position.z as usize * self.size.width as usize * self.size.height as usize
+            + position.y as usize * self.size.width as usize
+            + position.x as usize
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TextureViewAttachment {
     pub buffer: Buffer,
@@ -160,7 +170,7 @@ pub struct TextureWriteGuard<'a> {
 }
 
 impl<'a> TextureWriteGuard<'a> {
-    pub fn clear(&mut self, color: wgpu::Color) {
+    pub fn clear_color(&mut self, color: wgpu::Color) {
         let color = encode_color(
             Vector4::new(color.r, color.g, color.b, color.a).cast(),
             self.info.format,
@@ -170,12 +180,32 @@ impl<'a> TextureWriteGuard<'a> {
         target.fill(color);
     }
 
-    pub fn put_pixel(&mut self, position: Point2<u32>, color: Vector4<f32>) {
-        // todo: proper stride calculations
-        let index = position.y as usize * self.info.size.width as usize + position.x as usize;
+    pub fn clear_depth(&mut self, depth: f32) {
+        let target: &mut [f32] = bytemuck::cast_slice_mut(&mut *self.guard);
+        target.fill(depth);
+    }
 
-        let target: &mut [[u8; 4]] = bytemuck::cast_slice_mut(&mut *self.guard);
-        target[index] = encode_color(color, self.info.format)
+    pub fn put_pixel(&mut self, position: Point3<u32>, color: Vector4<f32>) {
+        let index = self.info.pixel_index(position);
+        let array: &mut [[u8; 4]] = bytemuck::cast_slice_mut(&mut *self.guard);
+        array[index] = encode_color(color, self.info.format)
+    }
+
+    pub fn get_depth(&self, position: Point2<u32>) -> f32 {
+        // todo: read method should also be on TextureReadGuard
+        let index = self
+            .info
+            .pixel_index(Point3::new(position.x, position.y, 0));
+        let array: &[f32] = bytemuck::cast_slice(&*self.guard);
+        array[index]
+    }
+
+    pub fn put_depth(&mut self, position: Point2<u32>, depth: f32) {
+        let index = self
+            .info
+            .pixel_index(Point3::new(position.x, position.y, 0));
+        let array: &mut [f32] = bytemuck::cast_slice_mut(&mut *self.guard);
+        array[index] = depth;
     }
 }
 
