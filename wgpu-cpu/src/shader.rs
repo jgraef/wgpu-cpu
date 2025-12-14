@@ -36,7 +36,7 @@ impl ShaderModule {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                module: naga_interpreter::ShaderModule::new(module),
+                module: naga_interpreter::ShaderModule::new(module)?,
                 compilation_info: wgpu::CompilationInfo { messages: vec![] },
             }),
         })
@@ -65,6 +65,9 @@ pub enum Error {
 
     #[error(transparent)]
     ParseError(#[from] naga::front::wgsl::ParseError),
+
+    #[error(transparent)]
+    Module(#[from] naga_interpreter::ModuleError),
 }
 
 #[derive(Clone, Debug)]

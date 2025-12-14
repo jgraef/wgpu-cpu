@@ -11,6 +11,7 @@ mod util;
 pub use interpreter::Interpreter;
 pub use module::{
     EntryPointIndex,
+    Error as ModuleError,
     ShaderModule,
 };
 pub use naga::{

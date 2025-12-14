@@ -11,15 +11,18 @@ use naga::{
     Scalar,
     ShaderStage,
     TypeInner,
+    WithSpan,
     front::Typifier,
     proc::{
         Alignment,
+        LayoutError,
         Layouter,
         ResolveContext,
         TypeLayout,
     },
     valid::{
         ModuleInfo,
+        ValidationError,
         Validator,
     },
 };
@@ -50,17 +53,17 @@ pub struct ShaderModule {
 }
 
 impl ShaderModule {
-    pub fn new(module: naga::Module) -> Self {
+    pub fn new(module: naga::Module) -> Result<Self, Error> {
         let mut validator = Validator::new(Default::default(), Default::default());
-        let module_info = validator.validate(&module).unwrap();
+        let module_info = validator.validate(&module)?;
 
         let mut layouter = Layouter::default();
-        layouter.update(module.to_ctx()).unwrap();
+        layouter.update(module.to_ctx())?;
 
         //tracing::trace!("module: {module:#?}");
         //tracing::trace!("module_info: {module_info:#?}");
         //tracing::trace!("layouter: {layouter:#?}");
-        tracing::debug!("types: {:#?}", module.types);
+        //tracing::debug!("types: {:#?}", module.types);
 
         let mut expression_types = ExpressionTypes {
             entry_points: Vec::with_capacity(module.entry_points.len()),
@@ -120,7 +123,7 @@ impl ShaderModule {
         }
         unique_entry_points_by_stage.retain(|_, index| *index != usize::MAX);
 
-        Self {
+        Ok(Self {
             module,
             module_info,
             layouter,
@@ -130,7 +133,7 @@ impl ShaderModule {
             user_defined_io_layouts: UserDefinedIoLayouts {
                 inner: user_defined_io_layouts,
             },
-        }
+        })
     }
 
     pub fn type_layout<'t>(&self, ty: impl Into<VariableType<'t>>) -> TypeLayout {
@@ -146,6 +149,12 @@ impl ShaderModule {
                         TypeLayout {
                             size: *width as u32,
                             alignment: Alignment::from_width(*width),
+                        }
+                    }
+                    TypeInner::Pointer { base: _, space: _ } => {
+                        TypeLayout {
+                            size: 4,
+                            alignment: Alignment::FOUR,
                         }
                     }
                     _ => todo!("layout for {ty:?}"),
@@ -212,6 +221,20 @@ impl ShaderModule {
     }
 }
 
+impl AsRef<ShaderModule> for ShaderModule {
+    fn as_ref(&self) -> &ShaderModule {
+        self
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Validation(#[from] WithSpan<ValidationError>),
+    #[error(transparent)]
+    Layout(#[from] LayoutError),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EntryPointNotFound {
     #[error("Entry point '{name}' not found")]
@@ -265,7 +288,14 @@ fn typifier_from_function(module: &Module, function: &Function) -> Typifier {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct EntryPointIndex(pub usize);
+pub struct EntryPointIndex(usize);
+
+#[cfg(test)]
+impl From<usize> for EntryPointIndex {
+    fn from(value: usize) -> Self {
+        Self(value)
+    }
+}
 
 #[derive(Clone, Debug)]
 struct UserDefinedIoLayouts {

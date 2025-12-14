@@ -4,6 +4,8 @@ use std::{
         BitAnd,
         BitOr,
         ControlFlow,
+        Neg,
+        Not,
     },
 };
 
@@ -24,11 +26,14 @@ use naga::{
     Scalar,
     ScalarKind,
     Statement,
-    StructMember,
     Type,
     TypeInner,
+    UnaryOperator,
     front::Typifier,
-    proc::TypeResolution,
+    proc::{
+        TypeLayout,
+        TypeResolution,
+    },
 };
 
 use crate::{
@@ -65,7 +70,10 @@ pub struct Interpreter<Module, Bindings> {
     pub memory: Memory<Bindings>,
 }
 
-impl<Module, Bindings> Interpreter<Module, Bindings> {
+impl<Module, Bindings> Interpreter<Module, Bindings>
+where
+    Module: AsRef<ShaderModule>,
+{
     pub fn new(module: Module, bindings: Bindings) -> Self {
         Self {
             module,
@@ -130,11 +138,14 @@ where
                 local_variables,
             };
 
-            RunFunction {
-                stack_frame: outer_frame.frame(),
-                context: &mut function_context,
+            {
+                let mut run_function = RunFunction {
+                    stack_frame: outer_frame.frame(),
+                    context: &mut function_context,
+                };
+                run_function.initialize_local_variables();
+                run_function.run(result_variable);
             }
-            .run(result_variable);
 
             if let Some(result) = &entry_point.function.result {
                 copy_shader_outputs_from_stack(
@@ -156,9 +167,9 @@ pub struct FunctionContext<'module> {
     module: &'module ShaderModule,
     function: &'module Function,
     typifier: &'module Typifier,
-    emitted_expression: SparseCoArena<Expression, Variable<'module>>,
-    argument_variables: Vec<Variable<'module>>,
-    local_variables: CoArena<LocalVariable, Variable<'module>>,
+    emitted_expression: SparseCoArena<Expression, Variable<'module, 'module>>,
+    argument_variables: Vec<Variable<'module, 'module>>,
+    local_variables: CoArena<LocalVariable, Variable<'module, 'module>>,
 }
 
 #[derive(Debug)]
@@ -175,6 +186,25 @@ where
         RunFunction {
             stack_frame: self.stack_frame.frame(),
             context: &mut self.context,
+        }
+    }
+
+    pub fn initialize_local_variables(&mut self) {
+        // I think initializers expressions that can be evaluated when entering the
+        // function
+        //
+        // > Initial value for this variable.
+        // >
+        // > This handle refers to an expression in this LocalVariable’s function’s
+        // > expressions arena, but it is required to be an evaluated override
+        // > expression.
+        //
+        // http://localhost:8001/wgpu/naga/ir/struct.LocalVariable.html#structfield.init
+        for (handle, local_variable) in self.context.function.local_variables.iter() {
+            if let Some(init) = local_variable.init {
+                let variable = &self.context.local_variables[handle];
+                self.evaluate(init, *variable);
+            }
         }
     }
 
@@ -221,7 +251,25 @@ where
             Statement::Kill => todo!(),
             Statement::ControlBarrier(barrier) => todo!(),
             Statement::MemoryBarrier(barrier) => todo!(),
-            Statement::Store { pointer, value } => todo!(),
+            Statement::Store { pointer, value } => {
+                let pointer_ty = &self.context.typifier[*pointer];
+                let pointer_variable = self
+                    .stack_frame
+                    .allocate_variable(pointer_ty, &self.context.module);
+                self.evaluate(*pointer, pointer_variable);
+
+                let value_ty = &self.context.typifier[*value];
+                let value_variable = self
+                    .stack_frame
+                    .allocate_variable(value_ty, &self.context.module);
+                self.evaluate(*value, value_variable);
+
+                let deref_pointer = pointer_variable
+                    .try_deref(&self.stack_frame.memory)
+                    .unwrap();
+
+                deref_pointer.copy_from(value_variable, &mut self.stack_frame.memory);
+            }
             Statement::ImageStore {
                 image,
                 coordinate,
@@ -297,10 +345,10 @@ where
 
             inner.evaluate(condition, condition_output);
 
-            *condition_output.read::<u32, _>(&inner.stack_frame.memory)
+            *condition_output.read::<Bool, _>(&inner.stack_frame.memory)
         };
 
-        if condition != 0 {
+        if condition.into() {
             self.run_block(accept)?;
         }
         else {
@@ -334,7 +382,9 @@ where
             }
             Expression::Constant(handle) => todo!(),
             Expression::Override(handle) => todo!(),
-            Expression::ZeroValue(handle) => todo!(),
+            Expression::ZeroValue(handle) => {
+                output.write_zero(&mut self.stack_frame.memory);
+            }
             Expression::Compose { ty, components } => {
                 self.evaluate_compose(*ty, &components, output);
             }
@@ -351,16 +401,13 @@ where
                 self.evaluate(*base, base_variable);
 
                 let mut produce_pointer = false;
-                if let Some(base_deref) =
-                    base_variable.try_deref(&self.stack_frame.memory, &self.context.module)
-                {
+                if let Some(base_deref) = base_variable.try_deref(&self.stack_frame.memory) {
                     tracing::trace!(?base_variable, "deref");
                     base_variable = base_deref;
                     produce_pointer = true;
                 }
 
-                let component_variable =
-                    base_variable.component(*index as usize, output.ty, &self.context.module);
+                let component_variable = base_variable.component(*index as usize, output.ty);
                 tracing::trace!(?component_variable, "index");
 
                 if produce_pointer {
@@ -388,7 +435,18 @@ where
                 let local_variable = &self.context.local_variables[*handle];
                 *output.write(self.stack_frame.memory) = local_variable.pointer();
             }
-            Expression::Load { pointer } => todo!(),
+            Expression::Load { pointer } => {
+                let pointer_ty = &self.context.typifier[*pointer];
+                let pointer_variable = self
+                    .stack_frame
+                    .allocate_variable(pointer_ty, &self.context.module);
+                self.evaluate(*pointer, pointer_variable);
+
+                let deref_pointer = pointer_variable
+                    .try_deref(&self.stack_frame.memory)
+                    .unwrap();
+                output.copy_from(deref_pointer, &mut self.stack_frame.memory);
+            }
             Expression::ImageSample {
                 image,
                 sampler,
@@ -408,7 +466,9 @@ where
                 level,
             } => todo!(),
             Expression::ImageQuery { image, query } => todo!(),
-            Expression::Unary { op, expr } => todo!(),
+            Expression::Unary { op, expr } => {
+                self.evaluate_unary(*op, *expr, output);
+            }
             Expression::Binary { op, left, right } => {
                 self.evaluate_binary(*op, *left, *right, output);
             }
@@ -453,7 +513,7 @@ where
     ) {
         for (i, component_handle) in components.into_iter().enumerate() {
             let component_ty = &self.context.typifier[*component_handle];
-            let variable = output.component(i, component_ty, self.context.module);
+            let variable = output.component(i, component_ty);
             self.evaluate(*component_handle, variable);
         }
     }
@@ -509,6 +569,56 @@ where
         }
     }
 
+    pub fn evaluate_unary(
+        &mut self,
+        op: UnaryOperator,
+        input: Handle<Expression>,
+        output: Variable,
+    ) {
+        let input_ty = &self.context.typifier[input];
+        let input_variable = self
+            .stack_frame
+            .allocate_variable(input_ty, self.context.module);
+        self.evaluate(input, input_variable);
+        let input_ty_inner = input_ty.inner_with(&self.context.module.module.types);
+
+        match input_ty_inner {
+            TypeInner::Scalar(scalar) => {
+                scalar_unary_op(
+                    op,
+                    *scalar,
+                    input_variable,
+                    output,
+                    &mut self.stack_frame.memory,
+                );
+            }
+            TypeInner::Vector { size, scalar } => todo!("unary vector"),
+            TypeInner::Matrix {
+                columns,
+                rows,
+                scalar,
+            } => todo!(),
+            TypeInner::Atomic(scalar) => todo!(),
+            TypeInner::Pointer { base, space } => todo!(),
+            TypeInner::ValuePointer {
+                size,
+                scalar,
+                space,
+            } => todo!(),
+            TypeInner::Array { base, size, stride } => todo!(),
+            TypeInner::Struct { members, span } => todo!(),
+            TypeInner::Image {
+                dim,
+                arrayed,
+                class,
+            } => todo!(),
+            TypeInner::Sampler { comparison } => todo!(),
+            TypeInner::AccelerationStructure { vertex_return } => todo!(),
+            TypeInner::RayQuery { vertex_return } => todo!(),
+            TypeInner::BindingArray { base, size } => todo!(),
+        }
+    }
+
     pub fn evaluate_binary(
         &mut self,
         op: BinaryOperator,
@@ -521,15 +631,14 @@ where
             .stack_frame
             .allocate_variable(left_ty, self.context.module);
         self.evaluate(left, left_variable);
+        let left_ty_inner = left_ty.inner_with(&self.context.module.module.types);
 
         let right_ty = &self.context.typifier[right];
         let right_variable = self
             .stack_frame
             .allocate_variable(right_ty, self.context.module);
         self.evaluate(right, right_variable);
-
-        let left_ty_inner = left_ty.inner_with(&self.context.module.module.types);
-        let right_ty_inner = left_ty.inner_with(&self.context.module.module.types);
+        let right_ty_inner = right_ty.inner_with(&self.context.module.module.types);
 
         match (left_ty_inner, right_ty_inner) {
             (TypeInner::Scalar(left), TypeInner::Scalar(right)) if left == right => {
@@ -702,12 +811,37 @@ impl<'a> From<&'a TypeResolution> for VariableType<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Variable<'a> {
-    pub ty: VariableType<'a>,
-    pub slice: Slice,
+pub struct Variable<'module, 'ty> {
+    module: &'module ShaderModule,
+    ty: VariableType<'ty>,
+    slice: Slice,
 }
 
-impl<'a> Variable<'a> {
+impl<'module, 'ty> Variable<'module, 'ty> {
+    pub fn allocate<'memory, B>(
+        ty: impl Into<VariableType<'ty>>,
+        module: &'module ShaderModule,
+        stack_frame: &mut StackFrame<'memory, B>,
+    ) -> Variable<'module, 'ty> {
+        let ty = ty.into();
+        let type_layout = module.type_layout(ty);
+
+        let slice = stack_frame
+            .memory
+            .stack
+            .allocate(type_layout.size, type_layout.alignment);
+
+        Self {
+            module,
+            ty,
+            slice: slice.into(),
+        }
+    }
+
+    pub fn slice(&self) -> Slice {
+        self.slice
+    }
+
     pub fn read<'m, T, M>(&self, memory: &'m M) -> &'m T
     where
         T: Pod,
@@ -733,42 +867,37 @@ impl<'a> Variable<'a> {
         memory.copy(source.slice, self.slice);
     }
 
-    pub fn cast(&self, ty: impl Into<VariableType<'a>>) -> Self {
-        Self {
+    pub fn cast<'ty2>(&self, ty: impl Into<VariableType<'ty2>>) -> Variable<'module, 'ty2> {
+        Variable {
+            module: self.module,
             ty: ty.into(),
             slice: self.slice,
         }
     }
 
-    pub fn debug<M>(&self, module: &'a ShaderModule, memory: &'a M) -> VariableDebug<'a, M>
+    pub fn debug<'a, M>(&'a self, memory: &'a M) -> VariableDebug<'a, M>
     where
         M: ReadMemory<Slice>,
     {
         VariableDebug {
             variable: *self,
-            module,
+            module: self.module,
             memory,
         }
     }
 
-    pub fn component(
+    pub fn component<'ty2>(
         &self,
         index: usize,
-        component_ty: impl Into<VariableType<'a>>,
-        module: &ShaderModule,
-    ) -> Variable<'a> {
+        component_ty: impl Into<VariableType<'ty2>>,
+    ) -> Variable<'module, 'ty2> {
         let component_ty = component_ty.into();
-        let offset = module.offset_of(self.ty, component_ty, index);
+        let offset = self.module.offset_of(self.ty, component_ty, index);
+        let size = self.module.size_of(component_ty);
         Variable {
+            module: self.module,
             ty: component_ty,
-            slice: self.slice.slice(offset..),
-        }
-    }
-
-    pub fn member(&self, member: &StructMember) -> Variable<'a> {
-        Variable {
-            ty: member.ty.into(),
-            slice: self.slice.slice(member.offset..),
+            slice: self.slice.slice(offset..offset + size),
         }
     }
 
@@ -776,19 +905,23 @@ impl<'a> Variable<'a> {
         Pointer::from(self.slice)
     }
 
-    pub fn try_deref<M>(&self, memory: &M, module: &ShaderModule) -> Option<Variable<'a>>
+    pub fn try_deref<M>(&self, memory: &M) -> Option<Variable<'module, 'static>>
     where
         M: ReadMemory<Slice>,
     {
-        let ty_inner = self.ty.inner_with(module);
+        let ty_inner = self.ty.inner_with(self.module);
         match ty_inner {
             TypeInner::Pointer { base, space } => {
                 let ty = base.into();
                 let pointer = self.read::<Pointer, M>(memory);
-                let size = module.size_of(ty);
+                let size = self.module.size_of(ty);
                 let slice = pointer.deref(*space, size);
 
-                Some(Variable { ty, slice })
+                Some(Variable {
+                    module: self.module,
+                    ty,
+                    slice,
+                })
             }
             TypeInner::ValuePointer {
                 size,
@@ -806,6 +939,76 @@ impl<'a> Variable<'a> {
             _ => None,
         }
     }
+
+    pub fn write_zero<M>(&self, memory: &mut M)
+    where
+        M: WriteMemory<Slice>,
+    {
+        let target = memory.write(self.slice);
+        target.fill(0);
+    }
+
+    pub fn type_layout(&self) -> TypeLayout {
+        self.module.type_layout(self.ty)
+    }
+
+    pub fn size_of(&self) -> u32 {
+        self.module.size_of(self.ty)
+    }
+}
+
+fn scalar_unary_op<M>(
+    op: UnaryOperator,
+    scalar_ty: Scalar,
+    input: Variable,
+    output: Variable,
+    memory: &mut M,
+) where
+    M: ReadWriteMemory<Slice>,
+{
+    macro_rules! unary_ops {
+        (@emit_for_ty(($scalar:ident, $width:pat, $ty:ty), [$(($op:ident, $func:path)),*])) => {
+            match (scalar_ty.kind, scalar_ty.width, op) {
+                $(
+                    (ScalarKind::$scalar, $width, UnaryOperator::$op) => {
+                        let input = input.read::<$ty, M>(memory);
+                        let result = $func(input);
+                        *output.write::<_, M>(memory) = result;
+                        return;
+                    },
+                )*
+                _ => {}
+            }
+
+        };
+        (@emit_for_many([$($arg:tt),*], $ops:tt)) => {
+            $(
+                unary_ops!(@emit_for_ty($arg, $ops));
+            )*
+        };
+        ($(
+            [$($scalar:ident @ $width:pat => $ty:ty),*]: [$($op:ident => $func:path),*];
+        )*) => {
+            $(
+                unary_ops!(@emit_for_many([$(($scalar, $width, $ty)),*], [$(($op, $func)),*]));
+            )*
+
+            panic!("Invalid unary op: {op:?} {input:?} ({scalar_ty:?})");
+        };
+    }
+
+    unary_ops!(
+        [Bool@1 => Bool]: [LogicalNot => Not::not];
+        [
+            Sint@4 => i32,
+            Float@2 => f16,
+            Float@4 => f32
+        ]: [Negate => Neg::neg];
+        [
+            Sint@4 => i32,
+            Uint@4 => u32
+        ]: [BitwiseNot => Not::not];
+    );
 }
 
 fn scalar_binary_op<M>(
@@ -868,10 +1071,10 @@ fn scalar_binary_op<M>(
     impl_comparisions!(
         equal => PartialEq::eq,
         not_equal => PartialEq::ne,
-        less => PartialEq::eq,
-        less_equal => PartialEq::eq,
-        greater => PartialEq::eq,
-        greater_equal => PartialEq::eq,
+        less => PartialOrd::lt,
+        less_equal => PartialOrd::le,
+        greater => PartialOrd::gt,
+        greater_equal => PartialOrd::ge,
     );
 
     binary_ops!(
@@ -939,7 +1142,19 @@ impl From<bool> for Bool {
 
 impl From<Bool> for bool {
     fn from(value: Bool) -> Self {
-        value.0 != 0
+        match value.0 {
+            0 => false,
+            1 => true,
+            x => panic!("Invalid bool: {x}"),
+        }
+    }
+}
+
+impl Not for Bool {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        Self::from(!bool::from(self))
     }
 }
 
@@ -956,6 +1171,14 @@ impl BitOr for Bool {
 
     fn bitor(self, rhs: Self) -> Self::Output {
         Self::from(bool::from(self) || bool::from(rhs))
+    }
+}
+
+impl Not for &Bool {
+    type Output = Bool;
+
+    fn not(self) -> Self::Output {
+        Bool::from(!bool::from(*self))
     }
 }
 
@@ -1032,25 +1255,38 @@ fn write_literal<M>(literal: &Literal, output: Variable, memory: &mut M)
 where
     M: WriteMemory<Slice>,
 {
-    macro_rules! write_literal {
-        ($($variant:ident),*) => {
-            match literal {
-                $(
-                    Literal::$variant(value) => {
-                        *output.write(memory) = *value;
-                    }
-                )*
-                _ => panic!("Unsupported literal: {literal:?}"),
-            }
-        };
+    match literal {
+        Literal::F64(value) => {
+            *output.write(memory) = *value;
+        }
+        Literal::F32(value) => {
+            *output.write(memory) = *value;
+        }
+        Literal::F16(value) => {
+            *output.write(memory) = *value;
+        }
+        Literal::U32(value) => {
+            *output.write(memory) = *value;
+        }
+        Literal::I32(value) => {
+            *output.write(memory) = *value;
+        }
+        Literal::U64(value) => {
+            *output.write(memory) = *value;
+        }
+        Literal::I64(value) => {
+            *output.write(memory) = *value;
+        }
+        Literal::Bool(value) => {
+            *output.write(memory) = Bool::from(*value);
+        }
+        _ => panic!("Unsupported literal: {literal:?}"),
     }
-
-    write_literal!(F32, F16, U32, I32);
 }
 
 #[derive(Clone, Copy)]
 pub struct VariableDebug<'a, M> {
-    variable: Variable<'a>,
+    variable: Variable<'a, 'a>,
     module: &'a ShaderModule,
     memory: &'a M,
 }
@@ -1112,9 +1348,7 @@ where
                         write!(f, ", ")?;
                     }
 
-                    let component = self
-                        .variable
-                        .component(i as usize, &component_ty, self.module);
+                    let component = self.variable.component(i as usize, &component_ty);
 
                     self.write_scalar(component, scalar, f)?;
                 }
@@ -1144,6 +1378,8 @@ where
             TypeInner::RayQuery { vertex_return } => todo!(),
             TypeInner::BindingArray { base, size } => todo!(),
         }
+
+        write!(f, " ({ty:?} @ {:?})", self.variable.slice)?;
 
         Ok(())
     }

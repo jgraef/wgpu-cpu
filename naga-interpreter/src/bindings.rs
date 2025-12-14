@@ -502,17 +502,17 @@ pub fn copy_shader_inputs_to_stack<'a, B, I>(
     module: &'a ShaderModule,
     inputs: I,
     argument: &FunctionArgument,
-) -> Variable<'a>
+) -> Variable<'a, 'a>
 where
     B: WriteMemory<BindingAddress>,
     I: ShaderInput,
 {
-    let variable = stack_frame.allocate_variable(argument.ty, module);
+    let variable = Variable::allocate(argument.ty, module, stack_frame);
 
     IoBindingVisitor {
         types: &module.module.types,
         visit: CopyInputsToMemory {
-            slice: variable.slice,
+            slice: variable.slice(),
             memory: &mut stack_frame.memory,
             inputs,
         },
@@ -535,7 +535,7 @@ pub fn copy_shader_outputs_from_stack<B, O>(
     IoBindingVisitor {
         types: &module.module.types,
         visit: CopyOutputsFromMemory {
-            slice: variable.slice,
+            slice: variable.slice(),
             memory: &stack_frame.memory,
             outputs,
         },

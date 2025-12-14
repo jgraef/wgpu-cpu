@@ -307,22 +307,13 @@ impl<'a, B> StackFrame<'a, B> {
         self.memory.stack_frame()
     }
 
-    pub fn allocate_variable<'ty>(
+    //#[deprecated = "use Variable::allocate instead"]
+    pub fn allocate_variable<'module, 'ty>(
         &mut self,
         ty: impl Into<VariableType<'ty>>,
-        module: &ShaderModule,
-    ) -> Variable<'ty> {
-        let ty = ty.into();
-        let type_layout = module.type_layout(ty);
-
-        let slice = self
-            .memory
-            .stack
-            .allocate(type_layout.size, type_layout.alignment);
-        Variable {
-            ty,
-            slice: slice.into(),
-        }
+        module: &'module ShaderModule,
+    ) -> Variable<'module, 'ty> {
+        Variable::allocate(ty, module, self)
     }
 }
 

@@ -1,7 +1,8 @@
 
 # TODO
 
-Nothing lol
+- [ ] depth buffer
+- [ ] vertex input buffers
 
 # Issues
 
@@ -18,4 +19,4 @@ Issues that can be raised with `wgpu`:
 - [ ] naga really needs something that returns `TypeLayout` for a `TypeInner`. type resolution sometimes can't give you a handle, so `Layouter` won't always do.
 - [ ] naga: can matrices and vectors really only be multiplied by floats, or by their scalar type? (http://localhost:8001/wgpu/naga/ir/enum.BinaryOperator.html#arithmetic-type-rules)
 - [ ] naga: make `naga::ir::Binding` `Copy`. This might be useful, but we don't need it anymore.
-- [ ] naga: bools have size and alignment 1. See `shader::tests::naga_bool_width_is_32bit`.
+- [ ] naga: bools have size and alignment 1. See `naga_interpreter::tests::naga_bool_width_is_32bit`.

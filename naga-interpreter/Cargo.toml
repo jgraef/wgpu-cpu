@@ -10,3 +10,6 @@ half = { version = "2.7.1", features = ["bytemuck"] }
 naga = "27.0.0"
 thiserror = "2.0.17"
 tracing = "0.1.43"
+
+[dev-dependencies]
+approx = "0.5.1"
