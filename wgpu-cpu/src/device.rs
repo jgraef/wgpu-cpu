@@ -21,13 +21,13 @@ use crate::{
         CommandEncoder,
     },
     engine::Engine,
-    make_label_owned,
     pipeline::{
         PipelineLayout,
         RenderPipeline,
     },
     shader::ShaderModule,
     texture::Texture,
+    util::make_label_owned,
 };
 
 pub fn create_device_and_queue(

@@ -3,6 +3,14 @@
 
 - [ ] depth buffer
 - [ ] vertex input buffers
+- [ ] srgb conversion (`palette`!)
+- [ ] compile naga IR with [cranelift](https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/docs/index.md) ([JIT demo](https://github.com/bytecodealliance/cranelift-jit-demo/))
+
+## For tomorrow
+
+- remove `VariableType`:
+  - `Variable` can store a `&'module TypeInner` directly and an optional `ty_name: Option<&'module str>`
+  - we might need a trait for things that can fetch `&'module TypeInner` given the `&'module ShaderModule`.
 
 # Issues
 

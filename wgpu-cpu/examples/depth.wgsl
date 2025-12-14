@@ -29,5 +29,5 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let z = input.position.z;
-    return vec4f(z, z, z, 1.0);
+    return vec4f(1.0 - z, 0.0, z, 1.0);
 }

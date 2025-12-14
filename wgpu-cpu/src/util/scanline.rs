@@ -17,7 +17,6 @@ pub fn scanlines(tri: [Point2<u32>; 3]) -> Scanlines {
     // after sorting we have two vertical boundaries: [AC] and [AB, BC]. Between
     // these we can draw horizontal lines.
     bubblesort3(&mut tri, |a, b| a.y.cmp(&b.y));
-    tracing::debug!(?tri, "sorted tri");
 
     let [a, b, c] = tri;
 

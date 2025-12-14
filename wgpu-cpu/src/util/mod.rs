@@ -13,6 +13,10 @@ use arrayvec::ArrayVec;
 use nalgebra::SVector;
 use num_traits::Zero;
 
+pub fn make_label_owned(label: &Option<&str>) -> Option<String> {
+    label.map(ToOwned::to_owned)
+}
+
 pub fn lerp<T>(x0: T, x1: T, t: f32) -> T
 where
     T: Mul<f32, Output = T> + Add<T, Output = T>,

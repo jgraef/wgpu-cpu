@@ -1,9 +1,8 @@
 use std::pin::Pin;
 
 use crate::{
-    TEXTURE_USAGES,
     device::create_device_and_queue,
-    make_label_owned,
+    util::make_label_owned,
 };
 
 #[derive(Debug)]
@@ -82,7 +81,10 @@ impl wgpu::custom::AdapterInterface for Adapter {
         format: wgpu::TextureFormat,
     ) -> wgpu::TextureFormatFeatures {
         wgpu::TextureFormatFeatures {
-            allowed_usages: TEXTURE_USAGES,
+            allowed_usages: wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             flags: wgpu::TextureFormatFeatureFlags::empty(),
         }
     }

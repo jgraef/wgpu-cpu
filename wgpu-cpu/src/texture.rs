@@ -63,19 +63,6 @@ impl wgpu::custom::TextureInterface for Texture {
     }
 }
 
-#[derive(Debug)]
-pub struct TextureViewDescriptor {
-    pub label: Option<String>,
-    pub format: wgpu::TextureFormat,
-    pub dimension: wgpu::TextureViewDimension,
-    pub usage: wgpu::TextureUsages,
-    pub aspect: wgpu::TextureAspect,
-    pub base_mip_level: u32,
-    pub mip_level_count: u32,
-    pub base_array_layer: u32,
-    pub array_layer_count: u32,
-}
-
 #[derive(Clone, Debug)]
 pub struct TextureView {
     descriptor: wgpu::wgt::TextureViewDescriptor<Option<String>>,
@@ -206,8 +193,6 @@ fn calculate_texture_buffer_size(size: wgpu::Extent3d, format: wgpu::TextureForm
         * size.depth_or_array_layers as usize
         * bytes_per_texel(format)
 }
-
-pub type MaxTexel = [u8; wgpu::TextureFormat::MAX_TARGET_PIXEL_BYTE_COST as usize];
 
 fn bytes_per_texel(format: wgpu::TextureFormat) -> usize {
     match format {
