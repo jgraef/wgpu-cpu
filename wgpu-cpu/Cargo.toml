@@ -22,7 +22,7 @@ nalgebra = { version = "0.34.1", default-features = false, features = [
     "bytemuck",
 ] }
 num-traits = "0.2.19"
-parking_lot = "0.12.5"
+parking_lot = { version = "0.12.5", features = ["arc_lock", "send_guard"] }
 softbuffer = { version = "0.4.6", optional = true }
 thiserror = "2.0.17"
 tracing = "0.1.43"
@@ -36,6 +36,7 @@ clap = { version = "4.5.53", features = ["derive"] }
 color-eyre = "0.6.5"
 dotenvy = "0.15.7"
 pollster = "0.4.0"
+tobj = "4.0.3"
 tracing-subscriber = "0.3.22"
 winit = "0.30.12"
 

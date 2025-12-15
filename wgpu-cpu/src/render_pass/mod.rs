@@ -1,9 +1,9 @@
 pub mod clipper;
-pub mod color_attachment;
-pub mod depth_stencil_attachment;
+pub mod fragment;
 pub mod primitive;
 pub mod rasterizer;
 pub mod state;
+pub mod vertex;
 
 use std::{
     ops::Range,
@@ -11,16 +11,20 @@ use std::{
 };
 
 use derive_more::Debug;
+use naga::Binding;
 
 use crate::{
+    buffer::BufferSlice,
     command::{
         Command,
         CommandEncoder,
     },
     pipeline::RenderPipeline,
     render_pass::{
-        color_attachment::ColorAttachment,
-        depth_stencil_attachment::DepthStencilAttachment,
+        fragment::{
+            ColorAttachment,
+            DepthStencilAttachment,
+        },
         state::State,
     },
 };
@@ -55,10 +59,9 @@ impl RenderPassEncoder {
 
 impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
     fn set_pipeline(&mut self, pipeline: &wgpu::custom::DispatchRenderPipeline) {
-        let pipeline = pipeline.as_custom::<RenderPipeline>().unwrap();
-        self.commands.push(RenderPassSubCommand::SetPipeline {
-            pipeline: pipeline.clone(),
-        })
+        let pipeline = pipeline.as_custom::<RenderPipeline>().unwrap().clone();
+        self.commands
+            .push(RenderPassSubCommand::SetPipeline { pipeline })
     }
 
     fn set_bind_group(
@@ -77,7 +80,11 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
         offset: wgpu::BufferAddress,
         size: Option<wgpu::BufferSize>,
     ) {
-        todo!()
+        let buffer_slice = BufferSlice::from_wgpu_dispatch(buffer, offset, size);
+        self.commands.push(RenderPassSubCommand::SetIndexBuffer {
+            buffer_slice,
+            index_format,
+        });
     }
 
     fn set_vertex_buffer(
@@ -87,7 +94,9 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
         offset: wgpu::BufferAddress,
         size: Option<wgpu::BufferSize>,
     ) {
-        todo!()
+        let buffer_slice = BufferSlice::from_wgpu_dispatch(buffer, offset, size);
+        self.commands
+            .push(RenderPassSubCommand::SetVertexBuffer { buffer_slice, slot });
     }
 
     fn set_immediates(&mut self, stages: wgpu::ShaderStages, offset: u32, data: &[u8]) {
@@ -118,20 +127,19 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
         todo!()
     }
 
-    fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
+    fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
         self.commands.push(RenderPassSubCommand::Draw {
-            vertices: vertices.clone(),
-            instances: instances.clone(),
+            vertices,
+            instances,
         })
     }
 
-    fn draw_indexed(
-        &mut self,
-        indices: std::ops::Range<u32>,
-        base_vertex: i32,
-        instances: std::ops::Range<u32>,
-    ) {
-        todo!()
+    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.commands.push(RenderPassSubCommand::DrawIndexed {
+            indices,
+            base_vertex,
+            instances,
+        })
     }
 
     fn draw_mesh_tasks(&mut self, group_count_x: u32, group_count_y: u32, group_count_z: u32) {
@@ -310,13 +318,29 @@ impl RenderPassCommand {
         for command in self.commands {
             match command {
                 RenderPassSubCommand::SetPipeline { pipeline } => {
-                    state.pipeline = Some(pipeline);
+                    state.set_pipeline(pipeline);
+                }
+                RenderPassSubCommand::SetIndexBuffer {
+                    buffer_slice,
+                    index_format,
+                } => {
+                    state.set_index_buffer(buffer_slice, index_format);
+                }
+                RenderPassSubCommand::SetVertexBuffer { buffer_slice, slot } => {
+                    state.set_vertex_buffer(buffer_slice, slot);
                 }
                 RenderPassSubCommand::Draw {
                     vertices,
                     instances,
                 } => {
                     state.draw(vertices, instances);
+                }
+                RenderPassSubCommand::DrawIndexed {
+                    indices,
+                    base_vertex,
+                    instances,
+                } => {
+                    state.draw_indexed(indices, base_vertex, instances);
                 }
             }
         }
@@ -334,8 +358,55 @@ pub enum RenderPassSubCommand {
         #[debug(skip)]
         pipeline: RenderPipeline,
     },
+    SetIndexBuffer {
+        buffer_slice: BufferSlice,
+        index_format: wgpu::IndexFormat,
+    },
+    SetVertexBuffer {
+        buffer_slice: BufferSlice,
+        slot: u32,
+    },
     Draw {
         vertices: Range<u32>,
         instances: Range<u32>,
     },
+    DrawIndexed {
+        indices: Range<u32>,
+        base_vertex: i32,
+        instances: Range<u32>,
+    },
+}
+
+#[track_caller]
+fn invalid_binding(binding: &Binding) -> ! {
+    panic!("Binding not supported: {binding:?}");
+}
+
+fn bytes_of_bool_as_u32(b: bool) -> &'static [u8] {
+    if b {
+        bytemuck::bytes_of(&1u32)
+    }
+    else {
+        bytemuck::bytes_of(&0u32)
+    }
+}
+
+fn evaluate_compare_function<T>(
+    compare_function: wgpu::CompareFunction,
+    value: T,
+    reference: T,
+) -> bool
+where
+    T: PartialOrd<T>,
+{
+    match compare_function {
+        wgpu::CompareFunction::Never => false,
+        wgpu::CompareFunction::Less => value < reference,
+        wgpu::CompareFunction::Equal => value == reference,
+        wgpu::CompareFunction::LessEqual => value <= reference,
+        wgpu::CompareFunction::Greater => value > reference,
+        wgpu::CompareFunction::NotEqual => value != reference,
+        wgpu::CompareFunction::GreaterEqual => value >= reference,
+        wgpu::CompareFunction::Always => true,
+    }
 }

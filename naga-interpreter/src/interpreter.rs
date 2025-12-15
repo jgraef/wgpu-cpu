@@ -30,6 +30,7 @@ use naga::{
     Type,
     TypeInner,
     UnaryOperator,
+    VectorSize,
     front::Typifier,
     proc::{
         TypeLayout,
@@ -650,7 +651,7 @@ where
 
         match (left_ty_inner, right_ty_inner) {
             (TypeInner::Scalar(left), TypeInner::Scalar(right)) if left == right => {
-                scalar_binary_op(
+                scalar_binop(
                     op,
                     *left,
                     left_variable,
@@ -698,15 +699,34 @@ where
                     size: vector_size,
                     scalar: vector_scalar,
                 },
-            )
-            | (
+            ) if scalar == vector_scalar && op == BinaryOperator::Multiply => {
+                vector_scalar_mul(
+                    op,
+                    *scalar,
+                    *vector_size,
+                    right_variable,
+                    left_variable,
+                    output,
+                    &mut self.stack_frame.memory,
+                );
+            }
+
+            (
                 TypeInner::Vector {
                     size: vector_size,
                     scalar: vector_scalar,
                 },
                 TypeInner::Scalar(scalar),
             ) if scalar == vector_scalar && op == BinaryOperator::Multiply => {
-                todo!("vector * scalar")
+                vector_scalar_mul(
+                    op,
+                    *scalar,
+                    *vector_size,
+                    left_variable,
+                    right_variable,
+                    output,
+                    &mut self.stack_frame.memory,
+                );
             }
 
             (
@@ -834,10 +854,7 @@ impl<'module, 'ty> Variable<'module, 'ty> {
         let ty = ty.into();
         let type_layout = module.type_layout(ty);
 
-        let slice = stack_frame
-            .memory
-            .stack
-            .allocate(type_layout.size, type_layout.alignment);
+        let slice = stack_frame.memory.stack.allocate(type_layout);
 
         Self {
             module,
@@ -1019,7 +1036,7 @@ fn scalar_unary_op<M>(
     );
 }
 
-fn scalar_binary_op<M>(
+fn scalar_binop<M>(
     op: BinaryOperator,
     scalar_ty: Scalar,
     left: Variable,
@@ -1131,6 +1148,20 @@ fn scalar_binary_op<M>(
             GreaterEqual => greater_equal
         ];
     );
+}
+
+fn vector_scalar_mul<M>(
+    op: BinaryOperator,
+    scalar_ty: Scalar,
+    vector_size: VectorSize,
+    vector_variable: Variable,
+    scalar_variable: Variable,
+    output_variable: Variable,
+    memory: &mut M,
+) where
+    M: ReadWriteMemory<Slice>,
+{
+    todo!();
 }
 
 /// # FIXME

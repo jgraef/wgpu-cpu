@@ -7,7 +7,7 @@ pub struct Clipper {
 
 impl Clipper {
     pub fn clip(&self, tri: Tri) -> impl Iterator<Item = Tri> {
-        let clips = tri.0.map(|v| {
+        /*let clips = tri.0.map(|v| {
             !(v.x >= -v.w && v.x <= v.w && v.y >= -v.w && v.y <= v.w && v.z >= -v.w && v.z <= v.w)
         });
 
@@ -15,9 +15,14 @@ impl Clipper {
         //let all = clips.iter().all(|x| *x);
 
         if any {
-            tracing::debug!(?tri, "clipped");
+            tracing::trace!(?tri, "clipped");
         }
 
-        (!any).then_some(tri).into_iter()
+        (!any).then_some(tri).into_iter()*/
+
+        // todo: do proper clipping
+        // for now the rasterizer will catch anything that is outside of the target
+        // texture size
+        [tri].into_iter()
     }
 }

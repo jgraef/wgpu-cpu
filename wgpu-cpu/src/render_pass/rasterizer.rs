@@ -87,15 +87,19 @@ impl Rasterizer {
                 };
 
                 scanlines(tri_raster_u32).flat_map(move |scanline| {
-                    scanline.into_iter().map(move |raster| {
-                        let barycentric = barycentric(raster);
-                        let position = barycentric.interpolate(tri);
+                    scanline.into_iter().filter_map(move |raster| {
+                        (raster.x < self.target_size.x && raster.y < self.target_size.y).then(
+                            || {
+                                let barycentric = barycentric(raster);
+                                let position = barycentric.interpolate(tri);
 
-                        Fragment {
-                            raster,
-                            position,
-                            barycentric,
-                        }
+                                Fragment {
+                                    raster,
+                                    position,
+                                    barycentric,
+                                }
+                            },
+                        )
                     })
                 })
             })

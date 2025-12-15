@@ -177,6 +177,7 @@ where
             slice: variable.slice(),
             memory: &mut stack_frame.memory,
             inputs,
+            layouter: &module.layouter,
         },
     }
     .visit_function_argument(argument, 0);
@@ -200,6 +201,7 @@ pub fn copy_shader_outputs_from_stack<B, O>(
             slice: variable.slice(),
             memory: &stack_frame.memory,
             outputs,
+            layouter: &module.layouter,
         },
     }
     .visit_function_result(result, 0);
@@ -285,13 +287,14 @@ where
 }
 
 #[derive(Debug)]
-pub struct CopyInputsToMemory<M, I> {
+pub struct CopyInputsToMemory<'layouter, M, I> {
     pub slice: Slice,
     pub memory: M,
     pub inputs: I,
+    pub layouter: &'layouter Layouter,
 }
 
-impl<M, I> VisitIoBindings for CopyInputsToMemory<M, I>
+impl<'layouter, M, I> VisitIoBindings for CopyInputsToMemory<'layouter, M, I>
 where
     M: WriteMemory<Slice>,
     I: ShaderInput,
@@ -304,19 +307,23 @@ where
         offset: u32,
         name: Option<&str>,
     ) {
-        let target = self.memory.write(self.slice.slice(offset..));
+        let type_layout = &self.layouter[ty_handle];
+        let target = self
+            .memory
+            .write(self.slice.slice(offset..offset + type_layout.size));
         self.inputs.write_into(binding, ty, target);
     }
 }
 
 #[derive(Debug)]
-pub struct CopyOutputsFromMemory<M, O> {
+pub struct CopyOutputsFromMemory<'layouter, M, O> {
     pub slice: Slice,
     pub memory: M,
     pub outputs: O,
+    pub layouter: &'layouter Layouter,
 }
 
-impl<M, O> VisitIoBindings for CopyOutputsFromMemory<M, O>
+impl<'layouter, M, O> VisitIoBindings for CopyOutputsFromMemory<'layouter, M, O>
 where
     M: ReadMemory<Slice>,
     O: ShaderOutput,
@@ -329,7 +336,10 @@ where
         offset: u32,
         name: Option<&str>,
     ) {
-        let source = self.memory.read(self.slice.slice(offset..));
+        let type_layout = &self.layouter[ty_handle];
+        let source = self
+            .memory
+            .read(self.slice.slice(offset..offset + type_layout.size));
         self.outputs.read_from(binding, ty, source);
     }
 }

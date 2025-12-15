@@ -14,7 +14,3 @@ pub use module::{
     Error as ModuleError,
     ShaderModule,
 };
-pub use naga::{
-    self,
-    ShaderStage,
-};

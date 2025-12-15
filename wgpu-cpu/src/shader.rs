@@ -1,9 +1,5 @@
-pub mod fragment;
-pub mod vertex;
-
 use std::sync::Arc;
 
-use naga::Binding;
 use naga_interpreter::{
     bindings::{
         BindingLocation,
@@ -148,39 +144,5 @@ pub struct UserDefinedInterStagePoolBuffer {
 impl ReadMemory<BindingLocation> for UserDefinedInterStagePoolBuffer {
     fn read(&self, address: BindingLocation) -> &[u8] {
         self.inner.buffer.read(address)
-    }
-}
-
-#[track_caller]
-fn invalid_binding(binding: &Binding) -> ! {
-    panic!("Binding not supported: {binding:?}");
-}
-
-fn bytes_of_bool_as_u32(b: bool) -> &'static [u8] {
-    if b {
-        bytemuck::bytes_of(&1u32)
-    }
-    else {
-        bytemuck::bytes_of(&0u32)
-    }
-}
-
-fn evaluate_compare_function<T>(
-    compare_function: wgpu::CompareFunction,
-    value: T,
-    reference: T,
-) -> bool
-where
-    T: PartialOrd<T>,
-{
-    match compare_function {
-        wgpu::CompareFunction::Never => false,
-        wgpu::CompareFunction::Less => value < reference,
-        wgpu::CompareFunction::Equal => value == reference,
-        wgpu::CompareFunction::LessEqual => value <= reference,
-        wgpu::CompareFunction::Greater => value > reference,
-        wgpu::CompareFunction::NotEqual => value != reference,
-        wgpu::CompareFunction::GreaterEqual => value >= reference,
-        wgpu::CompareFunction::Always => true,
     }
 }

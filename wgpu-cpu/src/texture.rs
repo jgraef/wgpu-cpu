@@ -27,7 +27,7 @@ pub struct Texture {
 impl Texture {
     pub fn new(size: wgpu::Extent3d, format: wgpu::TextureFormat) -> Self {
         Self {
-            buffer: Buffer::new(calculate_texture_buffer_size(size, format)),
+            buffer: Buffer::new_unmapped(calculate_texture_buffer_size(size, format)),
             notify: None,
         }
     }

@@ -2,10 +2,12 @@ use naga::{
     Binding,
     BuiltIn,
     ScalarKind,
+    ShaderStage,
     Type,
     VectorSize,
 };
 use naga_interpreter::{
+    EntryPointIndex,
     bindings::{
         BindingLocation,
         ShaderInput,
@@ -15,22 +17,53 @@ use naga_interpreter::{
 };
 use nalgebra::{
     Point2,
+    Point3,
     SVector,
     Vector4,
 };
 
 use crate::{
+    pipeline::PipelineCompilationOptions,
     render_pass::{
-        color_attachment::AcquiredColorAttachment,
-        depth_stencil_attachment::AcquiredDepthStencilAttachment,
-    },
-    shader::{
         bytes_of_bool_as_u32,
         evaluate_compare_function,
         invalid_binding,
     },
+    shader::ShaderModule,
+    texture::{
+        TextureInfo,
+        TextureViewAttachment,
+        TextureWriteGuard,
+    },
     util::Barycentric,
 };
+
+#[derive(Debug)]
+pub struct FragmentState {
+    pub module: ShaderModule,
+    pub entry_point_name: Option<String>,
+    pub entry_point_index: EntryPointIndex,
+    pub compilation_options: PipelineCompilationOptions,
+    pub targets: Vec<Option<wgpu::ColorTargetState>>,
+}
+
+impl FragmentState {
+    pub fn new(fragment: &wgpu::FragmentState) -> Self {
+        let module = fragment.module.as_custom::<ShaderModule>().unwrap().clone();
+        let entry_point_index = module
+            .as_ref()
+            .find_entry_point(fragment.entry_point.as_deref(), ShaderStage::Fragment)
+            .unwrap();
+
+        Self {
+            module,
+            entry_point_name: fragment.entry_point.map(ToOwned::to_owned),
+            entry_point_index,
+            compilation_options: PipelineCompilationOptions::new(&fragment.compilation_options),
+            targets: fragment.targets.to_vec(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct FragmentInput<const N: usize, User> {
@@ -285,5 +318,150 @@ impl<'state, 'pass> ShaderOutput for FragmentOutput<'state, 'pass> {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct ColorAttachment {
+    pub view: TextureViewAttachment,
+    pub depth_slice: u32,
+    pub resolve_target: Option<TextureViewAttachment>,
+    pub ops: wgpu::Operations<wgpu::Color>,
+}
+
+impl ColorAttachment {
+    pub fn new(color_attachment: &wgpu::RenderPassColorAttachment) -> Self {
+        Self {
+            view: TextureViewAttachment::from_wgpu(&color_attachment.view).unwrap(),
+            depth_slice: color_attachment.depth_slice.unwrap_or_default(),
+            resolve_target: color_attachment
+                .resolve_target
+                .map(|texture| TextureViewAttachment::from_wgpu(texture).unwrap()),
+            ops: color_attachment.ops,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AcquiredColorAttachment<'color> {
+    texture_guard: TextureWriteGuard<'color>,
+    texture_info: &'color TextureInfo,
+    ops: wgpu::Operations<wgpu::Color>,
+    depth_slice: u32,
+}
+
+impl<'color> AcquiredColorAttachment<'color> {
+    pub fn new(color_attachment: &'color ColorAttachment) -> Self {
+        let texture_guard = color_attachment.view.write();
+        let texture_info = &color_attachment.view.info;
+
+        if color_attachment.resolve_target.is_some() {
+            todo!("color attachment resolve target");
+        }
+
+        Self {
+            texture_guard,
+            texture_info,
+            ops: color_attachment.ops,
+            depth_slice: color_attachment.depth_slice,
+        }
+    }
+
+    pub fn load(&mut self) {
+        match self.ops.load {
+            wgpu::LoadOp::Clear(clear_color) => {
+                self.texture_guard.clear_color(clear_color);
+            }
+            wgpu::LoadOp::Load => {
+                // nop
+            }
+            wgpu::LoadOp::DontCare(_) => {
+                // nop
+            }
+        }
+    }
+
+    pub fn store(&mut self) {
+        // todo: what to do?
+        match self.ops.store {
+            wgpu::StoreOp::Store => {}
+            wgpu::StoreOp::Discard => {}
+        }
+    }
+
+    pub fn put_pixel(&mut self, position: Point2<u32>, color: Vector4<f32>) {
+        let position = Point3::new(position.x, position.y, self.depth_slice);
+        self.texture_guard.put_pixel(position, color);
+    }
+}
+
+#[derive(Debug)]
+pub struct DepthStencilAttachment {
+    pub view: TextureViewAttachment,
+    pub depth_ops: Option<wgpu::Operations<f32>>,
+    pub stencil_ops: Option<wgpu::Operations<u32>>,
+}
+
+impl DepthStencilAttachment {
+    pub fn new(depth_stencil_attachment: &wgpu::RenderPassDepthStencilAttachment) -> Self {
+        Self {
+            view: TextureViewAttachment::from_wgpu(&depth_stencil_attachment.view).unwrap(),
+            depth_ops: depth_stencil_attachment.depth_ops,
+            stencil_ops: depth_stencil_attachment.stencil_ops,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AcquiredDepthStencilAttachment<'a> {
+    texture_guard: TextureWriteGuard<'a>,
+    texture_info: &'a TextureInfo,
+    depth_ops: Option<wgpu::Operations<f32>>,
+    stencil_ops: Option<wgpu::Operations<u32>>,
+}
+
+impl<'a> AcquiredDepthStencilAttachment<'a> {
+    pub fn new(depth_stencil_attachment: &'a DepthStencilAttachment) -> Self {
+        let texture_guard = depth_stencil_attachment.view.write();
+        let texture_info = &depth_stencil_attachment.view.info;
+
+        Self {
+            texture_guard,
+            texture_info,
+            depth_ops: depth_stencil_attachment.depth_ops,
+            stencil_ops: depth_stencil_attachment.stencil_ops,
+        }
+    }
+
+    pub fn load(&mut self) {
+        if let Some(depth_ops) = self.depth_ops {
+            match depth_ops.load {
+                wgpu::LoadOp::Clear(depth) => {
+                    self.texture_guard.clear_depth(depth);
+                }
+                wgpu::LoadOp::Load => {
+                    // nop
+                }
+                wgpu::LoadOp::DontCare(_) => {
+                    // nop
+                }
+            }
+        }
+
+        if let Some(stencil_ops) = self.stencil_ops {
+            todo!("stencil_ops");
+        }
+    }
+
+    pub fn store(&mut self) {
+        // todo: what to do?
+    }
+
+    pub fn get_depth(&self, position: Point2<u32>) -> f32 {
+        self.texture_guard.get_depth(position)
+    }
+
+    pub fn put_depth(&mut self, position: Point2<u32>, depth: f32) {
+        self.texture_guard.put_depth(position, depth);
     }
 }

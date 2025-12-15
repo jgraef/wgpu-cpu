@@ -4,14 +4,12 @@ use std::{
     sync::Arc,
 };
 
-use naga_interpreter::{
-    EntryPointIndex,
-    ShaderStage,
-};
-
 use crate::{
     bind_group::BindGroupLayout,
-    shader::ShaderModule,
+    render_pass::{
+        fragment::FragmentState,
+        vertex::VertexState,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -96,82 +94,6 @@ pub struct RenderPipelineDescriptor {
     pub multisample: wgpu::MultisampleState,
     pub fragment: Option<FragmentState>,
     pub multiview_mask: Option<NonZeroU32>,
-}
-
-#[derive(Debug)]
-pub struct VertexState {
-    pub module: ShaderModule,
-    pub entry_point_name: Option<String>,
-    pub entry_point_index: EntryPointIndex,
-    pub compilation_options: PipelineCompilationOptions,
-    pub buffers: Vec<VertexBufferLayout>,
-}
-
-impl VertexState {
-    pub fn new(vertex: &wgpu::VertexState) -> Self {
-        let module = vertex.module.as_custom::<ShaderModule>().unwrap().clone();
-
-        let entry_point_index = module
-            .as_ref()
-            .find_entry_point(vertex.entry_point.as_deref(), ShaderStage::Vertex)
-            .unwrap();
-
-        Self {
-            module,
-            entry_point_name: vertex.entry_point.map(ToOwned::to_owned),
-            entry_point_index,
-            compilation_options: PipelineCompilationOptions::new(&vertex.compilation_options),
-            buffers: vertex
-                .buffers
-                .iter()
-                .map(|buffer| VertexBufferLayout::new(buffer))
-                .collect(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct VertexBufferLayout {
-    pub array_stride: wgpu::BufferAddress,
-    pub step_mode: wgpu::VertexStepMode,
-    pub attributes: Vec<wgpu::VertexAttribute>,
-}
-
-impl VertexBufferLayout {
-    pub fn new(buffer: &wgpu::VertexBufferLayout) -> Self {
-        Self {
-            array_stride: buffer.array_stride,
-            step_mode: buffer.step_mode,
-            attributes: buffer.attributes.to_vec(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct FragmentState {
-    pub module: ShaderModule,
-    pub entry_point_name: Option<String>,
-    pub entry_point_index: EntryPointIndex,
-    pub compilation_options: PipelineCompilationOptions,
-    pub targets: Vec<Option<wgpu::ColorTargetState>>,
-}
-
-impl FragmentState {
-    pub fn new(fragment: &wgpu::FragmentState) -> Self {
-        let module = fragment.module.as_custom::<ShaderModule>().unwrap().clone();
-        let entry_point_index = module
-            .as_ref()
-            .find_entry_point(fragment.entry_point.as_deref(), ShaderStage::Vertex)
-            .unwrap();
-
-        Self {
-            module,
-            entry_point_name: fragment.entry_point.map(ToOwned::to_owned),
-            entry_point_index,
-            compilation_options: PipelineCompilationOptions::new(&fragment.compilation_options),
-            targets: fragment.targets.to_vec(),
-        }
-    }
 }
 
 #[derive(Debug)]

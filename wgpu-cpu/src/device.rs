@@ -15,6 +15,7 @@ use parking_lot::{
 };
 
 use crate::{
+    buffer::Buffer,
     command::{
         Command,
         CommandBuffer,
@@ -146,7 +147,7 @@ impl wgpu::custom::DeviceInterface for Device {
     }
 
     fn create_buffer(&self, desc: &wgpu::BufferDescriptor<'_>) -> wgpu::custom::DispatchBuffer {
-        todo!()
+        wgpu::custom::DispatchBuffer::custom(Buffer::new_mapped_at_creation(desc.size as usize))
     }
 
     fn create_texture(&self, desc: &wgpu::TextureDescriptor<'_>) -> wgpu::custom::DispatchTexture {

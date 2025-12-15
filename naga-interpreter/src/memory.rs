@@ -12,7 +12,7 @@ use bytemuck::{
 };
 use naga::{
     AddressSpace,
-    proc::Alignment,
+    proc::TypeLayout,
 };
 
 use crate::{
@@ -215,17 +215,17 @@ impl Stack {
         }
     }
 
-    pub fn allocate(&mut self, size: u32, alignment: Alignment) -> StackSlice {
-        let size = size as usize;
-        let offset = alignment.round_up(self.data.len() as u32) as usize;
+    pub fn allocate(&mut self, type_layout: TypeLayout) -> StackSlice {
+        let len = type_layout.size as usize;
+        let offset = type_layout.alignment.round_up(self.data.len() as u32) as usize;
 
-        let new_size = offset + size;
+        let new_size = offset + len;
         if new_size > self.limit {
             todo!("stack limit reached. return an error here");
         }
 
         self.data.resize(new_size, 0);
-        StackSlice { offset, len: size }
+        StackSlice { offset, len }
     }
 
     pub fn size(&self) -> usize {

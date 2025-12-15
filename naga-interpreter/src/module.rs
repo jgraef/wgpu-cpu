@@ -45,7 +45,7 @@ pub struct ShaderModule {
     pub(crate) module: Module,
     #[allow(unused)]
     module_info: ModuleInfo,
-    layouter: Layouter,
+    pub(crate) layouter: Layouter,
     entry_points_by_name: HashMap<String, usize>,
     unique_entry_points_by_stage: HashMap<ShaderStage, usize>,
     pub(crate) expression_types: ExpressionTypes,
@@ -64,6 +64,10 @@ impl ShaderModule {
         //tracing::trace!("module_info: {module_info:#?}");
         //tracing::trace!("layouter: {layouter:#?}");
         //tracing::debug!("types: {:#?}", module.types);
+        for (handle, ty) in module.types.iter() {
+            let ty_layout = &layouter[handle];
+            tracing::debug!(?ty, ?ty_layout, "type layout")
+        }
 
         let mut expression_types = ExpressionTypes {
             entry_points: Vec::with_capacity(module.entry_points.len()),
@@ -169,18 +173,31 @@ impl ShaderModule {
         stage: ShaderStage,
     ) -> Result<EntryPointIndex, EntryPointNotFound> {
         let index = if let Some(name) = name {
-            self.entry_points_by_name.get(name).ok_or_else(|| {
+            let index = *self.entry_points_by_name.get(name).ok_or_else(|| {
                 EntryPointNotFound::NameNotFound {
                     name: name.to_owned(),
                 }
-            })?
+            })?;
+
+            let module_stage = self.module.entry_points[index].stage;
+            if module_stage != stage {
+                return Err(EntryPointNotFound::WrongStage {
+                    name: name.to_owned(),
+                    module_stage,
+                    expected_stage: stage,
+                });
+            }
+
+            index
         }
         else {
-            self.unique_entry_points_by_stage
+            *self
+                .unique_entry_points_by_stage
                 .get(&stage)
                 .ok_or_else(|| EntryPointNotFound::NoUniqueForStage { stage })?
         };
-        Ok(EntryPointIndex(*index))
+
+        Ok(EntryPointIndex(index))
     }
 
     pub fn offset_of<'ty>(
@@ -241,6 +258,14 @@ pub enum EntryPointNotFound {
     NameNotFound { name: String },
     #[error("No unique entry point for shader stage {stage:?} found")]
     NoUniqueForStage { stage: ShaderStage },
+    #[error(
+        "Found entry point '{name}', but it is for shader stage {module_stage:?}, and not {expected_stage:?}"
+    )]
+    WrongStage {
+        name: String,
+        module_stage: ShaderStage,
+        expected_stage: ShaderStage,
+    },
 }
 
 impl Index<EntryPointIndex> for ShaderModule {
