@@ -192,7 +192,7 @@ where
         fn read_from(&mut self, binding: &naga::Binding, ty: &naga::Type, source: &[u8]) {
             match binding {
                 naga::Binding::Location { location: 0, .. } => {
-                    self.output = *bytemuck::from_bytes::<T>(&source[..size_of::<T>()]);
+                    self.output = *bytemuck::from_bytes::<T>(source);
                 }
                 _ => {}
             }
@@ -210,7 +210,7 @@ where
 
 #[track_caller]
 fn eval_bool(expression: &str, preamble: &str) -> bool {
-    let output: u32 = eval(&format!("u32({expression})"), preamble, "u32");
+    let output: u32 = eval::<u32>(&format!("u32({expression})"), preamble, "u32");
     match output {
         0 => false,
         1 => true,
@@ -280,23 +280,23 @@ fn binops_scalars() {
         );
     }
 
-    test_binop("i32", "1", "+", "1", 2);
-    test_binop("i32", "2", "-", "1", 1);
-    test_binop("i32", "1", "-", "2", -1);
-    test_binop("i32", "2", "*", "3", 6);
-    test_binop("i32", "2", "*", "-3", -6);
-    test_binop("i32", "6", "/", "2", 3);
-    test_binop("i32", "3", "/", "2", 1);
-    test_binop("i32", "3", "%", "2", 1);
+    test_binop::<i32>("i32", "1", "+", "1", 2);
+    test_binop::<i32>("i32", "2", "-", "1", 1);
+    test_binop::<i32>("i32", "1", "-", "2", -1);
+    test_binop::<i32>("i32", "2", "*", "3", 6);
+    test_binop::<i32>("i32", "2", "*", "-3", -6);
+    test_binop::<i32>("i32", "6", "/", "2", 3);
+    test_binop::<i32>("i32", "3", "/", "2", 1);
+    test_binop::<i32>("i32", "3", "%", "2", 1);
 
-    test_binop("f32", "1", "+", "1", 2.0);
-    test_binop("f32", "2", "-", "1", 1.0);
-    test_binop("f32", "1", "-", "2", -1.0);
-    test_binop("f32", "2", "*", "3", 6.0);
-    test_binop("f32", "2", "*", "-3", -6.0);
-    test_binop("f32", "6", "/", "2", 3.0);
-    test_binop("f32", "3", "/", "2", 1.0);
-    test_binop("f32", "3", "%", "2", 1.0);
+    test_binop::<f32>("f32", "1", "+", "1", 2.0);
+    test_binop::<f32>("f32", "2", "-", "1", 1.0);
+    test_binop::<f32>("f32", "1", "-", "2", -1.0);
+    test_binop::<f32>("f32", "2", "*", "3", 6.0);
+    test_binop::<f32>("f32", "2", "*", "-3", -6.0);
+    test_binop::<f32>("f32", "6", "/", "2", 3.0);
+    test_binop::<f32>("f32", "3", "/", "2", 1.0);
+    test_binop::<f32>("f32", "3", "%", "2", 1.0);
 }
 
 #[test]
@@ -358,10 +358,10 @@ fn unops() {
         );
     }
 
-    test_unop("i32", "-", "123", -123);
-    test_unop("i32", "-", "-123", 123);
-    test_unop("f32", "-", "123.0", -123.0);
-    test_unop("f32", "-", "-123.0", 123.0);
+    test_unop::<i32>("i32", "-", "123", -123);
+    test_unop::<i32>("i32", "-", "-123", 123);
+    test_unop::<f32>("f32", "-", "123.0", -123.0);
+    test_unop::<f32>("f32", "-", "-123.0", 123.0);
     test_bool_unop("!", "true", false);
     test_bool_unop("!", "false", true);
     test_unop("u32", "~", "123", !123);

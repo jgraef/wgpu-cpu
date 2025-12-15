@@ -1,7 +1,8 @@
 pub mod clipper;
 pub mod fragment;
+pub mod index;
 pub mod primitive;
-pub mod rasterizer;
+pub mod raster;
 pub mod state;
 pub mod vertex;
 
@@ -12,6 +13,10 @@ use std::{
 
 use derive_more::Debug;
 use naga::Binding;
+use nalgebra::{
+    Point2,
+    Vector2,
+};
 
 use crate::{
     buffer::BufferSlice,
@@ -25,7 +30,12 @@ use crate::{
             ColorAttachment,
             DepthStencilAttachment,
         },
-        state::State,
+        state::{
+            ScissorRect,
+            State,
+            StencilValue,
+            Viewport,
+        },
     },
 };
 
@@ -104,11 +114,16 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
     }
 
     fn set_blend_constant(&mut self, color: wgpu::Color) {
-        todo!()
+        self.commands
+            .push(RenderPassSubCommand::SetBlendConstant { color })
     }
 
     fn set_scissor_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
-        todo!()
+        self.commands
+            .push(RenderPassSubCommand::SetScissorRect(ScissorRect {
+                offset: Point2::new(x, y),
+                size: Vector2::new(width, height),
+            }))
     }
 
     fn set_viewport(
@@ -120,11 +135,18 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
         min_depth: f32,
         max_depth: f32,
     ) {
-        todo!()
+        self.commands
+            .push(RenderPassSubCommand::SetViewport(Viewport {
+                offset: Point2::new(x, y),
+                size: Vector2::new(width, height),
+                min_depth,
+                max_depth,
+            }))
     }
 
     fn set_stencil_reference(&mut self, reference: u32) {
-        todo!()
+        self.commands
+            .push(RenderPassSubCommand::SetStencilReference(reference))
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
@@ -329,6 +351,18 @@ impl RenderPassCommand {
                 RenderPassSubCommand::SetVertexBuffer { buffer_slice, slot } => {
                     state.set_vertex_buffer(buffer_slice, slot);
                 }
+                RenderPassSubCommand::SetBlendConstant { color } => {
+                    state.set_blend_constant(color);
+                }
+                RenderPassSubCommand::SetScissorRect(scissor_rect) => {
+                    state.set_scissor_rect(scissor_rect);
+                }
+                RenderPassSubCommand::SetViewport(viewport) => {
+                    state.set_viewport(viewport);
+                }
+                RenderPassSubCommand::SetStencilReference(stencil_reference) => {
+                    state.set_stencil_reference(stencil_reference)
+                }
                 RenderPassSubCommand::Draw {
                     vertices,
                     instances,
@@ -366,6 +400,12 @@ pub enum RenderPassSubCommand {
         buffer_slice: BufferSlice,
         slot: u32,
     },
+    SetBlendConstant {
+        color: wgpu::Color,
+    },
+    SetScissorRect(ScissorRect),
+    SetViewport(Viewport),
+    SetStencilReference(StencilValue),
     Draw {
         vertices: Range<u32>,
         instances: Range<u32>,

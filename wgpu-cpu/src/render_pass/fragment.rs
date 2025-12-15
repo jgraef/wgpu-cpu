@@ -35,7 +35,7 @@ use crate::{
         TextureViewAttachment,
         TextureWriteGuard,
     },
-    util::Barycentric,
+    util::interpolation::Interpolate,
 };
 
 #[derive(Debug)]
@@ -66,18 +66,19 @@ impl FragmentState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct FragmentInput<const N: usize, User> {
+pub struct FragmentInput<const N: usize, Inter, User> {
     pub position: Vector4<f32>,
     pub front_facing: bool,
     pub primitive_index: u32,
     pub sample_index: u32,
     pub sample_mask: u32,
-    pub barycentric: Barycentric<N>,
-    pub vertex_outputs: [User; N],
+    pub interpolation_coefficients: Inter,
+    pub inter_stage_variables: [User; N],
 }
 
-impl<const N: usize, User> ShaderInput for FragmentInput<N, User>
+impl<const N: usize, Inter, User> ShaderInput for FragmentInput<N, Inter, User>
 where
+    Inter: Interpolate<N>,
     User: ReadMemory<BindingLocation>,
 {
     fn write_into(&self, binding: &Binding, ty: &Type, target: &mut [u8]) {
@@ -101,11 +102,16 @@ where
                 per_primitive,
             } => {
                 let inputs = std::array::from_fn::<_, N, _>(|i| {
-                    self.vertex_outputs[i].read((*location).into())
+                    self.inter_stage_variables[i].read((*location).into())
                 });
 
                 let interpolation = Interpolation::from_naga(*interpolation, *sampling);
-                interpolation.interpolate_user(self.barycentric, inputs, ty, target);
+                interpolation.interpolate_user(
+                    &self.interpolation_coefficients,
+                    inputs,
+                    ty,
+                    target,
+                );
             }
         }
     }
@@ -161,13 +167,15 @@ impl Interpolation {
         }
     }
 
-    pub fn interpolate_user<const N: usize>(
+    pub fn interpolate_user<const N: usize, Inter>(
         &self,
-        barycentric: Barycentric<N>,
+        interpolation_coefficients: Inter,
         inputs: [&[u8]; N],
         ty: &Type,
         output: &mut [u8],
-    ) {
+    ) where
+        Inter: Interpolate<N>,
+    {
         let (vector_size, scalar) = ty
             .inner
             .vector_size_and_scalar()
@@ -194,7 +202,7 @@ impl Interpolation {
                                         $pat => {
                                             let inputs = inputs.map(|input| *bytemuck::from_bytes::<SVector<f32, $n>>(input));
                                             let output = bytemuck::from_bytes_mut::<SVector<f32, $n>>(output);
-                                            *output = barycentric.interpolate(inputs);
+                                            *output = interpolation_coefficients.interpolate(inputs);
                                         }
                                     )*
                                 }

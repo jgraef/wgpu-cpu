@@ -1,60 +1,43 @@
 pub mod bresenham;
+pub mod interpolation;
 pub mod scanline;
 pub mod sort;
 pub mod sync;
 
-use std::ops::{
-    Add,
-    AddAssign,
-    Mul,
-};
-
 use arrayvec::ArrayVec;
-use nalgebra::SVector;
-use num_traits::Zero;
 
 pub fn make_label_owned(label: &Option<&str>) -> Option<String> {
     label.map(ToOwned::to_owned)
 }
 
-pub fn lerp<T>(x0: T, x1: T, t: f32) -> T
-where
-    T: Mul<f32, Output = T> + Add<T, Output = T>,
-{
-    x0 * (1.0 - t) + x1 * t
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Barycentric<const N: usize> {
-    pub coefficients: [f32; N],
-}
-
-impl<const N: usize> From<[f32; N]> for Barycentric<N> {
-    fn from(value: [f32; N]) -> Self {
-        Self {
-            coefficients: value,
-        }
-    }
-}
-
-impl<const N: usize> Barycentric<N> {
-    pub fn interpolate<T>(&self, values: impl AsRef<[T]>) -> T
+pub trait IteratorExt: Iterator {
+    fn array_chunks_<const N: usize>(self) -> ArrayChunksIter<N, Self>
     where
-        T: Mul<f32, Output = T> + AddAssign<T> + Copy + Zero,
+        Self: Sized,
     {
-        let values = values.as_ref();
-        let mut output = Zero::zero();
-        for i in 0..N {
-            output += values[i] * self.coefficients[i];
-        }
-        output
+        ArrayChunksIter { inner: self }
     }
 }
 
-fn array_to_vector<const N: usize>(array: [f32; N]) -> SVector<f32, N> {
-    // yes, this is just an into, but it helps the compiler to figure out the types
-    // since Barycentric::interpolate is generic
-    array.into()
+impl<T> IteratorExt for T where T: Iterator {}
+
+pub trait ArrayExt<T, const N: usize> {
+    fn try_map_<U>(self, f: impl FnMut(T) -> Option<U>) -> Option<[U; N]>;
+}
+
+impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
+    fn try_map_<U>(self, mut f: impl FnMut(T) -> Option<U>) -> Option<[U; N]> {
+        let mut out: ArrayVec<U, N> = ArrayVec::new();
+
+        for item in self {
+            out.push(f(item)?);
+        }
+
+        Some(
+            out.into_inner()
+                .unwrap_or_else(|_| unreachable!("output array must be full")),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -90,14 +73,3 @@ where
 }
 
 impl<const N: usize, I> ExactSizeIterator for ArrayChunksIter<N, I> where I: ExactSizeIterator {}
-
-pub trait IteratorExt: Iterator {
-    fn array_chunks_<const N: usize>(self) -> ArrayChunksIter<N, Self>
-    where
-        Self: Sized,
-    {
-        ArrayChunksIter { inner: self }
-    }
-}
-
-impl<T> IteratorExt for T where T: Iterator {}

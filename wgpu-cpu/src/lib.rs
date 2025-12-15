@@ -49,7 +49,7 @@ pub mod image {
         texture::Texture,
     };
 
-    /// Writ texture buffer with pixel type `P` directly to file
+    /// Write texture buffer with pixel type `P` directly to file
     fn write_buffer_to_image_directly<P>(
         path: impl AsRef<Path>,
         buffer: &Buffer,

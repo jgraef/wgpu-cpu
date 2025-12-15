@@ -6,23 +6,36 @@ use naga::{
 };
 use naga_interpreter::{
     EntryPointIndex,
+    Interpreter,
     bindings::{
         BindingLocation,
         ShaderInput,
         ShaderOutput,
     },
-    memory::WriteMemory,
+    memory::{
+        NullMemory,
+        WriteMemory,
+    },
 };
-use nalgebra::Vector4;
 
 use crate::{
     buffer::{
+        BufferReadGuard,
         BufferSlice,
-        OwnedBufferReadGuard,
     },
-    pipeline::PipelineCompilationOptions,
-    render_pass::invalid_binding,
-    shader::ShaderModule,
+    pipeline::{
+        PipelineCompilationOptions,
+        RenderPipeline,
+    },
+    render_pass::{
+        clipper::ClipPosition,
+        invalid_binding,
+        state::RenderPipelineState,
+    },
+    shader::{
+        ShaderModule,
+        UserDefinedInterStagePoolBuffer,
+    },
 };
 
 #[derive(Debug)]
@@ -107,14 +120,14 @@ pub struct VertexBufferLocation {
 }
 
 #[derive(Debug)]
-pub struct VertexInput<'draw, 'pass> {
+pub struct VertexInput<'draw, 'state> {
     pub vertex_index: u32,
     pub instance_index: u32,
-    pub vertex_buffers: &'draw [VertexBufferInput<'pass>],
-    pub vertex_locations: &'pass [Option<VertexBufferLocation>],
+    pub vertex_buffers: &'draw [VertexBufferInput<'state>],
+    pub vertex_locations: &'state [Option<VertexBufferLocation>],
 }
 
-impl<'draw, 'pass> ShaderInput for VertexInput<'draw, 'pass> {
+impl<'draw, 'state> ShaderInput for VertexInput<'draw, 'state> {
     fn write_into(&self, binding: &Binding, ty: &Type, target: &mut [u8]) {
         let source = match binding {
             Binding::BuiltIn(builtin) => {
@@ -146,15 +159,15 @@ impl<'draw, 'pass> ShaderInput for VertexInput<'draw, 'pass> {
 
 #[derive(Debug)]
 
-pub struct VertexBufferInput<'pass> {
-    buffer_guard: &'pass OwnedBufferReadGuard,
+pub struct VertexBufferInput<'state> {
+    buffer_guard: BufferReadGuard<'state>,
     stride_instance: usize,
     stride_vertex: usize,
 }
 
-impl<'pass> VertexBufferInput<'pass> {
+impl<'state> VertexBufferInput<'state> {
     pub fn new(
-        buffer_guard: &'pass OwnedBufferReadGuard,
+        buffer_guard: BufferReadGuard<'state>,
         array_stride: usize,
         step_mode: wgpu::VertexStepMode,
     ) -> Self {
@@ -186,8 +199,8 @@ impl<'pass> VertexBufferInput<'pass> {
 
 #[derive(Clone, Debug, Default)]
 pub struct VertexOutput<User> {
-    pub position: Vector4<f32>,
-    pub user_defined: User,
+    pub clip_position: ClipPosition,
+    pub inter_stage_variables: User,
 }
 
 impl<User> ShaderOutput for VertexOutput<User>
@@ -199,13 +212,13 @@ where
             Binding::BuiltIn(builtin) => {
                 match builtin {
                     BuiltIn::Position { invariant: _ } => {
-                        self.position = *bytemuck::from_bytes::<Vector4<f32>>(&source);
+                        self.clip_position = *bytemuck::from_bytes::<ClipPosition>(&source);
                     }
                     _ => invalid_binding(binding),
                 }
             }
             Binding::Location { location, .. } => {
-                self.user_defined
+                self.inter_stage_variables
                     .write(BindingLocation::from(*location))
                     .copy_from_slice(source);
             }
@@ -214,8 +227,87 @@ where
     }
 }
 
+impl<User> AsRef<ClipPosition> for VertexOutput<User> {
+    fn as_ref(&self) -> &ClipPosition {
+        &self.clip_position
+    }
+}
+
+impl<User> AsMut<ClipPosition> for VertexOutput<User> {
+    fn as_mut(&mut self) -> &mut ClipPosition {
+        &mut self.clip_position
+    }
+}
+
 #[derive(Debug)]
-pub struct IndexBufferBinding {
-    pub buffer_slice: BufferSlice,
-    pub index_format: wgpu::IndexFormat,
+pub struct VertexProcessingState<'pipeline, 'state> {
+    vertex_locations: &'pipeline [Option<VertexBufferLocation>],
+    vertex_buffers: Vec<VertexBufferInput<'state>>,
+    interpreter: Interpreter<ShaderModule, NullMemory>,
+}
+
+impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
+    pub fn new(
+        pipeline: &'pipeline RenderPipeline,
+        vertex_buffers: &'state [Option<BufferSlice>],
+    ) -> Self {
+        let vertex_state = &pipeline.descriptor.vertex;
+        let interpreter = Interpreter::new(
+            vertex_state.module.clone(),
+            NullMemory,
+            vertex_state.entry_point_index,
+        );
+
+        let vertex_buffers = vertex_state
+            .vertex_buffer_layouts
+            .iter()
+            .enumerate()
+            .map(|(buffer_index, layout)| {
+                let Some(Some(buffer)) = vertex_buffers.get(buffer_index)
+                else {
+                    panic!("Buffer {buffer_index} not bound")
+                };
+                VertexBufferInput::new(buffer.read(), layout.array_stride, layout.step_mode)
+            })
+            .collect::<Vec<_>>();
+        tracing::debug!(?vertex_buffers, vertex_locations = ?vertex_state.vertex_buffer_locations);
+
+        Self {
+            vertex_locations: &vertex_state.vertex_buffer_locations,
+            vertex_buffers,
+            interpreter,
+        }
+    }
+
+    pub fn process(
+        &mut self,
+        pipeline_state: &RenderPipelineState,
+        instance_index: u32,
+        vertex_indices: impl IntoIterator<Item = u32>,
+    ) -> impl Iterator<Item = VertexOutput<UserDefinedInterStagePoolBuffer>> {
+        vertex_indices.into_iter().map(move |vertex_index| {
+            // create vertex output. this allocates buffers for the user-defined vertex
+            // output.
+            let mut vertex_output = VertexOutput {
+                clip_position: Default::default(),
+                inter_stage_variables: pipeline_state.interstage_user_pool.allocate(),
+            };
+
+            // run vertex shaders
+            self.interpreter.run_entry_point(
+                VertexInput {
+                    vertex_index,
+                    instance_index,
+                    vertex_buffers: &self.vertex_buffers,
+                    vertex_locations: &self.vertex_locations,
+                },
+                &mut vertex_output,
+            );
+
+            VertexOutput {
+                clip_position: vertex_output.clip_position,
+                inter_stage_variables: vertex_output.inter_stage_variables.read_only(),
+            }
+        })
+    }
 }

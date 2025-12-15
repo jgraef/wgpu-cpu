@@ -16,8 +16,8 @@ struct VertexOutput {
 fn vs_main(input: VertexInput) -> VertexOutput {
     let vertex_index = input.vertex_index % 3;
 
-    let x = 0.8 * f32(i32(vertex_index) - 1);
-    let y = 0.8 * f32(i32(vertex_index & 1u) * 2 - 1);
+    let x = f32(i32(vertex_index) - 1);
+    let y = f32(i32(vertex_index & 1u) * 2 - 1);
     let position = vec4f(x, y, 0.0, 1.0);
 
     let r = f32(vertex_index == 0);
