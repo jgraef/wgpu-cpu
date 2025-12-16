@@ -42,7 +42,10 @@ pub mod image {
     use wgpu::Extent3d;
 
     use crate::{
-        buffer::Buffer,
+        buffer::{
+            Buffer,
+            BufferReadGuard,
+        },
         texture::Texture,
     };
 
@@ -148,6 +151,23 @@ pub mod image {
         }
 
         Ok(())
+    }
+
+    pub fn rgba_texture_image(
+        texture: &wgpu::Texture,
+    ) -> ImageBuffer<Rgba<u8>, BufferReadGuard<'_>> {
+        let size = texture.size();
+        let texture_format = texture.format();
+        let texture = texture.as_custom::<Texture>().unwrap();
+
+        match texture_format {
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {}
+            _ => panic!("Only RGBA supported"),
+        }
+
+        let buffer = texture.buffer.read();
+
+        ImageBuffer::from_raw(size.width, size.height, buffer).unwrap()
     }
 
     #[derive(Clone, Copy, Debug)]
