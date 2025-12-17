@@ -12,7 +12,6 @@ use nalgebra::{
     Point2,
     Vector2,
 };
-use wgpu::Extent3d;
 
 use crate::{
     buffer::BufferSlice,
@@ -38,13 +37,17 @@ use crate::{
         },
         primitive::{
             AsFrontFace,
-            AssemblePrimitives,
+            Assemble,
+            List,
             Primitive,
-            PrimitiveList,
+            ProcessItem,
+            Strip,
         },
         raster::{
+            LineRasterizer,
+            PointRasterizer,
             Rasterize,
-            TriFillRasterizer,
+            TriRasterizer,
         },
         vertex::VertexProcessingState,
     },
@@ -74,7 +77,7 @@ impl<'pass> State<'pass> {
         // color attachment. this generally applies to all resource acquisitions.
 
         let mut framebuffer_size = None;
-        let mut figure_out_framebuffer_size = |attachment_size: Extent3d| {
+        let mut figure_out_framebuffer_size = |attachment_size: wgpu::Extent3d| {
             let size = Vector2::new(attachment_size.width, attachment_size.height);
             if let Some(framebuffer_size) = framebuffer_size {
                 assert_eq!(
@@ -187,25 +190,6 @@ impl<'pass> State<'pass> {
         self.vertex_buffers[index] = Some(buffer_slice);
     }
 
-    pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        let Some(pipeline_state) = &self.pipeline_state
-        else {
-            // should we panic?
-            panic!("No pipeline bound");
-        };
-
-        let vertex_processing_state =
-            VertexProcessingState::new(&pipeline_state.pipeline, &self.vertex_buffers);
-
-        self.render_state.draw_with_pipeline_rasterizer(
-            &pipeline_state,
-            instances,
-            vertices,
-            DirectIndices,
-            vertex_processing_state,
-        );
-    }
-
     pub fn set_blend_constant(&mut self, color: wgpu::Color) {
         self.render_state.blend_constant = color;
     }
@@ -221,44 +205,233 @@ impl<'pass> State<'pass> {
     pub fn set_stencil_reference(&mut self, stencil_reference: StencilValue) {
         self.render_state.stencil_reference = stencil_reference;
     }
+}
 
-    pub fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        let Some(pipeline_state) = &self.pipeline_state
+#[derive(Clone, Debug)]
+
+pub enum DrawCall {
+    Direct {
+        vertices: Range<u32>,
+        instances: Range<u32>,
+    },
+    Indexed {
+        indices: Range<u32>,
+        base_vertex: i32,
+        instances: Range<u32>,
+    },
+}
+
+impl DrawCall {
+    pub fn execute(self, state: &mut State) {
+        let Some(pipeline_state) = &state.pipeline_state
         else {
             // should we panic?
             panic!("No pipeline bound");
         };
 
-        let Some(index_buffer_binding) = &self.index_buffer_binding
-        else {
-            panic!("No index buffer bound");
-        };
+        let framebuffer_size = state.render_state.scissor_rect.size;
+        let clipper = NoClipper;
 
         let vertex_processing_state =
-            VertexProcessingState::new(&pipeline_state.pipeline, &self.vertex_buffers);
+            VertexProcessingState::new(&pipeline_state.pipeline, &state.vertex_buffers);
 
-        macro_rules! dispatch_index_format {
-            ($($variant:ident => $ty:ty,)*) => {
-                match index_buffer_binding.index_format {
-                    $(
-                        wgpu::IndexFormat::$variant => {
-                            self.render_state.draw_with_pipeline_rasterizer(
-                                &pipeline_state,
-                                instances,
-                                indices,
-                                index_buffer_binding.begin::<$ty>(base_vertex),
-                                vertex_processing_state
-                            );
+        let primitive = &pipeline_state.pipeline.descriptor.primitive;
+        let topology = primitive.topology;
+        let polygon_mode = primitive.polygon_mode;
+        let is_strip = topology.is_strip();
+
+        macro_rules! draw {
+            (
+                $instances:expr,
+                $indices:expr,
+                $index:expr,
+                $primitive:expr,
+                $assembly:ident,
+                $rasterizer:ty,
+                $is_separated:expr
+            ) => {
+                state
+                    .render_state
+                    .draw::<$primitive, $is_separated, _, _, _>(
+                        pipeline_state,
+                        $instances,
+                        $indices,
+                        $index,
+                        vertex_processing_state,
+                        $assembly::<$primitive>,
+                        clipper,
+                        <$rasterizer>::new(framebuffer_size),
+                    );
+            };
+        }
+
+        macro_rules! draw_indexed {
+            (
+                $instances:expr,
+                $indices:expr,
+                $primitive:expr,
+                Strip,
+                $rasterizer:ty,
+                $index:ty,
+                $index_buffer_binding:expr,
+                $base_vertex:expr
+            ) => {
+                let index_format = $index_buffer_binding.index_format;
+
+                let strip_index_format = primitive.strip_index_format;
+                let mut is_separated = false;
+                if let Some(strip_index_format) = primitive.strip_index_format {
+                    assert!(
+                        is_strip,
+                        "strip_index_format set, but not a strip topology ({topology:?})"
+                    );
+                    assert_eq!(strip_index_format, index_format);
+                    is_separated = true;
+                }
+
+                let indirect_indices = $index_buffer_binding.begin::<$index>($base_vertex);
+                if is_separated {
+                    draw!(
+                        $instances,
+                        $indices,
+                        indirect_indices,
+                        $primitive,
+                        Strip,
+                        $rasterizer,
+                        true
+                    );
+                }
+                else {
+                    draw!(
+                        $instances,
+                        $indices,
+                        indirect_indices,
+                        $primitive,
+                        Strip,
+                        $rasterizer,
+                        false
+                    );
+                }
+            };
+            (
+                $instances:expr,
+                $indices:expr,
+                $primitive:expr,
+                List,
+                $rasterizer:ty,
+                $index:ty,
+                $index_buffer_binding:expr,
+                $base_vertex:expr
+            ) => {
+                panic!("List can't be separated");
+            };
+        }
+
+        macro_rules! draw_topology {
+            ($primitive:expr, $assembly:ident, $rasterizer:ty) => {
+                match self {
+                    DrawCall::Direct {
+                        vertices,
+                        instances,
+                    } => {
+                        draw!(
+                            instances,
+                            vertices,
+                            DirectIndices,
+                            $primitive,
+                            $assembly,
+                            $rasterizer,
+                            false
+                        );
+                    }
+                    DrawCall::Indexed {
+                        indices,
+                        base_vertex,
+                        instances,
+                    } => {
+                        let Some(index_buffer_binding) = &state.index_buffer_binding
+                        else {
+                            panic!("No index buffer bound");
+                        };
+                        let index_format = index_buffer_binding.index_format;
+
+                        match index_format {
+                            wgpu::IndexFormat::Uint16 => {
+                                draw_indexed!(
+                                    indices,
+                                    instances,
+                                    $primitive,
+                                    $assembly,
+                                    $rasterizer,
+                                    u16,
+                                    index_buffer_binding,
+                                    base_vertex
+                                );
+                            }
+                            wgpu::IndexFormat::Uint32 => {
+                                draw_indexed!(
+                                    indices,
+                                    instances,
+                                    $primitive,
+                                    $assembly,
+                                    $rasterizer,
+                                    u32,
+                                    index_buffer_binding,
+                                    base_vertex
+                                );
+                            }
                         }
-                    )*
+                    }
                 }
             };
         }
 
-        dispatch_index_format!(
-            Uint16 => u16,
-            Uint32 => u32,
-        );
+        match (topology, polygon_mode) {
+            (wgpu::PrimitiveTopology::PointList, wgpu::PolygonMode::Fill) => {
+                draw_topology!(1, List, PointRasterizer);
+            }
+
+            //(wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Point) => {
+            //    draw_topology!(2, List, PointRasterizer);
+            //}
+            //(wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Line) => {
+            //    draw_topology!(2, List, LineRasterizer);
+            //}
+            (wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Fill) => {
+                draw_topology!(2, List, LineRasterizer);
+            }
+            //(wgpu::PrimitiveTopology::LineStrip, wgpu::PolygonMode::Point) => {
+            //    draw_topology!(2, Strip, PointRasterizer);
+            //}
+            //(wgpu::PrimitiveTopology::LineStrip, wgpu::PolygonMode::Line) => {
+            //    draw_topology!(2, Strip, LineRasterizer);
+            //}
+            (wgpu::PrimitiveTopology::LineStrip, wgpu::PolygonMode::Fill) => {
+                draw_topology!(2, Strip, LineRasterizer);
+            }
+
+            //(wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Point) => {
+            //    draw_topology!(3, List, PointRasterizer);
+            //}
+            //(wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Line) => {
+            //    draw_topology!(3, List, LineRasterizer);
+            //}
+            (wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Fill) => {
+                draw_topology!(3, List, TriRasterizer);
+            }
+            //(wgpu::PrimitiveTopology::TriangleStrip, wgpu::PolygonMode::Point) => {
+            //    draw_topology!(3, Strip, PointRasterizer);
+            //}
+            //(wgpu::PrimitiveTopology::TriangleStrip, wgpu::PolygonMode::Line) => {
+            //    draw_topology!(3, Strip, LineRasterizer);
+            //}
+            (wgpu::PrimitiveTopology::TriangleStrip, wgpu::PolygonMode::Fill) => {
+                draw_topology!(3, Strip, TriRasterizer);
+            }
+            _ => {
+                panic!("Unsupported: {topology:?} {polygon_mode:?}");
+            }
+        }
     }
 }
 
@@ -283,96 +456,26 @@ pub struct RenderState<'pass> {
 }
 
 impl<'pass> RenderState<'pass> {
-    fn draw_with_pipeline_rasterizer(
-        &mut self,
-        pipeline_state: &RenderPipelineState,
-        instances: Range<u32>,
-        indices: Range<u32>,
-        index_resolution: impl IndexResolution,
-        vertex_processing: VertexProcessingState,
-    ) {
-        let primitive_state = &pipeline_state.pipeline.descriptor.primitive;
-        assert_eq!(
-            primitive_state.topology,
-            wgpu::PrimitiveTopology::TriangleList
-        );
-        assert_eq!(primitive_state.polygon_mode, wgpu::PolygonMode::Fill);
-
-        // todo
-        let framebuffer_size = self.scissor_rect.size;
-
-        let primitive_assembly = PrimitiveList;
-
-        let clipper = NoClipper;
-
-        let rasterizer = TriFillRasterizer::new(framebuffer_size);
-
-        self.draw(
-            pipeline_state,
-            instances,
-            indices,
-            index_resolution,
-            vertex_processing,
-            primitive_assembly,
-            clipper,
-            rasterizer,
-        );
-
-        /*
-        macro_rules! draw {
-            ($primitive:ty, $rasterizer:path, $n:expr) => {
-                self.draw::<$n, $primitive>(
-                    pipeline_state,
-                    instances,
-                    draw_mode,
-                    <$rasterizer>::new(framebuffer_size),
-                );
-            };
-        }
-
-        match (primitive_state.topology, primitive_state.polygon_mode) {
-            (wgpu::PrimitiveTopology::PointList, _) => {
-                draw!(Point, PointRasterizer, 1);
-            }
-            (wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Point) => {
-                draw!(Line, LinePointRasterizer, 1);
-            }
-            (wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Line) => {
-                draw!(Line, LineRasterizer, 2);
-            }
-            (wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Fill) => {
-                draw!(Line, LineRasterizer, 2);
-            }
-            (wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Point) => {
-                draw!(Tri, TriPointRasterizer, 3);
-            }
-            (wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Line) => {
-                draw!(Tri, TriLineRasterizer, 3);
-            }
-            (wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Fill) => {
-                draw!(Tri, TriFillRasterizer, 3);
-            }
-            (wgpu::PrimitiveTopology::LineStrip, _)
-            | (wgpu::PrimitiveTopology::TriangleStrip, _) => {
-                todo!("drawing of {:?} not implemented", primitive_state.topology);
-            }
-        } */
-    }
-
-    fn draw<const PRIMITIVE_SIZE: usize, Index, Assembly, Rasterizer>(
+    fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Rasterizer>(
         &mut self,
         pipeline_state: &RenderPipelineState,
         instances: Range<u32>,
         indices: Range<u32>,
         index_resolution: Index,
         mut vertex_processing: VertexProcessingState,
-        mut primitive_assembly: Assembly,
+        primitive_assembly: Assembly,
         clipper: impl Clip<PRIMITIVE_SIZE>,
         rasterizer: Rasterizer,
     ) where
-        Index: IndexResolution,
-        Assembly: AssemblePrimitives<VertexOutput, PRIMITIVE_SIZE>,
-        <Assembly as AssemblePrimitives<VertexOutput, PRIMITIVE_SIZE>>::Face: AsFrontFace,
+        Index: IndexResolution<SEP>,
+        Index::Item: ProcessItem<Inner = u32>,
+        Assembly: Assemble<
+                VertexOutput,
+                PRIMITIVE_SIZE,
+                SEP,
+                Item = <Index::Item as ProcessItem>::Processed<VertexOutput>,
+            >,
+        Assembly::Face: AsFrontFace,
         Rasterizer: Rasterize<Primitive<ClipPosition, PRIMITIVE_SIZE>>,
         Rasterizer::Interpolation: Interpolate<PRIMITIVE_SIZE>,
     {
@@ -389,12 +492,17 @@ impl<'pass> RenderState<'pass> {
 
         for instance_index in instances {
             // resolve indices
-            let vertex_indices = indices.clone().map(|index| index_resolution.resolve(index));
+            let vertex_indices = indices
+                .clone()
+                .into_iter()
+                .map(|index| index_resolution.resolve(index));
 
             // process vertices
-            let vertices = vertex_processing
-                .process(pipeline_state, instance_index, vertex_indices)
-                .into_iter();
+            let vertices = vertex_indices.map(|item| {
+                item.process(|vertex| {
+                    vertex_processing.process(pipeline_state, instance_index, vertex)
+                })
+            });
 
             // assemble primitives
             let primitives = primitive_assembly.assemble(vertices).into_iter();

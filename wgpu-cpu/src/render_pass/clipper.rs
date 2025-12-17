@@ -18,6 +18,18 @@ use crate::render_pass::primitive::Primitive;
 #[repr(C)]
 pub struct ClipPosition(pub Vector4<f32>);
 
+impl AsRef<ClipPosition> for ClipPosition {
+    fn as_ref(&self) -> &ClipPosition {
+        self
+    }
+}
+
+impl AsMut<ClipPosition> for ClipPosition {
+    fn as_mut(&mut self) -> &mut ClipPosition {
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Clipped<T> {
     pub unclipped: T,
@@ -43,18 +55,6 @@ where
     pub fn passhtrough(unclipped: T) -> Self {
         let clipped = *unclipped.as_ref();
         Self { unclipped, clipped }
-    }
-}
-
-impl AsRef<ClipPosition> for ClipPosition {
-    fn as_ref(&self) -> &ClipPosition {
-        self
-    }
-}
-
-impl AsMut<ClipPosition> for ClipPosition {
-    fn as_mut(&mut self) -> &mut ClipPosition {
-        self
     }
 }
 

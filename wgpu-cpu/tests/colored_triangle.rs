@@ -1,14 +1,32 @@
-use image::ImageReader;
+use std::path::Path;
+
+use image::{
+    ImageReader,
+    RgbaImage,
+    buffer::ConvertBuffer,
+};
 use wgpu_cpu::image::rgba_texture_image;
 
-#[test]
-fn colored_triangle() {
-    let reference = ImageReader::open("tests/colored_triangle.png")
-        .unwrap()
+fn load_reference(path: impl AsRef<Path>) -> RgbaImage {
+    let path = path.as_ref();
+    ImageReader::open(Path::new("tests").join(path))
+        .unwrap_or_else(|error| {
+            panic!(
+                "Could not open reference image: {}: {error}",
+                path.display()
+            )
+        })
         .decode()
-        .unwrap()
-        .to_rgba8();
+        .unwrap_or_else(|error| {
+            panic!(
+                "Could not decode reference image: {}: {error}",
+                path.display()
+            )
+        })
+        .to_rgba8()
+}
 
+fn create_device_and_queue() -> (wgpu::Device, wgpu::Queue) {
     let instance = wgpu_cpu::instance();
 
     let (_adapter, device, queue) = pollster::block_on(async {
@@ -16,6 +34,12 @@ fn colored_triangle() {
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         (adapter, device, queue)
     });
+
+    (device, queue)
+}
+
+fn render_colored_triangle() -> RgbaImage {
+    let (device, queue) = create_device_and_queue();
 
     let shader_module = device.create_shader_module(wgpu::include_wgsl!("colored_triangle.wgsl"));
 
@@ -135,15 +159,25 @@ fn colored_triangle() {
         })
         .unwrap();
 
-    let generated_image = rgba_texture_image(&target_texture);
+    rgba_texture_image(&target_texture).convert()
+}
 
-    assert_eq!(generated_image.width(), reference.width());
-    assert_eq!(generated_image.height(), reference.height());
+#[track_caller]
+fn assert_eq_image(reference: &RgbaImage, rendered: &RgbaImage) {
+    assert_eq!(rendered.width(), reference.width());
+    assert_eq!(rendered.height(), reference.height());
 
-    generated_image
+    rendered
         .enumerate_pixels()
         .zip(reference.enumerate_pixels())
         .for_each(|((x, y, generated), (_, _, expected))| {
             assert_eq!(generated, expected, "Pixels differ at [{x}, {y}]");
         });
+}
+
+#[test]
+fn t_colored_triangle() {
+    let reference = load_reference("colored_triangle.png");
+    let rendered = render_colored_triangle();
+    assert_eq_image(&reference, &rendered);
 }

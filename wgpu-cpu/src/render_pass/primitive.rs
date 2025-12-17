@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use itertools::Itertools;
 use nalgebra::{
     Point3,
@@ -8,6 +9,48 @@ use crate::{
     render_pass::clipper::ClipPosition,
     util::IteratorExt,
 };
+
+pub trait ProcessItem {
+    type Inner;
+    type Processed<U>;
+
+    fn process<U>(self, f: impl FnOnce(Self::Inner) -> U) -> Self::Processed<U>;
+    //fn try_into_inner(self) -> Option<Self::Inner>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Separated<T> {
+    Separator,
+    Vertex(T),
+}
+
+impl<T> ProcessItem for Separated<T> {
+    type Inner = T;
+    type Processed<U> = Separated<U>;
+
+    fn process<U>(self, f: impl FnOnce(T) -> U) -> Self::Processed<U> {
+        match self {
+            Separated::Separator => Separated::Separator,
+            Separated::Vertex(item) => Separated::Vertex(f(item)),
+        }
+    }
+
+    /*fn try_into_inner(self) -> Option<T> {
+        match self {
+            Separated::Separator => None,
+            Separated::Vertex(item) => Some(item),
+        }
+    }*/
+}
+
+impl ProcessItem for u32 {
+    type Inner = u32;
+    type Processed<U> = U;
+
+    fn process<U>(self, f: impl FnOnce(Self::Inner) -> U) -> Self::Processed<U> {
+        f(self)
+    }
+}
 
 pub type Point<Vertex> = Primitive<Vertex, 1>;
 pub type Line<Vertex> = Primitive<Vertex, 2>;
@@ -160,50 +203,39 @@ impl AsFrontFace for TriFace {
     }
 }
 
-pub trait AssemblePrimitives<Vertex, const NUM_VERTICES: usize> {
+pub trait Assemble<Vertex, const NUM_VERTICES: usize, const SEP: bool> {
+    type Item;
     type Face;
 
     fn assemble(
-        &mut self,
-        vertices: impl IntoIterator<Item = Vertex>,
+        &self,
+        vertices: impl IntoIterator<Item = Self::Item>,
     ) -> impl IntoIterator<Item = Primitive<Vertex, NUM_VERTICES, Self::Face>>;
 }
 
-impl<A, Vertex, const NUM_VERTICES: usize> AssemblePrimitives<Vertex, NUM_VERTICES> for &mut A
-where
-    A: AssemblePrimitives<Vertex, NUM_VERTICES>,
-{
-    type Face = A::Face;
-
-    fn assemble(
-        &mut self,
-        vertices: impl IntoIterator<Item = Vertex>,
-    ) -> impl IntoIterator<Item = Primitive<Vertex, NUM_VERTICES, Self::Face>> {
-        A::assemble(self, vertices)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PrimitiveList;
+pub struct List<const N: usize>;
 
-impl<Vertex> AssemblePrimitives<Vertex, 1> for PrimitiveList {
+impl<Vertex> Assemble<Vertex, 1, false> for List<1> {
+    type Item = Vertex;
     type Face = ();
 
     fn assemble(
-        &mut self,
+        &self,
         vertices: impl IntoIterator<Item = Vertex>,
     ) -> impl IntoIterator<Item = Primitive<Vertex, 1, Self::Face>> {
         vertices
             .into_iter()
-            .map(|vertex| Primitive::new([vertex], ()))
+            .map(|vertices| Primitive::new([vertices], ()))
     }
 }
 
-impl<Vertex> AssemblePrimitives<Vertex, 2> for PrimitiveList {
+impl<Vertex> Assemble<Vertex, 2, false> for List<2> {
+    type Item = Vertex;
     type Face = ();
 
     fn assemble(
-        &mut self,
+        &self,
         vertices: impl IntoIterator<Item = Vertex>,
     ) -> impl IntoIterator<Item = Primitive<Vertex, 2, Self::Face>> {
         vertices
@@ -213,14 +245,15 @@ impl<Vertex> AssemblePrimitives<Vertex, 2> for PrimitiveList {
     }
 }
 
-impl<Vertex> AssemblePrimitives<Vertex, 3> for PrimitiveList
+impl<Vertex> Assemble<Vertex, 3, false> for List<3>
 where
     Vertex: AsRef<ClipPosition>,
 {
+    type Item = Vertex;
     type Face = TriFace;
 
     fn assemble(
-        &mut self,
+        &self,
         vertices: impl IntoIterator<Item = Vertex>,
     ) -> impl IntoIterator<Item = Primitive<Vertex, 3, Self::Face>> {
         vertices.into_iter().array_chunks_::<3>().map(|vertices| {
@@ -231,18 +264,19 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PrimitiveStrip;
+pub struct Strip<const N: usize>;
 
-impl<Vertex> AssemblePrimitives<Vertex, 2> for PrimitiveStrip
+impl<Vertex> Assemble<Vertex, 2, false> for Strip<2>
 where
     Vertex: Clone,
 {
+    type Item = Vertex;
     type Face = ();
 
     fn assemble(
-        &mut self,
+        &self,
         vertices: impl IntoIterator<Item = Vertex>,
-    ) -> impl IntoIterator<Item = Primitive<Vertex, 2>> {
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 2, Self::Face>> {
         vertices
             .into_iter()
             .tuple_windows()
@@ -250,17 +284,73 @@ where
     }
 }
 
-impl<Vertex> AssemblePrimitives<Vertex, 3> for PrimitiveStrip
+impl<Vertex> Assemble<Vertex, 2, true> for Strip<2>
+where
+    Vertex: Clone,
+{
+    type Item = Separated<Vertex>;
+    type Face = ();
+
+    fn assemble(
+        &self,
+        vertices: impl IntoIterator<Item = Self::Item>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 2, Self::Face>> {
+        // todo: better impl
+        let mut buffer = ArrayVec::<_, 2>::new();
+        let mut vertices = vertices.into_iter();
+
+        std::iter::from_fn(move || {
+            while let Some(item) = vertices.next() {
+                match item {
+                    Separated::Separator => buffer.clear(),
+                    Separated::Vertex(vertex) => {
+                        buffer.push(vertex);
+                        if buffer.is_full() {
+                            let line = buffer
+                                .take()
+                                .into_inner()
+                                .unwrap_or_else(|_| unreachable!());
+                            buffer.push(line[1].clone());
+                            return Some(Primitive::new(line, ()));
+                        }
+                    }
+                }
+            }
+            None
+        })
+    }
+}
+
+impl<Vertex> Assemble<Vertex, 3, false> for Strip<3>
 where
     Vertex: Clone + AsRef<ClipPosition>,
 {
+    type Item = Vertex;
     type Face = TriFace;
 
     fn assemble(
-        &mut self,
+        &self,
         vertices: impl IntoIterator<Item = Vertex>,
     ) -> impl IntoIterator<Item = Primitive<Vertex, 3, Self::Face>> {
-        TriangleStripIter::new(vertices.into_iter()).map(|vertices| {
+        TriStripIter::new(vertices.into_iter()).map(|vertices| {
+            let face = TriFace::new(&vertices);
+            Primitive::new(vertices, face)
+        })
+    }
+}
+
+impl<Vertex> Assemble<Vertex, 3, true> for Strip<3>
+where
+    Vertex: Clone + AsRef<ClipPosition>,
+{
+    type Item = Separated<Vertex>;
+    type Face = TriFace;
+
+    fn assemble(
+        &self,
+        vertices: impl IntoIterator<Item = Separated<Vertex>>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 3, Self::Face>> {
+        ResetTriStripIter::new(vertices.into_iter()).map(|vertices| {
             let face = TriFace::new(&vertices);
             Primitive::new(vertices, face)
         })
@@ -268,75 +358,131 @@ where
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct TriangleStripIter<I, Vertex> {
-    inner: TriangleStripIterInner<I, Vertex>,
+pub struct TriStripGenerator<Vertex> {
+    odd: bool,
+    buffer: [Vertex; 2],
 }
 
-#[derive(Clone, Copy, Debug)]
-enum TriangleStripIterInner<I, Vertex> {
-    Iter {
-        inner: I,
-        even: bool,
-        buffer: [Vertex; 2],
-    },
-    Empty,
-}
-
-impl<I, Vertex> TriangleStripIter<I, Vertex>
-where
-    I: Iterator<Item = Vertex>,
-{
-    pub fn new(mut inner: I) -> Self {
-        // try to fetch 2 points to fill the buffer. if we can't we won't yield any
-        // triangles.
-        let try_create = move || {
-            let shift = [inner.next()?, inner.next()?];
-            Some(TriangleStripIterInner::Iter {
-                inner,
-                even: false,
-                buffer: shift,
-            })
-        };
-
-        Self {
-            inner: try_create().unwrap_or(TriangleStripIterInner::Empty),
-        }
+impl<Vertex> TriStripGenerator<Vertex> {
+    fn new(buffer: [Vertex; 2]) -> Self {
+        Self { odd: false, buffer }
     }
 }
 
-impl<I, Vertex> Iterator for TriangleStripIter<I, Vertex>
+impl<Vertex> TriStripGenerator<Vertex>
 where
-    I: Iterator<Item = Vertex>,
+    Vertex: Clone,
+{
+    pub fn push(&mut self, vertex: Vertex) -> [Vertex; 3] {
+        // keep buffer of 2 points. when we get a new point, first construct the output
+        // from the buffer and new point. then put the new point
+        // into the buffer at alternating indices (starting with 0)
+
+        let out = [
+            self.buffer[0].clone(),
+            self.buffer[1].clone(),
+            vertex.clone(),
+        ];
+
+        self.buffer[self.odd as usize] = vertex;
+        self.odd = !self.odd;
+
+        out
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TriStripIter<Vertices, Vertex> {
+    inner: Vertices,
+    state: Option<TriStripGenerator<Vertex>>,
+}
+
+impl<Vertices, Vertex> TriStripIter<Vertices, Vertex>
+where
+    Vertices: Iterator<Item = Vertex>,
+{
+    pub fn new(mut inner: Vertices) -> Self {
+        // try to fetch 2 points to fill the buffer. if we can't we won't yield any
+        // triangles.
+        let mut try_fill_buffer = || Some([inner.next()?, inner.next()?]);
+        let state = try_fill_buffer().map(TriStripGenerator::new);
+        Self { inner, state }
+    }
+}
+
+impl<Vertices, Vertex> Iterator for TriStripIter<Vertices, Vertex>
+where
+    Vertices: Iterator<Item = Vertex>,
     Vertex: Clone,
 {
     type Item = [Vertex; 3];
 
     fn next(&mut self) -> Option<Self::Item> {
-        match &mut self.inner {
-            TriangleStripIterInner::Iter {
-                inner,
-                even,
-                buffer: shift,
-            } => {
-                if let Some(item) = inner.next() {
-                    // keep buffer of 2 points. when we get a new point, first construct the output
-                    // from the buffer and new point. then put the new point
-                    // into the buffer at alternating indices (starting with 0)
+        self.state.as_mut().and_then(|state| {
+            let vertex = self.inner.next()?;
+            Some(state.push(vertex))
+        })
+    }
+}
 
-                    let out = [shift[0].clone(), shift[1].clone(), item.clone()];
+#[derive(Clone, Copy, Debug)]
+pub struct ResetTriStripIter<Vertices, Vertex> {
+    inner: Vertices,
+    state: Option<TriStripGenerator<Vertex>>,
+}
 
-                    shift[*even as usize] = item;
-                    *even = !*even;
+impl<Vertices, Vertex> ResetTriStripIter<Vertices, Vertex>
+where
+    Vertices: Iterator<Item = Separated<Vertex>>,
+{
+    pub fn new(mut inner: Vertices) -> Self {
+        let state = Self::try_fill_buffer(&mut inner).map(TriStripGenerator::new);
+        Self { inner, state }
+    }
 
-                    Some(out)
+    fn try_fill_buffer(inner: &mut Vertices) -> Option<[Vertex; 2]> {
+        // try to fetch 2 points to fill the buffer. if we can't we won't yield any
+        // triangles.
+        let mut buffer = ArrayVec::new();
+        while let Some(item) = inner.next() {
+            match item {
+                Separated::Separator => {
+                    buffer.clear();
                 }
-                else {
-                    self.inner = TriangleStripIterInner::Empty;
-                    None
+                Separated::Vertex(vertex) => {
+                    buffer.push(vertex);
                 }
             }
-            TriangleStripIterInner::Empty => None,
+
+            if buffer.is_full() {
+                let buffer = buffer.into_inner().unwrap_or_else(|_| unreachable!());
+                return Some(buffer);
+            }
         }
+        None
+    }
+}
+
+impl<Vertices, Vertex> Iterator for ResetTriStripIter<Vertices, Vertex>
+where
+    Vertices: Iterator<Item = Separated<Vertex>>,
+    Vertex: Clone,
+{
+    type Item = [Vertex; 3];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(state) = &mut self.state {
+            match self.inner.next()? {
+                Separated::Separator => {
+                    self.state = Self::try_fill_buffer(&mut self.inner).map(TriStripGenerator::new);
+                }
+                Separated::Vertex(vertex) => {
+                    let tri = state.push(vertex);
+                    return Some(tri);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -348,7 +494,7 @@ mod tests {
         clipper::ClipPosition,
         primitive::{
             TriFace,
-            TriangleStripIter,
+            TriStripIter,
         },
     };
 
@@ -357,7 +503,7 @@ mod tests {
         // example from https://gpuweb.github.io/gpuweb/#primitive-assembly
 
         let expected = [[0, 1, 2], [2, 1, 3], [2, 3, 4], [4, 3, 5]];
-        let got = TriangleStripIter::new(0..6).collect::<Vec<_>>();
+        let got = TriStripIter::new(0..6).collect::<Vec<_>>();
         assert_eq!(got, expected);
     }
 

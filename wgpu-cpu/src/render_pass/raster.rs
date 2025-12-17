@@ -261,11 +261,11 @@ where
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct TriFillRasterizer {
+pub struct TriRasterizer {
     target: ToTargetRaster,
 }
 
-impl TriFillRasterizer {
+impl TriRasterizer {
     pub fn new(target_size: Vector2<u32>) -> Self {
         Self {
             target: ToTargetRaster::new(target_size),
@@ -273,7 +273,7 @@ impl TriFillRasterizer {
     }
 }
 
-impl<T> Rasterize<Tri<T>> for TriFillRasterizer
+impl<T> Rasterize<Tri<T>> for TriRasterizer
 where
     T: AsRef<ClipPosition> + Clone + 'static,
 {

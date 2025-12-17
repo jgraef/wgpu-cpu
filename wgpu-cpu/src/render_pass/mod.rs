@@ -31,6 +31,7 @@ use crate::{
             DepthStencilAttachment,
         },
         state::{
+            DrawCall,
             ScissorRect,
             State,
             StencilValue,
@@ -150,18 +151,20 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        self.commands.push(RenderPassSubCommand::Draw {
-            vertices,
-            instances,
-        })
+        self.commands
+            .push(RenderPassSubCommand::Draw(DrawCall::Direct {
+                vertices,
+                instances,
+            }))
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        self.commands.push(RenderPassSubCommand::DrawIndexed {
-            indices,
-            base_vertex,
-            instances,
-        })
+        self.commands
+            .push(RenderPassSubCommand::Draw(DrawCall::Indexed {
+                indices,
+                base_vertex,
+                instances,
+            }))
     }
 
     fn draw_mesh_tasks(&mut self, group_count_x: u32, group_count_y: u32, group_count_z: u32) {
@@ -363,18 +366,8 @@ impl RenderPassCommand {
                 RenderPassSubCommand::SetStencilReference(stencil_reference) => {
                     state.set_stencil_reference(stencil_reference)
                 }
-                RenderPassSubCommand::Draw {
-                    vertices,
-                    instances,
-                } => {
-                    state.draw(vertices, instances);
-                }
-                RenderPassSubCommand::DrawIndexed {
-                    indices,
-                    base_vertex,
-                    instances,
-                } => {
-                    state.draw_indexed(indices, base_vertex, instances);
+                RenderPassSubCommand::Draw(draw_call) => {
+                    draw_call.execute(&mut state);
                 }
             }
         }
@@ -406,15 +399,7 @@ pub enum RenderPassSubCommand {
     SetScissorRect(ScissorRect),
     SetViewport(Viewport),
     SetStencilReference(StencilValue),
-    Draw {
-        vertices: Range<u32>,
-        instances: Range<u32>,
-    },
-    DrawIndexed {
-        indices: Range<u32>,
-        base_vertex: i32,
-        instances: Range<u32>,
-    },
+    Draw(DrawCall),
 }
 
 #[track_caller]

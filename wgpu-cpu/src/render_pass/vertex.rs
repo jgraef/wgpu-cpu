@@ -239,6 +239,9 @@ impl<User> AsMut<ClipPosition> for VertexOutput<User> {
     }
 }
 
+// todo: these can be made Clone if reacquire the lock in vertex_buffers (it's a
+// read-only lock, so it can be shared). then we can either clone them, or just
+// construct as many as we need to run this in parallel
 #[derive(Debug)]
 pub struct VertexProcessingState<'pipeline, 'state> {
     vertex_locations: &'pipeline [Option<VertexBufferLocation>],
@@ -283,31 +286,29 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
         &mut self,
         pipeline_state: &RenderPipelineState,
         instance_index: u32,
-        vertex_indices: impl IntoIterator<Item = u32>,
-    ) -> impl Iterator<Item = VertexOutput<UserDefinedInterStagePoolBuffer>> {
-        vertex_indices.into_iter().map(move |vertex_index| {
-            // create vertex output. this allocates buffers for the user-defined vertex
-            // output.
-            let mut vertex_output = VertexOutput {
-                clip_position: Default::default(),
-                inter_stage_variables: pipeline_state.interstage_user_pool.allocate(),
-            };
+        vertex_index: u32,
+    ) -> VertexOutput<UserDefinedInterStagePoolBuffer> {
+        // create vertex output. this allocates buffers for the user-defined vertex
+        // output.
+        let mut vertex_output = VertexOutput {
+            clip_position: Default::default(),
+            inter_stage_variables: pipeline_state.interstage_user_pool.allocate(),
+        };
 
-            // run vertex shaders
-            self.interpreter.run_entry_point(
-                VertexInput {
-                    vertex_index,
-                    instance_index,
-                    vertex_buffers: &self.vertex_buffers,
-                    vertex_locations: &self.vertex_locations,
-                },
-                &mut vertex_output,
-            );
+        // run vertex shaders
+        self.interpreter.run_entry_point(
+            VertexInput {
+                vertex_index,
+                instance_index,
+                vertex_buffers: &self.vertex_buffers,
+                vertex_locations: &self.vertex_locations,
+            },
+            &mut vertex_output,
+        );
 
-            VertexOutput {
-                clip_position: vertex_output.clip_position,
-                inter_stage_variables: vertex_output.inter_stage_variables.read_only(),
-            }
-        })
+        VertexOutput {
+            clip_position: vertex_output.clip_position,
+            inter_stage_variables: vertex_output.inter_stage_variables.read_only(),
+        }
     }
 }

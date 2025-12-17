@@ -1,17 +1,20 @@
 
 # TODO
 
-- [ ] fix clipper
+- [ ] clipper:
+  - [x] line
+  - [ ] tri
 - [ ] srgb conversion (`palette`!)
 - [ ] compile naga IR with [cranelift](https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/docs/index.md) ([JIT demo](https://github.com/bytecodealliance/cranelift-jit-demo/))
-- remove `VariableType`:
+- [ ] remove `VariableType`:
+  - disregard, will try cranelift first.
   - `Variable` can store a `&'module TypeInner` directly and an optional `ty_name: Option<&'module str>`
   - we might need a trait for things that can fetch `&'module TypeInner` given the `&'module ShaderModule`.
 - [ ] do we want to change some fields from `Vec<Option<T>>` to `[Option<T>; N]` where there's a limit? (e.g. color attachments).
 
 # Issues
 
-Issues that can be raised with `wgpu`:
+Issues that can be raised with `wgpu` (marked items are patched in a local copy of wgpu):
 
 - [x] `InstanceInterface::create_surface` returns a `wgpu::CreateSurfaceError`, but these can't be constructed other than by a conversion from `wgpu_core::CreateSurfaceError`.
 - [x] custom `RequestAdapterError`
