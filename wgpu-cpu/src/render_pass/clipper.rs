@@ -30,6 +30,12 @@ impl<T> AsRef<ClipPosition> for Clipped<T> {
     }
 }
 
+impl<T> AsRef<Clipped<T>> for Clipped<T> {
+    fn as_ref(&self) -> &Clipped<T> {
+        self
+    }
+}
+
 impl<T> Clipped<T>
 where
     T: AsRef<ClipPosition>,
@@ -52,33 +58,41 @@ impl AsMut<ClipPosition> for ClipPosition {
     }
 }
 
-pub trait Clip<T, const N: usize> {
-    fn clip(
+pub trait Clip<const N: usize> {
+    fn clip<Vertex, Face>(
         &self,
-        primitive: Primitive<T, N>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<T>, N>>;
+        primitive: Primitive<Vertex, N, Face>,
+    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
+    where
+        Vertex: AsRef<ClipPosition>;
 }
 
-impl<C, T, const N: usize> Clip<T, N> for &C
+impl<C, const N: usize> Clip<N> for &C
 where
-    C: Clip<T, N>,
+    C: Clip<N>,
 {
-    fn clip(
+    fn clip<Vertex, Face>(
         &self,
-        primitive: Primitive<T, N>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<T>, N>> {
+        primitive: Primitive<Vertex, N, Face>,
+    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
         C::clip(self, primitive)
     }
 }
 
-impl<C, T, const N: usize> Clip<T, N> for &mut C
+impl<C, const N: usize> Clip<N> for &mut C
 where
-    C: Clip<T, N>,
+    C: Clip<N>,
 {
-    fn clip(
+    fn clip<Vertex, Face>(
         &self,
-        primitive: Primitive<T, N>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<T>, N>> {
+        primitive: Primitive<Vertex, N, Face>,
+    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
         C::clip(self, primitive)
     }
 }
@@ -86,15 +100,15 @@ where
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoClipper;
 
-impl<T, const N: usize> Clip<T, N> for NoClipper
-where
-    T: AsRef<ClipPosition>,
-{
-    fn clip(
+impl<const N: usize> Clip<N> for NoClipper {
+    fn clip<Vertex, Face>(
         &self,
-        primitive: Primitive<T, N>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<T>, N>> {
-        [primitive.map(Clipped::passhtrough)]
+        primitive: Primitive<Vertex, N, Face>,
+    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
+        [primitive.map_vertices(Clipped::passhtrough)]
     }
 }
 
@@ -324,14 +338,14 @@ pub mod cohen_sutherland {
         pub clip_planes: ClipVolume,
     }
 
-    impl<T> Clip<T, 2> for CohenSutherland
-    where
-        T: AsRef<ClipPosition>,
-    {
-        fn clip(
+    impl Clip<2> for CohenSutherland {
+        fn clip<Vertex, Face>(
             &self,
-            primitive: Primitive<T, 2>,
-        ) -> impl IntoIterator<Item = Primitive<Clipped<T>, 2>> {
+            primitive: Primitive<Vertex, 2, Face>,
+        ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, 2, Face>>
+        where
+            Vertex: AsRef<ClipPosition>,
+        {
             // todo: do we actually need to do interpolation here? we could have `clip`
             // return the alpha values with the points and use that.
             // then we could possibly just return some interpolation (`Lerp` or
@@ -339,17 +353,20 @@ pub mod cohen_sutherland {
             // the positions is enough as the rasterizer will take care of interpolation
 
             if let Some(clipped) = clip(primitive.clip_positions(), &self.clip_planes) {
-                let [a, b] = primitive.0;
-                Some(Primitive([
-                    Clipped {
-                        unclipped: a,
-                        clipped: clipped[0],
-                    },
-                    Clipped {
-                        unclipped: b,
-                        clipped: clipped[1],
-                    },
-                ]))
+                let [a, b] = primitive.vertices;
+                Some(Primitive::new(
+                    [
+                        Clipped {
+                            unclipped: a,
+                            clipped: clipped[0],
+                        },
+                        Clipped {
+                            unclipped: b,
+                            clipped: clipped[1],
+                        },
+                    ],
+                    primitive.face,
+                ))
             }
             else {
                 None

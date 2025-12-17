@@ -155,7 +155,7 @@ impl ToTargetRaster {
         primitive: Primitive<ClipPosition, N>,
     ) -> ([Point2<f32>; N], Option<[Point2<u32>; N]>) {
         let out_f32 = primitive
-            .0
+            .vertices
             .map(|position| Point2::from(self.to_raster * position.0));
 
         let out_u32 =
@@ -241,7 +241,7 @@ where
     ) -> impl IntoIterator<Item = RasterizationPoint<Line<T>, Self::Interpolation>> {
         let (_line_raster_f32, line_raster_u32) = self
             .target
-            .to_raster_primitive(primitive.clip_positions().into());
+            .to_raster_primitive(Primitive::new(primitive.clip_positions(), ()));
 
         line_raster_u32
             .map(|[start, end]| {
@@ -285,7 +285,7 @@ where
     ) -> impl IntoIterator<Item = RasterizationPoint<Tri<T>, Self::Interpolation>> {
         let (tri_raster_f32, tri_raster_u32) = self
             .target
-            .to_raster_primitive(primitive.clip_positions().into());
+            .to_raster_primitive(Primitive::new(primitive.clip_positions(), ()));
 
         fn shoelace([a, b, c]: [Point2<f32>; 3]) -> f32 {
             // omitted factor 1/2 since it is cancelled out when calculating barycentric
@@ -329,7 +329,7 @@ where
                                         sample_index: None,
                                     },
                                     coverage_mask: !0,
-                                    front_face: Some(primitive.front_face()),
+                                    front_face: None,
                                     perspective_divisor,
                                     depth,
                                     primitive_vertices: primitive.clone(),

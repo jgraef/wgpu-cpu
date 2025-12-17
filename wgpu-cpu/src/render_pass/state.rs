@@ -22,6 +22,7 @@ use crate::{
         clipper::{
             Clip,
             ClipPosition,
+            Clipped,
             NoClipper,
         },
         fragment::{
@@ -36,6 +37,7 @@ use crate::{
             IndexResolution,
         },
         primitive::{
+            AsFrontFace,
             AssemblePrimitives,
             Primitive,
             PrimitiveList,
@@ -357,17 +359,20 @@ impl<'pass> RenderState<'pass> {
         } */
     }
 
-    fn draw<const PRIMITIVE_SIZE: usize, Rasterizer>(
+    fn draw<const PRIMITIVE_SIZE: usize, Index, Assembly, Rasterizer>(
         &mut self,
         pipeline_state: &RenderPipelineState,
         instances: Range<u32>,
         indices: Range<u32>,
-        index_resolution: impl IndexResolution,
+        index_resolution: Index,
         mut vertex_processing: VertexProcessingState,
-        mut primitive_assembly: impl AssemblePrimitives<VertexOutput, PRIMITIVE_SIZE>,
-        clipper: impl Clip<VertexOutput, PRIMITIVE_SIZE>,
+        mut primitive_assembly: Assembly,
+        clipper: impl Clip<PRIMITIVE_SIZE>,
         rasterizer: Rasterizer,
     ) where
+        Index: IndexResolution,
+        Assembly: AssemblePrimitives<VertexOutput, PRIMITIVE_SIZE>,
+        <Assembly as AssemblePrimitives<VertexOutput, PRIMITIVE_SIZE>>::Face: AsFrontFace,
         Rasterizer: Rasterize<Primitive<ClipPosition, PRIMITIVE_SIZE>>,
         Rasterizer::Interpolation: Interpolate<PRIMITIVE_SIZE>,
     {
@@ -397,21 +402,31 @@ impl<'pass> RenderState<'pass> {
             if let Some((fragment_state, fragment_vm)) = &mut fragment_state {
                 for (primitive_index, primitive) in primitives.enumerate() {
                     for primitive in clipper.clip(primitive) {
-                        // todo:
-                        let front_facing = true;
+                        let (front_facing, cull_face) =
+                            primitive
+                                .try_front_face()
+                                .map_or((true, false), |front_face| {
+                                    let front_facing =
+                                        front_face == pipeline.descriptor.primitive.front_face;
 
-                        // pipeline_state.pipeline.descriptor.primitive.front_face
-                        if let Some(cull_mode) = pipeline.descriptor.primitive.cull_mode
-                            && !front_facing
-                        {
-                            tracing::trace!(?primitive, "culled");
+                                    let cull_face = match pipeline.descriptor.primitive.cull_mode {
+                                        Some(wgpu::Face::Front) => front_facing,
+                                        Some(wgpu::Face::Back) => !front_facing,
+                                        None => false,
+                                    };
+
+                                    (front_facing, cull_face)
+                                });
+
+                        if cull_face {
+                            tracing::trace!(primitive = ?primitive.clip_positions(), "culled");
                             continue;
                         }
 
                         //let front_facing = rasterization_point.front_face;
 
                         for rasterization_point in
-                            rasterizer.rasterize(Primitive(primitive.clip_positions()))
+                            rasterizer.rasterize(Primitive::new(primitive.clip_positions(), ()))
                         {
                             let sample_index = rasterization_point
                                 .destination
@@ -427,11 +442,11 @@ impl<'pass> RenderState<'pass> {
                                 sample_index,
                                 sample_mask,
                                 interpolation_coefficients: rasterization_point.interpolation,
-                                inter_stage_variables: primitive.0.each_ref().map(
-                                    |vertex_output| {
+                                inter_stage_variables: primitive
+                                    .each_vertex_ref::<Clipped<VertexOutput>>()
+                                    .map(|vertex_output| {
                                         vertex_output.unclipped.inter_stage_variables.clone()
-                                    },
-                                ),
+                                    }),
                             };
 
                             let mut output = FragmentOutput {

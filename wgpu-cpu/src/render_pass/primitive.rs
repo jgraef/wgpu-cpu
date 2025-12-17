@@ -1,129 +1,151 @@
-use std::ops::{
-    Index,
-    IndexMut,
-};
-
 use itertools::Itertools;
+use nalgebra::{
+    Point3,
+    Vector3,
+};
 
 use crate::{
     render_pass::clipper::ClipPosition,
     util::IteratorExt,
 };
 
-pub type Point<T> = Primitive<T, 1>;
-pub type Line<T> = Primitive<T, 2>;
-pub type Tri<T> = Primitive<T, 3>;
+pub type Point<Vertex> = Primitive<Vertex, 1>;
+pub type Line<Vertex> = Primitive<Vertex, 2>;
+pub type Tri<Vertex> = Primitive<Vertex, 3>;
 
-#[derive(
-    Clone, Copy, Debug, derive_more::From, derive_more::Into, derive_more::AsRef, derive_more::AsMut,
-)]
-pub struct Primitive<T, const N: usize>(pub [T; N]);
-
-impl<T, const N: usize> AsRef<[T]> for Primitive<T, N> {
-    fn as_ref(&self) -> &[T] {
-        self.0.as_slice()
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct Primitive<Vertex, const NUM_VERTICES: usize, Face = ()> {
+    pub vertices: [Vertex; NUM_VERTICES],
+    pub face: Face,
 }
 
-impl<T, const N: usize> AsMut<[T]> for Primitive<T, N> {
-    fn as_mut(&mut self) -> &mut [T] {
-        self.0.as_mut_slice()
-    }
-}
-
-impl<T> AsRef<T> for Primitive<T, 1> {
-    fn as_ref(&self) -> &T {
-        &self.0[0]
-    }
-}
-
-impl<T> AsMut<T> for Primitive<T, 1> {
-    fn as_mut(&mut self) -> &mut T {
-        &mut self.0[0]
-    }
-}
-
-impl<T> From<T> for Primitive<T, 1> {
-    fn from(value: T) -> Self {
-        Self([value])
-    }
-}
-
-impl<T, const N: usize> Index<usize> for Primitive<T, N> {
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
-    }
-}
-
-impl<T, const N: usize> IndexMut<usize> for Primitive<T, N> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.0[index]
-    }
-}
-
-impl<T, const N: usize> Primitive<T, N> {
-    pub fn new(inner: [T; N]) -> Self {
-        Self(inner)
+impl<Vertex, const NUM_VERTICES: usize, Face> Primitive<Vertex, NUM_VERTICES, Face> {
+    pub fn new(vertices: [Vertex; NUM_VERTICES], face: Face) -> Self {
+        Self { vertices, face }
     }
 
-    pub fn map<U>(self, f: impl FnMut(T) -> U) -> Primitive<U, N> {
-        Primitive(self.0.map(f))
+    pub fn map_vertices<U>(self, f: impl FnMut(Vertex) -> U) -> Primitive<U, NUM_VERTICES, Face> {
+        Primitive {
+            vertices: self.vertices.map(f),
+            face: self.face,
+        }
     }
 
-    pub fn each<U>(&self) -> [U; N]
+    pub fn map_face<U>(self, f: impl FnOnce(Face) -> U) -> Primitive<Vertex, NUM_VERTICES, U> {
+        Primitive {
+            vertices: self.vertices,
+            face: f(self.face),
+        }
+    }
+
+    pub fn each_vertex<U>(&self) -> [U; NUM_VERTICES]
     where
-        T: AsRef<U>,
+        Vertex: AsRef<U>,
         U: Clone,
     {
-        self.0.each_ref().map(|c| c.as_ref().clone())
+        self.vertices.each_ref().map(|c| c.as_ref().clone())
     }
 
-    pub fn each_ref<U>(&self) -> [&U; N]
+    pub fn each_vertex_ref<U>(&self) -> [&U; NUM_VERTICES]
     where
-        T: AsRef<U>,
+        Vertex: AsRef<U>,
     {
-        self.0.each_ref().map(|c| c.as_ref())
+        self.vertices.each_ref().map(|c| c.as_ref())
     }
 
-    pub fn each_mut<U>(&mut self) -> [&mut U; N]
+    pub fn each_vertex_mut<U>(&mut self) -> [&mut U; NUM_VERTICES]
     where
-        T: AsMut<U>,
+        Vertex: AsMut<U>,
     {
-        self.0.each_mut().map(|c| c.as_mut())
+        self.vertices.each_mut().map(|c| c.as_mut())
     }
 }
 
-impl<T, const N: usize> Primitive<T, N>
+impl<Vertex, const NUM_VERTICES: usize, Face> Primitive<Vertex, NUM_VERTICES, Face>
 where
-    T: AsRef<ClipPosition>,
+    Vertex: AsRef<ClipPosition>,
 {
-    pub fn clip_positions(&self) -> [ClipPosition; N] {
-        self.each::<ClipPosition>()
+    pub fn clip_positions(&self) -> [ClipPosition; NUM_VERTICES] {
+        self.each_vertex::<ClipPosition>()
     }
 }
 
-impl<T, const N: usize> Primitive<T, N>
+impl<Vertex, const NUM_VERTICES: usize, Face> Primitive<Vertex, NUM_VERTICES, Face>
 where
-    T: AsMut<ClipPosition>,
+    Vertex: AsMut<ClipPosition>,
 {
-    pub fn clip_positions_mut(&mut self) -> [&mut ClipPosition; N] {
-        self.each_mut::<ClipPosition>()
+    pub fn clip_positions_mut(&mut self) -> [&mut ClipPosition; NUM_VERTICES] {
+        self.each_vertex_mut::<ClipPosition>()
     }
 }
 
-impl<T> Primitive<T, 3>
-where
-    T: AsRef<ClipPosition>,
+impl<Vertex, const NUM_VERTICES: usize, Face> IntoIterator
+    for Primitive<Vertex, NUM_VERTICES, Face>
 {
+    type Item = Vertex;
+    type IntoIter = std::array::IntoIter<Vertex, NUM_VERTICES>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.vertices.into_iter()
+    }
+}
+
+pub trait AsFrontFace {
+    /// Whether this is a front face, if the primitive has a face.
+    ///
+    /// This only gives the winding order. In order to know if this is actually
+    /// a front face it has to be compared to the pipeline setting.
+    fn try_front_face(&self) -> Option<wgpu::FrontFace>;
+}
+
+impl AsFrontFace for () {
+    fn try_front_face(&self) -> Option<wgpu::FrontFace> {
+        None
+    }
+}
+
+impl<Vertex, const NUM_VERTICES: usize, Face> AsFrontFace for Primitive<Vertex, NUM_VERTICES, Face>
+where
+    Face: AsFrontFace,
+{
+    fn try_front_face(&self) -> Option<wgpu::FrontFace> {
+        self.face.try_front_face()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TriFace {
+    /// Vector area of the tri.
+    ///
+    /// If `vector_area.z > 0.0` this is [`Ccw`][wgpu::FrontFace::Ccw],
+    /// otherwise it's [`Cw`][wgpu::FrontFace::Cw]
+    pub vector_area: Vector3<f32>,
+}
+
+impl TriFace {
+    pub fn new<Vertex>(vertices: &[Vertex; 3]) -> TriFace
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
+        // todo: there's probably a better way to handle this in homogeneous coordinates
+
+        let [a, b, c] = vertices
+            .each_ref()
+            .map(|vertex| Point3::from_homogeneous(vertex.as_ref().0).expect("clip position z=0"));
+
+        let ab = b - a;
+        let ac = c - a;
+        let vector_area = ab.cross(&ac);
+
+        Self { vector_area }
+    }
+
+    /// Whether this is a front face.
+    ///
+    /// This only gives the winding order. In order to know if this is actually
+    /// a front face it has to be compared to the pipeline setting.
     pub fn front_face(&self) -> wgpu::FrontFace {
-        let clip_positions = self.clip_positions();
-
-        let ab = clip_positions[1].0 - clip_positions[0].0;
-        let ac = clip_positions[2].0 - clip_positions[1].0;
-
-        if ab.x * ac.y < ab.y * ac.x {
+        if self.vector_area.z > 0.0 {
             wgpu::FrontFace::Ccw
         }
         else {
@@ -132,30 +154,31 @@ where
     }
 }
 
-impl<T, const N: usize> IntoIterator for Primitive<T, N> {
-    type Item = T;
-    type IntoIter = std::array::IntoIter<T, N>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+impl AsFrontFace for TriFace {
+    fn try_front_face(&self) -> Option<wgpu::FrontFace> {
+        Some(self.front_face())
     }
 }
 
-pub trait AssemblePrimitives<T, const PRIMITIVE_SIZE: usize> {
+pub trait AssemblePrimitives<Vertex, const NUM_VERTICES: usize> {
+    type Face;
+
     fn assemble(
         &mut self,
-        vertices: impl IntoIterator<Item = T>,
-    ) -> impl IntoIterator<Item = Primitive<T, PRIMITIVE_SIZE>>;
+        vertices: impl IntoIterator<Item = Vertex>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, NUM_VERTICES, Self::Face>>;
 }
 
-impl<A, T, const PRIMITIVE_SIZE: usize> AssemblePrimitives<T, PRIMITIVE_SIZE> for &mut A
+impl<A, Vertex, const NUM_VERTICES: usize> AssemblePrimitives<Vertex, NUM_VERTICES> for &mut A
 where
-    A: AssemblePrimitives<T, PRIMITIVE_SIZE>,
+    A: AssemblePrimitives<Vertex, NUM_VERTICES>,
 {
+    type Face = A::Face;
+
     fn assemble(
         &mut self,
-        vertices: impl IntoIterator<Item = T>,
-    ) -> impl IntoIterator<Item = Primitive<T, PRIMITIVE_SIZE>> {
+        vertices: impl IntoIterator<Item = Vertex>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, NUM_VERTICES, Self::Face>> {
         A::assemble(self, vertices)
     }
 }
@@ -163,66 +186,105 @@ where
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PrimitiveList;
 
-impl<T, const PRIMITIVE_SIZE: usize> AssemblePrimitives<T, PRIMITIVE_SIZE> for PrimitiveList {
+impl<Vertex> AssemblePrimitives<Vertex, 1> for PrimitiveList {
+    type Face = ();
+
     fn assemble(
         &mut self,
-        vertices: impl IntoIterator<Item = T>,
-    ) -> impl IntoIterator<Item = Primitive<T, PRIMITIVE_SIZE>> {
+        vertices: impl IntoIterator<Item = Vertex>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 1, Self::Face>> {
         vertices
             .into_iter()
-            .array_chunks_::<PRIMITIVE_SIZE>()
-            .map(Into::into)
+            .map(|vertex| Primitive::new([vertex], ()))
+    }
+}
+
+impl<Vertex> AssemblePrimitives<Vertex, 2> for PrimitiveList {
+    type Face = ();
+
+    fn assemble(
+        &mut self,
+        vertices: impl IntoIterator<Item = Vertex>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 2, Self::Face>> {
+        vertices
+            .into_iter()
+            .array_chunks_::<2>()
+            .map(|vertices| Primitive::new(vertices, ()))
+    }
+}
+
+impl<Vertex> AssemblePrimitives<Vertex, 3> for PrimitiveList
+where
+    Vertex: AsRef<ClipPosition>,
+{
+    type Face = TriFace;
+
+    fn assemble(
+        &mut self,
+        vertices: impl IntoIterator<Item = Vertex>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 3, Self::Face>> {
+        vertices.into_iter().array_chunks_::<3>().map(|vertices| {
+            let face = TriFace::new(&vertices);
+            Primitive::new(vertices, face)
+        })
     }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PrimitiveStrip;
 
-impl<T> AssemblePrimitives<T, 2> for PrimitiveStrip
+impl<Vertex> AssemblePrimitives<Vertex, 2> for PrimitiveStrip
 where
-    T: Clone,
+    Vertex: Clone,
 {
+    type Face = ();
+
     fn assemble(
         &mut self,
-        vertices: impl IntoIterator<Item = T>,
-    ) -> impl IntoIterator<Item = Primitive<T, 2>> {
+        vertices: impl IntoIterator<Item = Vertex>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 2>> {
         vertices
             .into_iter()
             .tuple_windows()
-            .map(|(a, b)| Primitive([a, b]))
+            .map(|(a, b)| Primitive::new([a, b], ()))
     }
 }
 
-impl<T> AssemblePrimitives<T, 3> for PrimitiveStrip
+impl<Vertex> AssemblePrimitives<Vertex, 3> for PrimitiveStrip
 where
-    T: Clone + 'static,
+    Vertex: Clone + AsRef<ClipPosition>,
 {
+    type Face = TriFace;
+
     fn assemble(
         &mut self,
-        vertices: impl IntoIterator<Item = T>,
-    ) -> impl IntoIterator<Item = Primitive<T, 3>> {
-        TriangleStripIter::new(vertices.into_iter()).map(Primitive)
+        vertices: impl IntoIterator<Item = Vertex>,
+    ) -> impl IntoIterator<Item = Primitive<Vertex, 3, Self::Face>> {
+        TriangleStripIter::new(vertices.into_iter()).map(|vertices| {
+            let face = TriFace::new(&vertices);
+            Primitive::new(vertices, face)
+        })
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct TriangleStripIter<I, T> {
-    inner: TriangleStripIterInner<I, T>,
+pub struct TriangleStripIter<I, Vertex> {
+    inner: TriangleStripIterInner<I, Vertex>,
 }
 
 #[derive(Clone, Copy, Debug)]
-enum TriangleStripIterInner<I, T> {
+enum TriangleStripIterInner<I, Vertex> {
     Iter {
         inner: I,
         even: bool,
-        buffer: [T; 2],
+        buffer: [Vertex; 2],
     },
     Empty,
 }
 
-impl<I, T> TriangleStripIter<I, T>
+impl<I, Vertex> TriangleStripIter<I, Vertex>
 where
-    I: Iterator<Item = T>,
+    I: Iterator<Item = Vertex>,
 {
     pub fn new(mut inner: I) -> Self {
         // try to fetch 2 points to fill the buffer. if we can't we won't yield any
@@ -242,12 +304,12 @@ where
     }
 }
 
-impl<I, T> Iterator for TriangleStripIter<I, T>
+impl<I, Vertex> Iterator for TriangleStripIter<I, Vertex>
 where
-    I: Iterator<Item = T>,
-    T: Clone,
+    I: Iterator<Item = Vertex>,
+    Vertex: Clone,
 {
-    type Item = [T; 3];
+    type Item = [Vertex; 3];
 
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
@@ -280,7 +342,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::render_pass::primitive::TriangleStripIter;
+    use nalgebra::Point3;
+
+    use crate::render_pass::{
+        clipper::ClipPosition,
+        primitive::{
+            TriFace,
+            TriangleStripIter,
+        },
+    };
 
     #[test]
     fn triangle_strip() {
@@ -289,5 +359,28 @@ mod tests {
         let expected = [[0, 1, 2], [2, 1, 3], [2, 3, 4], [4, 3, 5]];
         let got = TriangleStripIter::new(0..6).collect::<Vec<_>>();
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn triangle_front_face() {
+        #[rustfmt::skip]
+        let tri_cw = [
+            [-1.0, 0.0, 0.0],
+            [ 0.0, 1.0, 0.0],
+            [ 1.0, 0.0, 0.0],
+        ];
+        let tri_cw = tri_cw.map(|v| ClipPosition(Point3::from(v).to_homogeneous()));
+        let face = TriFace::new(&tri_cw);
+        assert_eq!(face.front_face(), wgpu::FrontFace::Cw);
+
+        #[rustfmt::skip]
+        let tri_ccw = [
+            [ 1.0, 0.0, 0.0],
+            [ 0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        ];
+        let tri_ccw = tri_ccw.map(|v| ClipPosition(Point3::from(v).to_homogeneous()));
+        let face = TriFace::new(&tri_ccw);
+        assert_eq!(face.front_face(), wgpu::FrontFace::Ccw);
     }
 }
