@@ -1,15 +1,16 @@
-use std::{
-    collections::HashMap,
-    ops::Index,
-};
+use std::ops::Index;
 
 use naga::{
+    Binding,
     EntryPoint,
     Function,
+    FunctionArgument,
+    FunctionResult,
     Handle,
     Module,
     Scalar,
     ShaderStage,
+    Type,
     TypeInner,
     WithSpan,
     front::Typifier,
@@ -17,7 +18,6 @@ use naga::{
         Alignment,
         LayoutError,
         Layouter,
-        ResolveContext,
         TypeLayout,
     },
     valid::{
@@ -28,18 +28,22 @@ use naga::{
 };
 
 use crate::{
-    interpreter::{
-        bindings::{
-            UserDefinedIoLayout,
-            UserDefinedIoLayouts,
-            collect_user_defined_inter_stage_layout_from_function_arguments,
-            collect_user_defined_inter_stage_layout_from_function_result,
-        },
-        variable::VariableType,
+    bindings::{
+        BindingLocationLayout,
+        IoBindingVisitor,
+        UserDefinedInterStageLayout,
+        VisitIoBindings,
     },
+    entry_point::{
+        EntryPointIndex,
+        EntryPointNotFound,
+        EntryPoints,
+    },
+    interpreter::variable::VariableType,
     util::{
         CoArena,
         SparseVec,
+        typifier_from_function,
     },
 };
 
@@ -49,14 +53,20 @@ pub struct ShaderModule {
     #[allow(unused)]
     module_info: ModuleInfo,
     pub(crate) layouter: Layouter,
-    entry_points_by_name: HashMap<String, usize>,
-    unique_entry_points_by_stage: HashMap<ShaderStage, usize>,
+    entry_points: EntryPoints<()>,
     pub(crate) expression_types: ExpressionTypes,
     user_defined_io_layouts: UserDefinedIoLayouts,
 }
 
 impl ShaderModule {
     pub fn new(module: naga::Module) -> Result<Self, Error> {
+        // todo: this should only contain minimal information (anything shared and
+        // usefule before pipeline constants are known) the backend
+        // (interpreter/compiler) should derive all the info they need themselves (can
+        // move code for this to util)
+        //
+        // https://docs.rs/naga/latest/naga/back/pipeline_constants/fn.process_overrides.html
+
         let mut validator = Validator::new(Default::default(), Default::default());
         let module_info = validator.validate(&module)?;
 
@@ -80,17 +90,9 @@ impl ShaderModule {
         };
 
         let mut user_defined_io_layouts = SparseVec::with_capacity(module.entry_points.len());
-        let mut entry_points_by_name = HashMap::with_capacity(module.entry_points.len());
-        let mut unique_entry_points_by_stage = HashMap::with_capacity(module.entry_points.len());
+        let mut entry_points = EntryPoints::default();
         for (i, entry_point) in module.entry_points.iter().enumerate() {
-            entry_points_by_name.insert(entry_point.name.clone(), i);
-
-            if let Some(not_unique) = unique_entry_points_by_stage.get_mut(&entry_point.stage) {
-                *not_unique = usize::MAX;
-            }
-            else {
-                unique_entry_points_by_stage.insert(entry_point.stage, i);
-            }
+            entry_points.push(entry_point, ());
 
             expression_types
                 .entry_points
@@ -128,14 +130,12 @@ impl ShaderModule {
                 }
             }
         }
-        unique_entry_points_by_stage.retain(|_, index| *index != usize::MAX);
 
         Ok(Self {
             module,
             module_info,
             layouter,
-            entry_points_by_name,
-            unique_entry_points_by_stage,
+            entry_points,
             expression_types,
             user_defined_io_layouts: UserDefinedIoLayouts {
                 inner: user_defined_io_layouts,
@@ -175,32 +175,13 @@ impl ShaderModule {
         name: Option<&str>,
         stage: ShaderStage,
     ) -> Result<EntryPointIndex, EntryPointNotFound> {
-        let index = if let Some(name) = name {
-            let index = *self.entry_points_by_name.get(name).ok_or_else(|| {
-                EntryPointNotFound::NameNotFound {
-                    name: name.to_owned(),
-                }
-            })?;
+        self.entry_points.find(name, stage)
+    }
 
-            let module_stage = self.module.entry_points[index].stage;
-            if module_stage != stage {
-                return Err(EntryPointNotFound::WrongStage {
-                    name: name.to_owned(),
-                    module_stage,
-                    expected_stage: stage,
-                });
-            }
-
-            index
-        }
-        else {
-            *self
-                .unique_entry_points_by_stage
-                .get(&stage)
-                .ok_or_else(|| EntryPointNotFound::NoUniqueForStage { stage })?
-        };
-
-        Ok(EntryPointIndex(index))
+    pub fn entry_points(&self) -> impl Iterator<Item = (EntryPointIndex, &EntryPoint)> {
+        self.entry_points
+            .iter()
+            .map(|(index, ())| (index, &self.module.entry_points[index.index]))
     }
 
     pub fn offset_of<'ty>(
@@ -255,27 +236,11 @@ pub enum Error {
     Layout(#[from] LayoutError),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum EntryPointNotFound {
-    #[error("Entry point '{name}' not found")]
-    NameNotFound { name: String },
-    #[error("No unique entry point for shader stage {stage:?} found")]
-    NoUniqueForStage { stage: ShaderStage },
-    #[error(
-        "Found entry point '{name}', but it is for shader stage {module_stage:?}, and not {expected_stage:?}"
-    )]
-    WrongStage {
-        name: String,
-        module_stage: ShaderStage,
-        expected_stage: ShaderStage,
-    },
-}
-
 impl Index<EntryPointIndex> for ShaderModule {
     type Output = EntryPoint;
 
     fn index(&self, index: EntryPointIndex) -> &Self::Output {
-        &self.module.entry_points[index.0]
+        &self.module.entry_points[index.index]
     }
 }
 
@@ -289,7 +254,7 @@ impl Index<EntryPointIndex> for ExpressionTypes {
     type Output = Typifier;
 
     fn index(&self, index: EntryPointIndex) -> &Self::Output {
-        &self.entry_points[index.0]
+        &self.entry_points[index.index]
     }
 }
 
@@ -301,26 +266,123 @@ impl Index<Handle<Function>> for ExpressionTypes {
     }
 }
 
-fn typifier_from_function(module: &Module, function: &Function) -> Typifier {
-    let mut typifier = Typifier::default();
-    let resolve_context =
-        ResolveContext::with_locals(module, &function.local_variables, &function.arguments);
-
-    for (handle, expression) in function.expressions.iter() {
-        typifier
-            .grow(handle, &function.expressions, &resolve_context)
-            .unwrap();
-    }
-
-    typifier
+#[derive(Clone, Debug)]
+pub struct UserDefinedIoLayouts {
+    pub(super) inner: SparseVec<UserDefinedIoLayout>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct EntryPointIndex(pub(super) usize);
+impl Index<EntryPointIndex> for UserDefinedIoLayouts {
+    type Output = UserDefinedIoLayout;
 
-#[cfg(test)]
-impl From<usize> for EntryPointIndex {
-    fn from(value: usize) -> Self {
-        Self(value)
+    fn index(&self, index: EntryPointIndex) -> &Self::Output {
+        &self.inner[index.index]
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct CollectUserDefinedInterStageLayout<'module> {
+    pub layouter: &'module Layouter,
+    pub buffer_offset: u32,
+    pub locations: SparseVec<BindingLocationLayout>,
+}
+
+impl<'module> VisitIoBindings for CollectUserDefinedInterStageLayout<'module> {
+    fn visit(
+        &mut self,
+        binding: &Binding,
+        ty_handle: Handle<Type>,
+        ty: &Type,
+        offset: u32,
+        name: Option<&str>,
+    ) {
+        // this is the offset in the struct that contains this inter-stage location
+        // binding. we don't care about this, since we can layout our
+        // inter-stage buffer as we want. in particular the layout of the vertex
+        // output and fragment input might not even match.
+        let _ = offset;
+
+        match binding {
+            Binding::BuiltIn(_builtin) => {
+                // nop
+            }
+            Binding::Location {
+                location,
+                interpolation,
+                sampling,
+                blend_src,
+                per_primitive,
+            } => {
+                let type_layout = self.layouter[ty_handle];
+                let offset = type_layout.alignment.round_up(self.buffer_offset);
+                let size = type_layout.size;
+                self.buffer_offset = offset + size;
+
+                let index = *location as usize;
+                self.locations
+                    .insert(index, BindingLocationLayout { offset, size });
+            }
+        }
+    }
+}
+
+pub fn collect_user_defined_inter_stage_layout_from_function_arguments<'a>(
+    module: &Module,
+    layouter: &Layouter,
+    arguments: impl IntoIterator<Item = &'a FunctionArgument>,
+) -> UserDefinedInterStageLayout {
+    let mut visit = CollectUserDefinedInterStageLayout {
+        layouter,
+        buffer_offset: 0,
+        locations: SparseVec::default(),
+    };
+
+    for argument in arguments {
+        IoBindingVisitor {
+            types: &module.types,
+            visit: &mut visit,
+        }
+        .visit_function_argument(argument, 0);
+    }
+
+    UserDefinedInterStageLayout {
+        locations: visit.locations.into_vec().into(),
+        size: visit.buffer_offset,
+    }
+}
+
+pub fn collect_user_defined_inter_stage_layout_from_function_result<'a>(
+    module: &Module,
+    layouter: &Layouter,
+    result: impl Into<Option<&'a FunctionResult>>,
+) -> UserDefinedInterStageLayout {
+    let mut visit = CollectUserDefinedInterStageLayout {
+        layouter,
+        buffer_offset: 0,
+        locations: SparseVec::new(),
+    };
+
+    if let Some(result) = result.into() {
+        IoBindingVisitor {
+            types: &module.types,
+            visit: &mut visit,
+        }
+        .visit_function_result(result, 0);
+    }
+
+    UserDefinedInterStageLayout {
+        locations: visit.locations.into_vec().into(),
+        size: visit.buffer_offset,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum UserDefinedIoLayout {
+    Vertex {
+        // todo: input
+        output: UserDefinedInterStageLayout,
+    },
+    Fragment {
+        input: UserDefinedInterStageLayout,
+        // output: don't need it, but would be handy for verification
+    },
 }

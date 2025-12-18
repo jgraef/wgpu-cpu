@@ -6,7 +6,7 @@ use std::{
 use naga_interpreter::{
     interpreter::{
         Interpreter,
-        bindings::UserDefinedIoLayout,
+        UserDefinedIoLayout,
     },
     memory::NullMemory,
 };

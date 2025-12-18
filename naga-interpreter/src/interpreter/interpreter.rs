@@ -41,6 +41,7 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
+    entry_point::EntryPointIndex,
     interpreter::{
         bindings::{
             copy_shader_inputs_to_stack,
@@ -52,10 +53,7 @@ use crate::{
             Stack,
             StackFrame,
         },
-        module::{
-            EntryPointIndex,
-            ShaderModule,
-        },
+        module::ShaderModule,
         variable::Variable,
     },
     memory::{

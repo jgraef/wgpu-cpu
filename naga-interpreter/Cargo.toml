@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 bytemuck = "1.24.0"
+cranelift-codegen = { version = "0.126.1", optional = true }
+cranelift-frontend = { version = "0.126.1", optional = true }
+cranelift-jit = { version = "0.126.1", optional = true }
+cranelift-module = { version = "0.126.1", optional = true }
+cranelift-native = { version = "0.126.1", optional = true }
 derive_more = { version = "2.1.0", features = ["debug"] }
 half = { version = "2.7.1", features = ["bytemuck"] }
 naga = "27.0.0"
@@ -16,4 +21,10 @@ approx = "0.5.1"
 
 [features]
 interpreter = []
-cranelift = []
+cranelift = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+]

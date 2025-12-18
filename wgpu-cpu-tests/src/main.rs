@@ -52,7 +52,9 @@ fn main() -> Result<(), Error> {
             no_unit_tests,
         } => {
             if !no_unit_tests {
-                let mut cargo = std::process::Command::new("cargo").args(["test"]).spawn()?;
+                let mut cargo = std::process::Command::new("cargo")
+                    .args(["test", "--all-features"])
+                    .spawn()?;
                 cargo.wait()?;
             }
 

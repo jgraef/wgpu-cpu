@@ -268,3 +268,23 @@ where
         f.debug_list().entries(self.iter()).finish()
     }
 }
+
+pub fn typifier_from_function(
+    module: &naga::Module,
+    function: &naga::Function,
+) -> naga::front::Typifier {
+    let mut typifier = naga::front::Typifier::default();
+    let resolve_context = naga::proc::ResolveContext::with_locals(
+        module,
+        &function.local_variables,
+        &function.arguments,
+    );
+
+    for (handle, expression) in function.expressions.iter() {
+        typifier
+            .grow(handle, &function.expressions, &resolve_context)
+            .unwrap();
+    }
+
+    typifier
+}
