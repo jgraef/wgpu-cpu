@@ -9,11 +9,10 @@ Thumbs.db
 # Rust
 /Cargo.lock
 /target
-/.cargo
 
 # Env vars
 .env
 
 /rustc-ice-*
 /tmp
-
+/tests/output

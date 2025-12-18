@@ -1,0 +1,18 @@
+[package]
+name = "wgpu-cpu-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+clap = { version = "4.5.53", features = ["derive"] }
+color-eyre = "0.6.5"
+dotenvy = "0.15.7"
+image = "0.25.9"
+inventory = "0.3.21"
+owo-colors = "4.2.3"
+pollster = "0.4.0"
+tracing = "0.1.43"
+tracing-subscriber = "0.3.22"
+wgpu = "27.0.0"
+wgpu-cpu = { version = "0.1.0", path = "../wgpu-cpu" }

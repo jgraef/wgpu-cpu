@@ -1,44 +1,15 @@
-use std::path::Path;
-
 use image::{
-    ImageReader,
     RgbaImage,
     buffer::ConvertBuffer,
 };
 use wgpu_cpu::image::rgba_texture_image;
 
-fn load_reference(path: impl AsRef<Path>) -> RgbaImage {
-    let path = path.as_ref();
-    ImageReader::open(Path::new("tests").join(path))
-        .unwrap_or_else(|error| {
-            panic!(
-                "Could not open reference image: {}: {error}",
-                path.display()
-            )
-        })
-        .decode()
-        .unwrap_or_else(|error| {
-            panic!(
-                "Could not decode reference image: {}: {error}",
-                path.display()
-            )
-        })
-        .to_rgba8()
-}
+use crate::{
+    test,
+    util::create_device_and_queue,
+};
 
-fn create_device_and_queue() -> (wgpu::Device, wgpu::Queue) {
-    let instance = wgpu_cpu::instance();
-
-    let (_adapter, device, queue) = pollster::block_on(async {
-        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
-        (adapter, device, queue)
-    });
-
-    (device, queue)
-}
-
-fn render_colored_triangle() -> RgbaImage {
+fn colored_triangle() -> RgbaImage {
     let (device, queue) = create_device_and_queue();
 
     let shader_module = device.create_shader_module(wgpu::include_wgsl!("colored_triangle.wgsl"));
@@ -161,23 +132,4 @@ fn render_colored_triangle() -> RgbaImage {
 
     rgba_texture_image(&target_texture).convert()
 }
-
-#[track_caller]
-fn assert_eq_image(reference: &RgbaImage, rendered: &RgbaImage) {
-    assert_eq!(rendered.width(), reference.width());
-    assert_eq!(rendered.height(), reference.height());
-
-    rendered
-        .enumerate_pixels()
-        .zip(reference.enumerate_pixels())
-        .for_each(|((x, y, generated), (_, _, expected))| {
-            assert_eq!(generated, expected, "Pixels differ at [{x}, {y}]");
-        });
-}
-
-#[test]
-fn t_colored_triangle() {
-    let reference = load_reference("colored_triangle.png");
-    let rendered = render_colored_triangle();
-    assert_eq_image(&reference, &rendered);
-}
+test!(colored_triangle);
