@@ -28,12 +28,15 @@ use naga::{
 };
 
 use crate::{
-    bindings::{
-        UserDefinedIoLayout,
-        collect_user_defined_inter_stage_layout_from_function_arguments,
-        collect_user_defined_inter_stage_layout_from_function_result,
+    interpreter::{
+        bindings::{
+            UserDefinedIoLayout,
+            UserDefinedIoLayouts,
+            collect_user_defined_inter_stage_layout_from_function_arguments,
+            collect_user_defined_inter_stage_layout_from_function_result,
+        },
+        variable::VariableType,
     },
-    interpreter::VariableType,
     util::{
         CoArena,
         SparseVec,
@@ -313,24 +316,11 @@ fn typifier_from_function(module: &Module, function: &Function) -> Typifier {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct EntryPointIndex(usize);
+pub struct EntryPointIndex(pub(super) usize);
 
 #[cfg(test)]
 impl From<usize> for EntryPointIndex {
     fn from(value: usize) -> Self {
         Self(value)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct UserDefinedIoLayouts {
-    inner: SparseVec<UserDefinedIoLayout>,
-}
-
-impl Index<EntryPointIndex> for UserDefinedIoLayouts {
-    type Output = UserDefinedIoLayout;
-
-    fn index(&self, index: EntryPointIndex) -> &Self::Output {
-        &self.inner[index.0]
     }
 }

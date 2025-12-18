@@ -5,12 +5,14 @@ use naga::{
     Type,
 };
 use naga_interpreter::{
-    EntryPointIndex,
-    Interpreter,
     bindings::{
         BindingLocation,
         ShaderInput,
         ShaderOutput,
+    },
+    interpreter::{
+        EntryPointIndex,
+        Interpreter,
     },
     memory::{
         NullMemory,

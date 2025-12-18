@@ -7,12 +7,12 @@ use naga::{
     VectorSize,
 };
 use naga_interpreter::{
-    EntryPointIndex,
     bindings::{
         BindingLocation,
         ShaderInput,
         ShaderOutput,
     },
+    interpreter::EntryPointIndex,
     memory::ReadMemory,
 };
 use nalgebra::{

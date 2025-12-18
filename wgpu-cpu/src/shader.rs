@@ -20,7 +20,7 @@ pub struct ShaderModule {
 
 #[derive(Debug)]
 struct Inner {
-    module: naga_interpreter::ShaderModule,
+    module: naga_interpreter::interpreter::ShaderModule,
     compilation_info: wgpu::CompilationInfo,
 }
 
@@ -36,7 +36,7 @@ impl ShaderModule {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                module: naga_interpreter::ShaderModule::new(module)?,
+                module: naga_interpreter::interpreter::ShaderModule::new(module)?,
                 compilation_info: wgpu::CompilationInfo { messages: vec![] },
             }),
         })
@@ -52,8 +52,8 @@ impl wgpu::custom::ShaderModuleInterface for ShaderModule {
     }
 }
 
-impl AsRef<naga_interpreter::ShaderModule> for ShaderModule {
-    fn as_ref(&self) -> &naga_interpreter::ShaderModule {
+impl AsRef<naga_interpreter::interpreter::ShaderModule> for ShaderModule {
+    fn as_ref(&self) -> &naga_interpreter::interpreter::ShaderModule {
         &self.inner.module
     }
 }
@@ -67,7 +67,7 @@ pub enum Error {
     ParseError(#[from] naga::front::wgsl::ParseError),
 
     #[error(transparent)]
-    Module(#[from] naga_interpreter::ModuleError),
+    Module(#[from] naga_interpreter::interpreter::ModuleError),
 }
 
 #[derive(Clone, Debug)]

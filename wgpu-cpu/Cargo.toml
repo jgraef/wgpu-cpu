@@ -18,7 +18,9 @@ derive_more = { version = "2.1.0", features = [
 image = { version = "0.25.9", optional = true }
 itertools = "0.14.0"
 naga = { version = "27.0.0", features = ["wgsl-in"] }
-naga-interpreter = { version = "0.1.0", path = "../naga-interpreter" }
+naga-interpreter = { version = "0.1.0", path = "../naga-interpreter", features = [
+    "interpreter",
+] }
 nalgebra = { version = "0.34.1", default-features = false, features = [
     "bytemuck",
 ] }

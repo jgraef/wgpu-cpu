@@ -17,12 +17,14 @@ use naga::{
 };
 
 use crate::{
-    EntryPointIndex,
-    Interpreter,
-    ShaderModule,
     bindings::{
         ShaderInput,
         ShaderOutput,
+    },
+    interpreter::{
+        EntryPointIndex,
+        Interpreter,
+        ShaderModule,
     },
     memory::NullMemory,
 };

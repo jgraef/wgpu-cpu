@@ -4,8 +4,10 @@ use std::{
 };
 
 use naga_interpreter::{
-    Interpreter,
-    bindings::UserDefinedIoLayout,
+    interpreter::{
+        Interpreter,
+        bindings::UserDefinedIoLayout,
+    },
     memory::NullMemory,
 };
 use nalgebra::{
