@@ -231,7 +231,7 @@ impl LineRasterizer {
 
 impl<T> Rasterize<Line<T>> for LineRasterizer
 where
-    T: AsRef<ClipPosition>,
+    T: AsRef<ClipPosition> + Clone,
 {
     type Interpolation = Lerp;
 
@@ -247,12 +247,26 @@ where
             .map(|[start, end]| {
                 bresenham(start, end).map(move |(raster, lerp)| {
                     let lerp = Lerp(lerp);
-                    /*Fragment {
-                        raster,
-                        position: lerp.interpolate(primitive.into()),
+                    let clip_position = lerp.interpolate(
+                        primitive
+                            .clip_positions()
+                            .map(|ClipPosition(vertex)| vertex),
+                    );
+                    let depth = clip_position.z;
+                    let perspective_divisor = clip_position.w;
+
+                    RasterizationPoint {
+                        destination: FragmentDestination {
+                            position: raster,
+                            sample_index: None,
+                        },
+                        coverage_mask: !0,
+                        front_face: None,
+                        perspective_divisor,
+                        depth,
+                        primitive_vertices: primitive.clone(),
                         interpolation: lerp,
-                    }*/
-                    todo!();
+                    }
                 })
             })
             .into_iter()

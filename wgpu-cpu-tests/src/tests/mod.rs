@@ -9,6 +9,7 @@ use std::{
 
 use color_eyre::eyre::{
     Error,
+    bail,
     eyre,
 };
 use image::{
@@ -136,9 +137,12 @@ impl Tests {
         std::fs::create_dir_all(&files.reference)?;
         std::fs::create_dir_all(&files.output)?;
 
-        let tests = inventory::iter::<TestFunction>()
-            .map(|test| (test.name, test))
-            .collect();
+        let mut tests = HashMap::new();
+        for test in inventory::iter::<TestFunction>() {
+            if tests.insert(test.name, test).is_some() {
+                bail!("Multiple tests with the same name: {}", test.name);
+            }
+        }
 
         Ok(Self { tests, files })
     }

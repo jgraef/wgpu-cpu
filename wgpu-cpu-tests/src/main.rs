@@ -78,16 +78,17 @@ fn main() -> Result<(), Error> {
             })?;
 
             println!("");
+            println!("{}", "Summary".bold());
             for (test, result) in results {
                 match &result {
                     Ok(()) => {
-                        println!("Test {} {}", "passed".green(), test.name());
+                        println!("  Test {} {}", "passed".green(), test.name());
                     }
                     Err(error) => {
                         let error = error.to_string();
                         let error_line = error.lines().next().unwrap_or_default();
                         println!(
-                            "Test {} {}: {}",
+                            "  Test {} {}: {}",
                             "failed".red(),
                             test.name(),
                             error_line.trim()

@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use image::{
     RgbaImage,
     buffer::ConvertBuffer,
@@ -9,7 +11,12 @@ use crate::{
     util::create_device_and_queue,
 };
 
-fn colored_triangle() -> RgbaImage {
+fn colored_triangle_helper(
+    vertices: Range<u32>,
+    topology: wgpu::PrimitiveTopology,
+    front_face: wgpu::FrontFace,
+    cull_mode: Option<wgpu::Face>,
+) -> RgbaImage {
     let (device, queue) = create_device_and_queue();
 
     let shader_module = device.create_shader_module(wgpu::include_wgsl!("colored_triangle.wgsl"));
@@ -61,10 +68,10 @@ fn colored_triangle() -> RgbaImage {
             buffers: &[],
         },
         primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
+            topology,
             strip_index_format: None,
-            front_face: wgpu::FrontFace::Cw,
-            cull_mode: Some(wgpu::Face::Back),
+            front_face,
+            cull_mode,
             unclipped_depth: false,
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
@@ -119,7 +126,7 @@ fn colored_triangle() -> RgbaImage {
         });
 
         render_pass.set_pipeline(&pipeline);
-        render_pass.draw(0..3, 0..1);
+        render_pass.draw(vertices, 0..1);
     }
 
     let submission_index = queue.submit([command_encoder.finish()]);
@@ -132,4 +139,53 @@ fn colored_triangle() -> RgbaImage {
 
     rgba_texture_image(&target_texture).convert()
 }
+
+fn colored_triangle() -> RgbaImage {
+    colored_triangle_helper(
+        0..3,
+        wgpu::PrimitiveTopology::TriangleList,
+        wgpu::FrontFace::Cw,
+        Some(wgpu::Face::Back),
+    )
+}
 test!(colored_triangle);
+
+fn colored_triangle_cull_front() -> RgbaImage {
+    colored_triangle_helper(
+        0..3,
+        wgpu::PrimitiveTopology::TriangleList,
+        wgpu::FrontFace::Cw,
+        Some(wgpu::Face::Front),
+    )
+}
+test!(colored_triangle_cull_front);
+
+fn colored_triangle_draw_backwards() -> RgbaImage {
+    colored_triangle_helper(
+        0..3,
+        wgpu::PrimitiveTopology::TriangleList,
+        wgpu::FrontFace::Ccw,
+        Some(wgpu::Face::Back),
+    )
+}
+test!(colored_triangle_draw_backwards);
+
+fn colored_triangle_draw_backwards_no_cull() -> RgbaImage {
+    colored_triangle_helper(
+        0..3,
+        wgpu::PrimitiveTopology::TriangleList,
+        wgpu::FrontFace::Ccw,
+        None,
+    )
+}
+test!(colored_triangle_draw_backwards_no_cull);
+
+fn colored_triangle_lines() -> RgbaImage {
+    colored_triangle_helper(
+        0..4,
+        wgpu::PrimitiveTopology::LineStrip,
+        wgpu::FrontFace::Cw,
+        None,
+    )
+}
+test!(colored_triangle_lines);
