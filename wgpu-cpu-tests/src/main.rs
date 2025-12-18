@@ -27,6 +27,8 @@ struct Args {
 enum Command {
     Test {
         tests: Vec<String>,
+        #[clap(short, long)]
+        no_unit_tests: bool,
     },
     GenerateReference {
         tests: Vec<String>,
@@ -45,7 +47,15 @@ fn main() -> Result<(), Error> {
     let tests = Tests::new(args.files)?;
 
     match args.command {
-        Command::Test { tests: names } => {
+        Command::Test {
+            tests: names,
+            no_unit_tests,
+        } => {
+            if !no_unit_tests {
+                let mut cargo = std::process::Command::new("cargo").args(["test"]).spawn()?;
+                cargo.wait()?;
+            }
+
             let mut results = vec![];
 
             tests.for_names(&names, |test| {
