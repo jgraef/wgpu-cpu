@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     convert::Infallible,
+    fmt::Debug,
 };
 
 use cranelift_codegen::{
@@ -102,14 +103,12 @@ impl<'module> Compiler<'module> {
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
 
-        let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
-            panic!("host machine is not supported: {}", msg);
+        let isa_builder = cranelift_native::builder().unwrap_or_else(|message| {
+            panic!("host machine is not supported: {message}");
         });
         let isa = isa_builder
             .finish(cranelift_codegen::settings::Flags::new(flag_builder))
             .unwrap();
-
-        println!("calling convention: {}", isa.default_call_conv());
 
         let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let jit_module = JITModule::new(jit_builder);
@@ -145,7 +144,6 @@ impl<'module> Compiler<'module> {
             entry_points.push(entry_point, entry_point_data);
         }
 
-        self.jit_module.clear_context(&mut self.cl_context);
         self.jit_module.finalize_definitions()?;
 
         Ok(CompiledModule::new(self.jit_module, entry_points))
@@ -163,13 +161,19 @@ impl<'module> Compiler<'module> {
     ) -> Result<CompiledEntryPoint, Error> {
         // compile entry point function
         let main_function_id = self.compile_function(&entry_point.function)?;
+
+        // build shim
+        self.jit_module.clear_context(&mut self.cl_context);
+
         let main_function_ref = self
             .jit_module
             .declare_func_in_func(main_function_id, &mut self.cl_context.func);
 
-        // build shim
-
-        // the shim takes one argument which is a pointer with inputs/outputs
+        self.cl_context
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(self.context.pointer_type));
         self.cl_context
             .func
             .signature
@@ -182,6 +186,7 @@ impl<'module> Compiler<'module> {
         );
 
         let entry_block = function_builder.create_block();
+        let panic_block = function_builder.create_block();
 
         function_builder.append_block_params_for_function_params(entry_block);
         function_builder.switch_to_block(entry_block);
@@ -189,8 +194,15 @@ impl<'module> Compiler<'module> {
         let shim_vtable = function_builder.block_params(entry_block)[0];
         let shim_data = function_builder.block_params(entry_block)[1];
 
-        let mut shim_builder =
-            ShimBuilder::new(&self.context, function_builder, shim_vtable, shim_data);
+        function_builder.seal_block(entry_block);
+
+        let mut shim_builder = ShimBuilder::new(
+            &self.context,
+            function_builder,
+            shim_vtable,
+            shim_data,
+            panic_block,
+        );
         let (arguments, input_layout) =
             shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
 
@@ -219,8 +231,19 @@ impl<'module> Compiler<'module> {
             .transpose()?
             .unwrap_or_default();
 
-        shim_builder.function_builder.seal_block(entry_block);
-        shim_builder.function_builder.finalize();
+        let mut function_builder = shim_builder.function_builder;
+
+        // return from the block we're in
+        function_builder.ins().return_(&[]);
+
+        // the panic block will also just return
+        function_builder.switch_to_block(panic_block);
+        function_builder.ins().return_(&[]);
+        function_builder.seal_block(panic_block);
+
+        function_builder.finalize();
+
+        println!("{:#?}", self.cl_context.func);
 
         let shim_function = self.jit_module.declare_function(
             "__naga_interpreter_shim", // this name is not accuarate anymore, isn't it :D
@@ -239,6 +262,8 @@ impl<'module> Compiler<'module> {
     }
 
     pub fn compile_function(&mut self, function: &naga::Function) -> Result<FuncId, Error> {
+        self.jit_module.clear_context(&mut self.cl_context);
+
         let function_name = function
             .name
             .as_ref()

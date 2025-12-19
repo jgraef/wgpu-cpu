@@ -81,18 +81,6 @@ fn naga_bool_width_is_32bit() {
     assert!(found_bool, "didn't find bool in module");
 }
 
-#[derive(Debug, Default)]
-struct CollectVertices {
-    pub positions: Vec<[f32; 4]>,
-}
-
-impl ShaderOutput for CollectVertices {
-    fn read_from(&mut self, binding: &naga::Binding, ty: &naga::Type, source: &[u8]) {
-        let position = bytemuck::from_bytes::<[f32; 4]>(source);
-        self.positions.push(*position);
-    }
-}
-
 #[track_caller]
 fn run_vertex_shader(source: &str, vertices: Range<u32>) -> Vec<[f32; 4]> {
     let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| {
@@ -101,7 +89,6 @@ fn run_vertex_shader(source: &str, vertices: Range<u32>) -> Vec<[f32; 4]> {
     });
     let module = ShaderModule::new(module).unwrap();
     let mut interpreter = Interpreter::new(module, NullMemory, EntryPointIndex::from(0));
-    let mut output = CollectVertices::default();
 
     #[derive(Debug)]
     struct VertexInput {
@@ -118,6 +105,25 @@ fn run_vertex_shader(source: &str, vertices: Range<u32>) -> Vec<[f32; 4]> {
             }
         }
     }
+
+    #[derive(Debug, Default)]
+    struct VertexOutput {
+        pub positions: Vec<[f32; 4]>,
+    }
+
+    impl ShaderOutput for VertexOutput {
+        fn read_from(&mut self, binding: &naga::Binding, ty: &naga::Type, source: &[u8]) {
+            match binding {
+                naga::Binding::BuiltIn(BuiltIn::Position { invariant: _ }) => {
+                    let position = bytemuck::from_bytes::<[f32; 4]>(source);
+                    self.positions.push(*position);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut output = VertexOutput::default();
 
     for i in vertices {
         interpreter.run_entry_point(VertexInput { vertex_index: i }, &mut output);

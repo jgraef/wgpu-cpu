@@ -1,10 +1,15 @@
-use std::ffi::{
-    c_int,
-    c_void,
+use std::{
+    any::Any,
+    ffi::{
+        c_int,
+        c_void,
+    },
+    panic::AssertUnwindSafe,
 };
 
 use cranelift_codegen::ir::{
     AbiParam,
+    Block,
     InstBuilder,
     MemFlags,
     SigRef,
@@ -65,9 +70,12 @@ impl ShimVtable {
                 &mut *target
             };
 
-            data.copy_inputs_to(target);
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                data.copy_inputs_to(target);
+            }));
 
-            0
+            data.panic = result;
+            data.panic.is_ok() as i32
         }
 
         unsafe fn copy_outputs_from<I, O>(data: *mut c_void, source: *const u8, len: usize) -> i32
@@ -88,9 +96,12 @@ impl ShimVtable {
                 &*source
             };
 
-            data.copy_outputs_from(source);
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                data.copy_outputs_from(source);
+            }));
 
-            0
+            data.panic = result;
+            data.panic.is_ok() as i32
         }
 
         ShimVtable {
@@ -137,12 +148,13 @@ impl ShimVtableSignatures {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ShimData<'layout, I, O> {
     pub input: I,
     pub input_layout: &'layout [BindingStackLayout],
     pub output: O,
     pub output_layout: &'layout [BindingStackLayout],
+    pub panic: Result<(), Box<dyn Any + Send + 'static>>,
 }
 
 impl<'layout, I, O> ShimData<'layout, I, O>
@@ -279,6 +291,7 @@ pub struct ShimBuilder<'module, 'compiler> {
     context: &'compiler Context<'module>,
     pub function_builder: FunctionBuilder<'compiler>,
     shim_vtable_caller: ShimVtableCallCompiler,
+    panic_block: Block,
 }
 
 impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
@@ -287,6 +300,7 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
         mut function_builder: FunctionBuilder<'compiler>,
         shim_vtable: Value,
         shim_data: Value,
+        panic_block: Block,
     ) -> Self {
         let shim_vtable_caller =
             ShimVtableCallCompiler::new(context, &mut function_builder, shim_vtable, shim_data);
@@ -295,6 +309,7 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
             context,
             function_builder,
             shim_vtable_caller,
+            panic_block,
         }
     }
 
@@ -320,8 +335,10 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
                 return Ok((vec![], vec![]));
             };
 
+            let argument_type = &self.context.module.types[first.ty];
             let mut type_layout = self.context.layouter[first.ty];
             visitor.visit_function_argument(first, 0);
+            pass_arguments.push(PassBy::new(&self.context, &argument_type.inner, 0)?);
 
             for argument in arguments {
                 let argument_type = &self.context.module.types[argument.ty];
@@ -333,7 +350,6 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
                 type_layout.size += len;
 
                 visitor.visit_function_argument(argument, offset);
-
                 pass_arguments.push(PassBy::new(&self.context, &argument_type.inner, offset)?);
             }
 
@@ -364,7 +380,15 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
             &mut self.function_builder,
             copy_inputs_to(stack_slot_pointer, len)
         );
-        // todo: check result (error?)
+
+        // check result (error?)
+        // 1=ok, 0=panic
+        let continue_block = self.function_builder.create_block();
+        self.function_builder
+            .ins()
+            .brif(result, continue_block, [], self.panic_block, []);
+        self.function_builder.switch_to_block(continue_block);
+        self.function_builder.seal_block(continue_block);
 
         let argument_values = pass_arguments
             .into_iter()
@@ -396,8 +420,7 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
         value: Value,
     ) -> Result<Vec<BindingStackLayout>, Error> {
         let type_layout = self.context.layouter[result.ty];
-        let ty = &self.context.module.types[result.ty];
-        let pass_by = PassBy::new(&self.context, &ty.inner, 0)?;
+        let result_type = &self.context.module.types[result.ty];
 
         let mut collect_binding_stack_layouts = CollectBindingStackLayouts {
             layouter: &self.context.layouter,
@@ -408,6 +431,7 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
             &mut collect_binding_stack_layouts,
         );
         visitor.visit_function_result(result, 0);
+        let pass_result = PassBy::new(&self.context, &result_type.inner, 0)?;
 
         let stack_slot = self
             .function_builder
@@ -428,12 +452,32 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
             .ins()
             .iconst(self.context.pointer_type, i64::from(type_layout.size));
 
+        match pass_result {
+            PassBy::Reference { offset } => {}
+            PassBy::Value { offset, ty } => {
+                self.function_builder.ins().store(
+                    MemFlags::new(),
+                    value,
+                    stack_slot_pointer,
+                    i32::try_from(offset).expect("stack offset overflow"),
+                );
+            }
+        }
+
         let result = call_shim_vtable!(
             self.shim_vtable_caller,
             &mut self.function_builder,
             copy_outputs_from(stack_slot_pointer, len)
         );
-        // todo: check result (error?)
+
+        // check result (error?)
+        // 1=ok, 0=panic
+        let continue_block = self.function_builder.create_block();
+        self.function_builder
+            .ins()
+            .brif(result, continue_block, [], self.panic_block, []);
+        self.function_builder.switch_to_block(continue_block);
+        self.function_builder.seal_block(continue_block);
 
         Ok(collect_binding_stack_layouts.layouts)
     }

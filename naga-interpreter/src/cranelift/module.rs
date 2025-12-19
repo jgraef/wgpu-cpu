@@ -141,12 +141,17 @@ impl<'a> EntryPoint<'a> {
                 input_layout: &self.inner.data.input_layout,
                 output,
                 output_layout: &self.inner.data.output_layout,
+                panic: Ok(()),
             };
 
             unsafe {
                 // SAFETY: We just created the vtable and data with matching types. Thus it's
                 // safe to call the function with these arguments
                 function(&shim_vtable, &mut shim_data)
+            }
+
+            if let Err(panic) = shim_data.panic {
+                std::panic::resume_unwind(panic);
             }
         }
     }

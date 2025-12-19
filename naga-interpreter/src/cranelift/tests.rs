@@ -1,4 +1,11 @@
+use approx::assert_abs_diff_eq;
+use naga::BuiltIn;
+
 use crate::{
+    bindings::{
+        ShaderInput,
+        ShaderOutput,
+    },
     cranelift::CompiledModule,
     entry_point::EntryPointIndex,
 };
@@ -31,5 +38,55 @@ fn vertex_triangle() {
     println!(
         "function pointer (scary): {:?}",
         entry_point.function_pointer()
+    );
+
+    #[derive(Debug)]
+    struct VertexInput {
+        vertex_index: u32,
+    }
+
+    impl ShaderInput for VertexInput {
+        fn write_into(&self, binding: &naga::Binding, ty: &naga::Type, target: &mut [u8]) {
+            println!("shader input: {binding:?} {ty:?}");
+            match binding {
+                naga::Binding::BuiltIn(BuiltIn::VertexIndex) => {
+                    *bytemuck::from_bytes_mut(target) = self.vertex_index;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct VertexOutput {
+        pub positions: Vec<[f32; 4]>,
+    }
+
+    impl ShaderOutput for VertexOutput {
+        fn read_from(&mut self, binding: &naga::Binding, ty: &naga::Type, source: &[u8]) {
+            println!("shader output: {binding:?} {ty:?}");
+            match binding {
+                naga::Binding::BuiltIn(BuiltIn::Position { invariant: _ }) => {
+                    let position = bytemuck::from_bytes::<[f32; 4]>(source);
+                    self.positions.push(*position);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut output = VertexOutput::default();
+
+    for i in 0..3 {
+        entry_point.run(VertexInput { vertex_index: i }, &mut output);
+    }
+
+    assert_abs_diff_eq!(
+        output.positions[..],
+        [
+            [-1.0f32, -1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [1.0, -1.0, 0.0, 1.0],
+        ]
     );
 }
