@@ -85,7 +85,7 @@ struct App {
 
 impl App {
     pub fn new(shader: impl AsRef<Path>, vertices: u32) -> Result<Self, Error> {
-        let instance = wgpu_cpu::instance();
+        let instance = wgpu_cpu::instance(Default::default());
 
         let (adapter, device, queue) = pollster::block_on(async {
             let adapter = instance.request_adapter(&Default::default()).await?;

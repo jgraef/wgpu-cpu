@@ -21,7 +21,7 @@ use crate::{
             Slice,
             StackFrame,
         },
-        module::ShaderModule,
+        module::InterpretedModule,
     },
     memory::{
         ReadMemory,
@@ -39,9 +39,9 @@ pub enum VariableType<'a> {
 }
 
 impl<'a> VariableType<'a> {
-    pub fn inner_with(&self, module: &'a ShaderModule) -> &'a TypeInner {
+    pub fn inner_with(&self, module: &'a InterpretedModule) -> &'a TypeInner {
         match self {
-            VariableType::Handle(handle) => &module.module.types[*handle].inner,
+            VariableType::Handle(handle) => &module.inner.module.types[*handle].inner,
             VariableType::Inner(type_inner) => *type_inner,
         }
     }
@@ -76,7 +76,7 @@ impl<'a> From<&'a TypeResolution> for VariableType<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Variable<'module, 'ty> {
-    pub(super) module: &'module ShaderModule,
+    pub(super) module: &'module InterpretedModule,
     pub(super) ty: VariableType<'ty>,
     pub(super) slice: Slice,
 }
@@ -84,7 +84,7 @@ pub struct Variable<'module, 'ty> {
 impl<'module, 'ty> Variable<'module, 'ty> {
     pub fn allocate<'memory, B>(
         ty: impl Into<VariableType<'ty>>,
-        module: &'module ShaderModule,
+        module: &'module InterpretedModule,
         stack_frame: &mut StackFrame<'memory, B>,
     ) -> Variable<'module, 'ty> {
         let ty = ty.into();
@@ -221,7 +221,7 @@ impl<'module, 'ty> Variable<'module, 'ty> {
 #[derive(Clone, Copy)]
 pub struct VariableDebug<'a, M> {
     variable: Variable<'a, 'a>,
-    module: &'a ShaderModule,
+    module: &'a InterpretedModule,
     memory: &'a M,
 }
 

@@ -22,6 +22,7 @@ use crate::{
         CommandEncoder,
     },
     engine::Engine,
+    instance::InstanceConfig,
     pipeline::{
         PipelineLayout,
         RenderPipeline,
@@ -33,6 +34,7 @@ use crate::{
 
 pub fn create_device_and_queue(
     descriptor: wgpu::wgt::DeviceDescriptor<Option<String>>,
+    instance_config: Arc<InstanceConfig>,
 ) -> Result<(Device, Queue), wgpu::RequestDeviceError> {
     let inner = Arc::new(DeviceInner {
         state: Mutex::new(DeviceState {
@@ -49,6 +51,7 @@ pub fn create_device_and_queue(
         }),
         queue_submitted: Condvar::new(),
         queue_processed: Condvar::new(),
+        instance_config,
     });
 
     Engine::spawn(QueueReceiver {
@@ -86,7 +89,12 @@ impl wgpu::custom::DeviceInterface for Device {
         shader_bound_checks: wgpu::ShaderRuntimeChecks,
     ) -> wgpu::custom::DispatchShaderModule {
         wgpu::custom::DispatchShaderModule::custom(
-            ShaderModule::new(desc.source, shader_bound_checks).unwrap(),
+            ShaderModule::new(
+                self.inner.instance_config.shader_backend,
+                desc.source,
+                shader_bound_checks,
+            )
+            .unwrap(),
         )
     }
 
@@ -122,7 +130,7 @@ impl wgpu::custom::DeviceInterface for Device {
         &self,
         desc: &wgpu::RenderPipelineDescriptor<'_>,
     ) -> wgpu::custom::DispatchRenderPipeline {
-        wgpu::custom::DispatchRenderPipeline::custom(RenderPipeline::new(desc))
+        wgpu::custom::DispatchRenderPipeline::custom(RenderPipeline::new(desc).unwrap())
     }
 
     fn create_mesh_pipeline(
@@ -304,6 +312,7 @@ pub struct DeviceInner {
     state: Mutex<DeviceState>,
     queue_submitted: Condvar,
     queue_processed: Condvar,
+    instance_config: Arc<InstanceConfig>,
 }
 
 #[derive(derive_more::Debug)]

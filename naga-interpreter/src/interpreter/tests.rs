@@ -26,8 +26,8 @@ use crate::{
     },
     entry_point::EntryPointIndex,
     interpreter::{
+        InterpretedModule,
         Interpreter,
-        ShaderModule,
     },
     memory::NullMemory,
 };
@@ -90,7 +90,9 @@ fn run_vertex_shader(source: &str, vertices: Range<u32>) -> Vec<[f32; 4]> {
         println!("{source}");
         panic!("{e}");
     });
-    let module = ShaderModule::new(module).unwrap();
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+    let module = InterpretedModule::new(module, info).unwrap();
     let mut interpreter = Interpreter::new(module, NullMemory, EntryPointIndex::from(0));
 
     #[derive(Debug)]
@@ -181,7 +183,9 @@ where
         println!("{source}");
         panic!("{e}");
     });
-    let module = ShaderModule::new(module).unwrap();
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+    let module = InterpretedModule::new(module, info).unwrap();
     let mut interpreter = Interpreter::new(module, NullMemory, EntryPointIndex::from(0));
 
     struct EvalInput;

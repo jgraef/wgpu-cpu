@@ -45,12 +45,12 @@ use cranelift_module::{
     FuncId,
     Linkage,
     Module,
-    ModuleError,
 };
 use half::f16;
 
 use crate::{
-    cranelift::{
+    compiler::{
+        Error,
         bindings::ShimBuilder,
         module::{
             CompiledEntryPoint,
@@ -63,21 +63,6 @@ use crate::{
         typifier_from_function,
     },
 };
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Unsupported type: {ty:?}")]
-    UnsupportedType { ty: naga::TypeInner },
-
-    #[error(transparent)]
-    Cranelift(#[from] ModuleError),
-
-    #[error(transparent)]
-    Validation(#[from] naga::WithSpan<naga::valid::ValidationError>),
-
-    #[error(transparent)]
-    Layout(#[from] naga::proc::LayoutError),
-}
 
 #[derive(derive_more::Debug)]
 pub struct Compiler<'module> {

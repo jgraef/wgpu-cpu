@@ -3,9 +3,10 @@ use color_eyre::eyre::{
     bail,
 };
 use image::RgbaImage;
+use wgpu_cpu::Config;
 
-pub fn create_device_and_queue() -> (wgpu::Device, wgpu::Queue) {
-    let instance = wgpu_cpu::instance();
+pub fn create_device_and_queue(config: Config) -> (wgpu::Device, wgpu::Queue) {
+    let instance = wgpu_cpu::instance(config);
 
     let (_adapter, device, queue) = pollster::block_on(async {
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();

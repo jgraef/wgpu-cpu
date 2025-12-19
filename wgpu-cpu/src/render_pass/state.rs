@@ -4,9 +4,8 @@ use std::{
 };
 
 use naga_interpreter::{
+    backend::Module,
     entry_point::InterStageLayout,
-    interpreter::Interpreter,
-    memory::NullMemory,
 };
 use nalgebra::{
     Point2,
@@ -159,7 +158,6 @@ impl<'pass> State<'pass> {
         // verify at pipeline creation that vertex/fragment layouts match
         let vertex_output_layout = match &vertex_state
             .module
-            .as_ref()
             .inter_stage_layout(vertex_state.entry_point_index)
         {
             Some(InterStageLayout::Vertex { output }) => output,
@@ -481,15 +479,6 @@ impl<'pass> RenderState<'pass> {
     {
         let pipeline = &pipeline_state.pipeline;
 
-        let mut fragment_state = pipeline.descriptor.fragment.as_ref().map(|fragment_state| {
-            let vm = Interpreter::new(
-                fragment_state.module.clone(),
-                NullMemory,
-                fragment_state.entry_point_index,
-            );
-            (fragment_state, vm)
-        });
-
         for instance_index in instances {
             // resolve indices
             let vertex_indices = indices
@@ -507,7 +496,7 @@ impl<'pass> RenderState<'pass> {
             // assemble primitives
             let primitives = primitive_assembly.assemble(vertices).into_iter();
 
-            if let Some((fragment_state, fragment_vm)) = &mut fragment_state {
+            if let Some(fragment_state) = &mut pipeline.descriptor.fragment.as_ref() {
                 for (primitive_index, primitive) in primitives.enumerate() {
                     for primitive in clipper.clip(primitive) {
                         let (front_facing, cull_face) =
@@ -567,13 +556,17 @@ impl<'pass> RenderState<'pass> {
                             };
 
                             // perform early depth test
-                            if !fragment_vm.early_depth_test(|| output.depth_test()) {
+                            if !fragment_state.early_depth_test(|| output.depth_test()) {
                                 // early depth test rejected
                                 continue;
                             }
 
                             // run fragment shader
-                            fragment_vm.run_entry_point(&input, &mut output);
+                            fragment_state.module.run_entry_point(
+                                fragment_state.entry_point_index,
+                                &input,
+                                &mut output,
+                            );
                         }
                     }
                 }

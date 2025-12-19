@@ -1,18 +1,22 @@
-use std::pin::Pin;
+use std::{
+    pin::Pin,
+    sync::Arc,
+};
 
 use crate::{
     device::create_device_and_queue,
+    instance::InstanceConfig,
     util::make_label_owned,
 };
 
 #[derive(Debug)]
 pub struct Adapter {
-    _placeholder: (),
+    instance_config: Arc<InstanceConfig>,
 }
 
 impl Adapter {
-    pub fn new() -> Self {
-        Self { _placeholder: () }
+    pub fn new(instance_config: Arc<InstanceConfig>) -> Self {
+        Self { instance_config }
     }
 }
 
@@ -22,11 +26,13 @@ impl wgpu::custom::AdapterInterface for Adapter {
         desc: &wgpu::DeviceDescriptor<'_>,
     ) -> Pin<Box<dyn wgpu::custom::RequestDeviceFuture>> {
         let descriptor = desc.map_label(make_label_owned);
+        let instance_config = self.instance_config.clone();
+
         Box::pin(async move {
             check_features(&descriptor.required_features)?;
             check_limits(&descriptor.required_limits)?;
 
-            let (device, queue) = create_device_and_queue(descriptor)?;
+            let (device, queue) = create_device_and_queue(descriptor, instance_config)?;
 
             Ok((
                 wgpu::custom::DispatchDevice::custom(device),

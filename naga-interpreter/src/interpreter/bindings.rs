@@ -16,7 +16,7 @@ use crate::{
         VisitIoBindings,
     },
     interpreter::{
-        ShaderModule,
+        InterpretedModule,
         memory::{
             Slice,
             StackFrame,
@@ -95,7 +95,7 @@ where
 
 pub fn copy_shader_inputs_to_stack<'a, B, I>(
     stack_frame: &mut StackFrame<B>,
-    module: &'a ShaderModule,
+    module: &'a InterpretedModule,
     inputs: I,
     argument: &FunctionArgument,
 ) -> Variable<'a, 'a>
@@ -106,12 +106,12 @@ where
     let variable = Variable::allocate(argument.ty, module, stack_frame);
 
     IoBindingVisitor {
-        types: &module.module.types,
+        types: &module.inner.module.types,
         visit: CopyInputsToMemory {
             slice: variable.slice(),
             memory: &mut stack_frame.memory,
             inputs,
-            layouter: &module.layouter,
+            layouter: &module.inner.layouter,
         },
     }
     .visit_function_argument(argument, 0);
@@ -121,7 +121,7 @@ where
 
 pub fn copy_shader_outputs_from_stack<B, O>(
     stack_frame: &StackFrame<B>,
-    module: &ShaderModule,
+    module: &InterpretedModule,
     outputs: O,
     result: &FunctionResult,
     variable: Variable,
@@ -130,12 +130,12 @@ pub fn copy_shader_outputs_from_stack<B, O>(
     O: ShaderOutput,
 {
     IoBindingVisitor {
-        types: &module.module.types,
+        types: &module.inner.module.types,
         visit: CopyOutputsFromMemory {
             slice: variable.slice(),
             memory: &stack_frame.memory,
             outputs,
-            layouter: &module.layouter,
+            layouter: &module.inner.layouter,
         },
     }
     .visit_function_result(result, 0);

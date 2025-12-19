@@ -18,7 +18,7 @@ use naga::{
 use crate::{
     bindings::BindingAddress,
     interpreter::{
-        module::ShaderModule,
+        module::InterpretedModule,
         variable::{
             Variable,
             VariableType,
@@ -270,7 +270,7 @@ impl<'a, B> StackFrame<'a, B> {
     pub fn allocate_variable<'module, 'ty>(
         &mut self,
         ty: impl Into<VariableType<'ty>>,
-        module: &'module ShaderModule,
+        module: &'module InterpretedModule,
     ) -> Variable<'module, 'ty> {
         Variable::allocate(ty, module, self)
     }

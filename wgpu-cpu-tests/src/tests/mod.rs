@@ -16,15 +16,23 @@ use image::{
     ImageReader,
     RgbaImage,
 };
+use wgpu_cpu::{
+    Config,
+    ShaderBackend,
+};
 
-use crate::util::check_eq_image;
+use crate::util::{
+    check_eq_image,
+    create_device_and_queue,
+};
 
 mod colored_triangle;
 
 #[derive(Debug)]
 pub struct TestFunction {
     pub name: &'static str,
-    pub renderer: fn() -> RgbaImage,
+    pub renderer: fn(wgpu::Device, wgpu::Queue) -> RgbaImage,
+    pub shader_backends: &'static [ShaderBackend],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -38,34 +46,89 @@ impl<'files> Test<'files> {
         self.test.name
     }
 
-    pub fn run(&self) -> Result<(), Error> {
+    pub fn run(&self) -> Result<TestResults, Error> {
         let reference = self.files.load_reference(self.test.name)?;
+        let mut test_results = vec![];
 
-        let rendered = catch_unwind(|| (self.test.renderer)()).map_err(|error| {
-            if let Some(error) = error.downcast_ref::<String>() {
-                eyre!("{error}")
-            }
-            else if let Some(error) = error.downcast_ref::<&'static str>() {
-                eyre!("{error}")
-            }
-            else {
-                resume_unwind(error);
-            }
-        })?;
+        for shader_backend in self.test.shader_backends {
+            let config = Config {
+                shader_backend: *shader_backend,
+            };
+            let test_result = self.run_with(&reference, config)?;
+            test_results.push((format!("{shader_backend:?}"), test_result));
+        }
 
-        self.files.save_output(self.test.name, &rendered)?;
-
-        check_eq_image(&reference, &rendered)?;
-
-        Ok(())
+        Ok(test_results)
     }
 
-    pub fn generate_reference(&self) -> Result<(), Error> {
-        let reference = (self.test.renderer)();
+    pub fn run_with(&self, reference: &RgbaImage, config: Config) -> Result<TestResult, Error> {
+        let render_result = catch_unwind(|| {
+            let (device, queue) = create_device_and_queue(config);
+            (self.test.renderer)(device, queue)
+        });
+
+        let test_result = match render_result {
+            Ok(rendered) => {
+                self.files.save_output(self.test.name, &rendered)?;
+                if let Err(error) = check_eq_image(reference, &rendered) {
+                    TestResult::ImageTestFailed(error)
+                }
+                else {
+                    TestResult::Passed
+                }
+            }
+            Err(panic) => {
+                let message = if let Some(message) = panic.downcast_ref::<String>() {
+                    message.to_string()
+                }
+                else if let Some(message) = panic.downcast_ref::<&'static str>() {
+                    message.to_string()
+                }
+                else {
+                    resume_unwind(panic);
+                };
+                TestResult::RenderPanic(message)
+            }
+        };
+
+        Ok(test_result)
+    }
+
+    pub fn generate_reference(&self, config: Config) -> Result<(), Error> {
+        let (device, queue) = create_device_and_queue(config);
+        let reference = (self.test.renderer)(device, queue);
         self.files.save_reference(self.test.name, &reference)?;
         Ok(())
     }
 }
+
+#[derive(Debug)]
+pub enum TestResult {
+    Passed,
+    ImageTestFailed(Error),
+    RenderPanic(String),
+}
+
+#[allow(dead_code)]
+impl TestResult {
+    pub fn passed(&self) -> bool {
+        matches!(self, Self::Passed)
+    }
+
+    pub fn failed(&self) -> bool {
+        !self.passed()
+    }
+
+    pub fn error_message(&self) -> Option<String> {
+        match self {
+            TestResult::Passed => None,
+            TestResult::ImageTestFailed(report) => Some(report.to_string()),
+            TestResult::RenderPanic(panic) => Some(panic.clone()),
+        }
+    }
+}
+
+pub type TestResults = Vec<(String, TestResult)>;
 
 #[derive(Debug, clap::Args)]
 pub struct TestFiles {
@@ -122,6 +185,7 @@ macro_rules! test {
         inventory::submit! {crate::tests::TestFunction {
             name: stringify!($func),
             renderer: $func,
+            shader_backends: &[wgpu_cpu::ShaderBackend::Interpreter, wgpu_cpu::ShaderBackend::Compiler],
         }}
     };
 }

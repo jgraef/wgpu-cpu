@@ -1,4 +1,7 @@
-use std::pin::Pin;
+use std::{
+    pin::Pin,
+    sync::Arc,
+};
 
 use wgpu::{
     CreateSurfaceError,
@@ -15,11 +18,27 @@ use wgpu::{
     },
 };
 
-use crate::adapter::Adapter;
+use crate::{
+    adapter::Adapter,
+    shader::ShaderBackend,
+};
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
+pub struct InstanceConfig {
+    pub shader_backend: ShaderBackend,
+}
+
+#[derive(Debug)]
 pub struct Instance {
-    _placeholder: (),
+    instance_config: Arc<InstanceConfig>,
+}
+
+impl Instance {
+    pub fn new(config: InstanceConfig) -> Self {
+        Self {
+            instance_config: Arc::new(config),
+        }
+    }
 }
 
 impl InstanceInterface for Instance {
@@ -27,8 +46,7 @@ impl InstanceInterface for Instance {
     where
         Self: Sized,
     {
-        let _ = instance_descriptor;
-        Self { _placeholder: () }
+        unreachable!("InstanceInterface::new should not be called for wgpu_cpu");
     }
 
     unsafe fn create_surface(
@@ -70,16 +88,18 @@ impl InstanceInterface for Instance {
             }
         }
 
-        Box::pin(async move {
-            if compatible {
-                Ok(DispatchAdapter::custom(Adapter::new()))
-            }
-            else {
-                Err(RequestAdapterError::Custom(
-                    "Surface not compatible".to_owned(),
-                ))
-            }
-        })
+        let result = if compatible {
+            Ok(DispatchAdapter::custom(Adapter::new(
+                self.instance_config.clone(),
+            )))
+        }
+        else {
+            Err(RequestAdapterError::Custom(
+                "Surface not compatible".to_owned(),
+            ))
+        };
+
+        Box::pin(async move { result })
     }
 
     fn poll_all_devices(&self, force_wait: bool) -> bool {
@@ -90,7 +110,10 @@ impl InstanceInterface for Instance {
 
     fn enumerate_adapters(&self, backends: wgpu::Backends) -> Pin<Box<dyn EnumerateAdapterFuture>> {
         let _ = backends;
-        Box::pin(async { vec![DispatchAdapter::custom(Adapter::new())] })
+        let output = vec![DispatchAdapter::custom(Adapter::new(
+            self.instance_config.clone(),
+        ))];
+        Box::pin(async { output })
     }
 
     fn wgsl_language_features(&self) -> wgpu::WgslLanguageFeatures {

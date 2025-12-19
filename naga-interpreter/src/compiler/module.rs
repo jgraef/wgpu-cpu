@@ -8,7 +8,7 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
-    cranelift::bindings::{
+    compiler::bindings::{
         BindingStackLayout,
         ShimData,
         ShimVtable,
@@ -17,6 +17,7 @@ use crate::{
         EntryPointIndex,
         EntryPointNotFound,
         EntryPoints,
+        InterStageLayout,
     },
 };
 
@@ -119,6 +120,14 @@ impl<'a> EntryPoint<'a> {
         self.function_pointer
     }
 
+    pub fn inter_stage_layout(&self) -> Option<&'a InterStageLayout> {
+        self.inner.inter_stage_layout.as_ref()
+    }
+
+    pub fn early_depth_test(&self) -> Option<naga::EarlyDepthTest> {
+        self.inner.early_depth_test
+    }
+
     pub fn function<I, O>(&self) -> impl Fn(I, O)
     where
         I: ShaderInput,
@@ -168,7 +177,7 @@ impl<'a> EntryPoint<'a> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        cranelift::CompiledModule,
+        compiler::CompiledModule,
         util::assert_send_sync,
     };
 

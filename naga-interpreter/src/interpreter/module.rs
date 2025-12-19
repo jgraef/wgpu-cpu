@@ -1,4 +1,7 @@
-use std::ops::Index;
+use std::{
+    ops::Index,
+    sync::Arc,
+};
 
 use naga::{
     EntryPoint,
@@ -8,7 +11,6 @@ use naga::{
     Scalar,
     ShaderStage,
     TypeInner,
-    WithSpan,
     front::Typifier,
     proc::{
         Alignment,
@@ -16,11 +18,7 @@ use naga::{
         Layouter,
         TypeLayout,
     },
-    valid::{
-        ModuleInfo,
-        ValidationError,
-        Validator,
-    },
+    valid::ModuleInfo,
 };
 
 use crate::{
@@ -28,7 +26,6 @@ use crate::{
         EntryPointIndex,
         EntryPointNotFound,
         EntryPoints,
-        InterStageLayout,
     },
     interpreter::variable::VariableType,
     util::{
@@ -37,27 +34,29 @@ use crate::{
     },
 };
 
-#[derive(Debug)]
-pub struct ShaderModule {
-    pub(crate) module: Module,
-    #[allow(unused)]
-    module_info: ModuleInfo,
-    pub(crate) layouter: Layouter,
-    entry_points: EntryPoints<()>,
-    pub(crate) expression_types: ExpressionTypes,
+#[derive(Clone, Debug)]
+pub struct InterpretedModule {
+    pub(super) inner: Arc<Inner>,
 }
 
-impl ShaderModule {
-    pub fn new(module: naga::Module) -> Result<Self, Error> {
+#[derive(Debug)]
+pub(super) struct Inner {
+    pub(super) module: Module,
+    #[allow(unused)]
+    module_info: ModuleInfo,
+    pub(super) layouter: Layouter,
+    pub(super) entry_points: EntryPoints<()>,
+    pub(super) expression_types: ExpressionTypes,
+}
+
+impl InterpretedModule {
+    pub fn new(module: naga::Module, module_info: naga::valid::ModuleInfo) -> Result<Self, Error> {
         // todo: this should only contain minimal information (anything shared and
         // usefule before pipeline constants are known) the backend
         // (interpreter/compiler) should derive all the info they need themselves (can
         // move code for this to util)
         //
         // https://docs.rs/naga/latest/naga/back/pipeline_constants/fn.process_overrides.html
-
-        let mut validator = Validator::new(Default::default(), Default::default());
-        let module_info = validator.validate(&module)?;
 
         let mut layouter = Layouter::default();
         layouter.update(module.to_ctx())?;
@@ -90,11 +89,13 @@ impl ShaderModule {
         }
 
         Ok(Self {
-            module,
-            module_info,
-            layouter,
-            entry_points,
-            expression_types,
+            inner: Arc::new(Inner {
+                module,
+                module_info,
+                layouter,
+                entry_points,
+                expression_types,
+            }),
         })
     }
 
@@ -103,7 +104,7 @@ impl ShaderModule {
 
         let ty = ty.into();
         match ty {
-            VariableType::Handle(handle) => self.layouter[handle],
+            VariableType::Handle(handle) => self.inner.layouter[handle],
             VariableType::Inner(type_inner) => {
                 // todo: type_inner has a size method
                 match type_inner {
@@ -130,13 +131,14 @@ impl ShaderModule {
         name: Option<&str>,
         stage: ShaderStage,
     ) -> Result<EntryPointIndex, EntryPointNotFound> {
-        self.entry_points.find(name, stage)
+        self.inner.entry_points.find(name, stage)
     }
 
     pub fn entry_points(&self) -> impl Iterator<Item = (EntryPointIndex, &EntryPoint)> {
-        self.entry_points
+        self.inner
+            .entry_points
             .iter()
-            .map(|(index, _)| (index, &self.module.entry_points[index.index]))
+            .map(|(index, _)| (index, &self.inner.module.entry_points[index.index]))
     }
 
     pub fn offset_of<'ty>(
@@ -173,16 +175,12 @@ impl ShaderModule {
 
     pub fn size_of<'ty>(&self, ty: impl Into<VariableType<'ty>>) -> u32 {
         let inner = ty.into().inner_with(self);
-        inner.size(self.module.to_ctx())
-    }
-
-    pub fn inter_stage_layout(&self, entry_point: EntryPointIndex) -> Option<&InterStageLayout> {
-        self.entry_points[entry_point].inter_stage_layout.as_ref()
+        inner.size(self.inner.module.to_ctx())
     }
 }
 
-impl AsRef<ShaderModule> for ShaderModule {
-    fn as_ref(&self) -> &ShaderModule {
+impl AsRef<InterpretedModule> for InterpretedModule {
+    fn as_ref(&self) -> &InterpretedModule {
         self
     }
 }
@@ -190,16 +188,14 @@ impl AsRef<ShaderModule> for ShaderModule {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Validation(#[from] WithSpan<ValidationError>),
-    #[error(transparent)]
     Layout(#[from] LayoutError),
 }
 
-impl Index<EntryPointIndex> for ShaderModule {
+impl Index<EntryPointIndex> for InterpretedModule {
     type Output = EntryPoint;
 
     fn index(&self, index: EntryPointIndex) -> &Self::Output {
-        &self.module.entry_points[index.index]
+        &self.inner.module.entry_points[index.index]
     }
 }
 

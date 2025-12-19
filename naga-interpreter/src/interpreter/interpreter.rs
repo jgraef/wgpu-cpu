@@ -19,7 +19,6 @@ use half::f16;
 use naga::{
     BinaryOperator,
     Block,
-    EarlyDepthTest,
     Expression,
     Function,
     Handle,
@@ -55,7 +54,7 @@ use crate::{
             Stack,
             StackFrame,
         },
-        module::ShaderModule,
+        module::InterpretedModule,
         variable::Variable,
     },
     memory::{
@@ -77,7 +76,7 @@ pub struct Interpreter<Module, Bindings> {
 
 impl<Module, Bindings> Interpreter<Module, Bindings>
 where
-    Module: AsRef<ShaderModule>,
+    Module: AsRef<InterpretedModule>,
 {
     pub fn new(module: Module, bindings: Bindings, entry_point_index: EntryPointIndex) -> Self {
         Self {
@@ -93,17 +92,8 @@ where
 
 impl<Module, Bindings> Interpreter<Module, Bindings>
 where
-    Module: AsRef<ShaderModule>,
+    Module: AsRef<InterpretedModule>,
 {
-    pub fn early_depth_test(&self, evaluate: impl FnOnce() -> bool) -> bool {
-        let entry_point = &self.module.as_ref()[self.entry_point_index];
-        match entry_point.early_depth_test {
-            None => true,
-            Some(EarlyDepthTest::Force) => evaluate(),
-            Some(EarlyDepthTest::Allow { conservative }) => todo!("EarlyDepthTest::Allow"),
-        }
-    }
-
     pub fn run_entry_point<I, O>(&mut self, inputs: I, outputs: O)
     where
         I: ShaderInput,
@@ -143,7 +133,7 @@ where
             let mut function_context = FunctionContext {
                 module,
                 function: &entry_point.function,
-                typifier: &module.expression_types[self.entry_point_index],
+                typifier: &module.inner.expression_types[self.entry_point_index],
                 emitted_expression: SparseCoArena::default(),
                 argument_variables,
                 local_variables,
@@ -175,7 +165,7 @@ where
 
 #[derive(Debug)]
 pub struct FunctionContext<'module> {
-    module: &'module ShaderModule,
+    module: &'module InterpretedModule,
     function: &'module Function,
     typifier: &'module Typifier,
     emitted_expression: SparseCoArena<Expression, Variable<'module, 'module>>,
@@ -591,7 +581,7 @@ where
             .stack_frame
             .allocate_variable(input_ty, self.context.module);
         self.evaluate(input, input_variable);
-        let input_ty_inner = input_ty.inner_with(&self.context.module.module.types);
+        let input_ty_inner = input_ty.inner_with(&self.context.module.inner.module.types);
 
         match input_ty_inner {
             TypeInner::Scalar(scalar) => {
@@ -642,14 +632,14 @@ where
             .stack_frame
             .allocate_variable(left_ty, self.context.module);
         self.evaluate(left, left_variable);
-        let left_ty_inner = left_ty.inner_with(&self.context.module.module.types);
+        let left_ty_inner = left_ty.inner_with(&self.context.module.inner.module.types);
 
         let right_ty = &self.context.typifier[right];
         let right_variable = self
             .stack_frame
             .allocate_variable(right_ty, self.context.module);
         self.evaluate(right, right_variable);
-        let right_ty_inner = right_ty.inner_with(&self.context.module.module.types);
+        let right_ty_inner = right_ty.inner_with(&self.context.module.inner.module.types);
 
         match (left_ty_inner, right_ty_inner) {
             (TypeInner::Scalar(left), TypeInner::Scalar(right)) if left == right => {

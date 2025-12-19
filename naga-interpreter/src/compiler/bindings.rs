@@ -29,7 +29,7 @@ use crate::{
         ShaderOutput,
         VisitIoBindings,
     },
-    cranelift::{
+    compiler::{
         Error,
         compiler::{
             Context,

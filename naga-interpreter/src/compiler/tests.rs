@@ -6,7 +6,7 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
-    cranelift::CompiledModule,
+    compiler::CompiledModule,
     entry_point::EntryPointIndex,
 };
 
@@ -19,7 +19,7 @@ fn compile(source: &str) -> CompiledModule {
     let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
     let info = validator.validate(&module).unwrap();
 
-    crate::cranelift::compile(&module, &info).unwrap()
+    crate::compiler::compile(&module, &info).unwrap()
 }
 
 #[test]

@@ -3,8 +3,15 @@ use std::sync::Arc;
 use naga_interpreter::{
     bindings::{
         BindingLocation,
+        ShaderInput,
+        ShaderOutput,
         UserDefinedInterStageBuffer,
         UserDefinedInterStageLayout,
+    },
+    entry_point::{
+        EntryPointIndex,
+        EntryPointNotFound,
+        InterStageLayout,
     },
     memory::{
         ReadMemory,
@@ -20,12 +27,15 @@ pub struct ShaderModule {
 
 #[derive(Debug)]
 struct Inner {
-    module: naga_interpreter::interpreter::ShaderModule,
+    module: naga::Module,
+    info: naga::valid::ModuleInfo,
     compilation_info: wgpu::CompilationInfo,
+    backend: ShaderBackend,
 }
 
 impl ShaderModule {
     pub fn new(
+        backend: ShaderBackend,
         shader_source: wgpu::ShaderSource,
         shader_bound_checks: wgpu::ShaderRuntimeChecks,
     ) -> Result<Self, Error> {
@@ -34,12 +44,55 @@ impl ShaderModule {
             _ => return Err(Error::Unsupported),
         };
 
+        let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+        let info = validator.validate(&module).unwrap();
+
         Ok(Self {
             inner: Arc::new(Inner {
-                module: naga_interpreter::interpreter::ShaderModule::new(module)?,
+                module,
+                info,
                 compilation_info: wgpu::CompilationInfo { messages: vec![] },
+                backend,
             }),
         })
+    }
+
+    pub fn for_pipeline(
+        &self,
+        pipeline_compilation_options: &wgpu::PipelineCompilationOptions,
+    ) -> Result<PipelineShaderModule, Error> {
+        let constants = pipeline_compilation_options
+            .constants
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), *value))
+            .collect();
+
+        let (module, info) = naga::back::pipeline_constants::process_overrides(
+            &self.inner.module,
+            &self.inner.info,
+            None,
+            &constants,
+        )?;
+
+        // todo: get necessary info for early depth test here and store it
+
+        let module = match self.inner.backend {
+            ShaderBackend::Interpreter => {
+                PipelineShaderModule::Interpreted {
+                    module: naga_interpreter::interpreter::InterpretedModule::new(
+                        module.into_owned(),
+                        info.into_owned(),
+                    )?,
+                }
+            }
+            ShaderBackend::Compiler => {
+                PipelineShaderModule::Compiled {
+                    module: naga_interpreter::compiler::compile(&module, &info)?,
+                }
+            }
+        };
+
+        Ok(module)
     }
 }
 
@@ -52,12 +105,6 @@ impl wgpu::custom::ShaderModuleInterface for ShaderModule {
     }
 }
 
-impl AsRef<naga_interpreter::interpreter::ShaderModule> for ShaderModule {
-    fn as_ref(&self) -> &naga_interpreter::interpreter::ShaderModule {
-        &self.inner.module
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Provided shader source variant is not supported")]
@@ -67,7 +114,75 @@ pub enum Error {
     ParseError(#[from] naga::front::wgsl::ParseError),
 
     #[error(transparent)]
-    Module(#[from] naga_interpreter::interpreter::ModuleError),
+    Validation(#[from] naga::WithSpan<naga::valid::ValidationError>),
+
+    #[error(transparent)]
+    PipelineConstants(#[from] naga::back::pipeline_constants::PipelineConstantError),
+
+    #[error(transparent)]
+    Interpreter(#[from] naga_interpreter::interpreter::Error),
+
+    #[error(transparent)]
+    Compiler(#[from] naga_interpreter::compiler::Error),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ShaderBackend {
+    #[default]
+    Interpreter,
+    Compiler,
+}
+
+#[derive(Clone, Debug)]
+pub enum PipelineShaderModule {
+    Interpreted {
+        module: naga_interpreter::interpreter::InterpretedModule,
+    },
+    Compiled {
+        module: naga_interpreter::compiler::CompiledModule,
+    },
+}
+
+impl naga_interpreter::backend::Module for PipelineShaderModule {
+    fn find_entry_point(
+        &self,
+        name: Option<&str>,
+        stage: naga::ShaderStage,
+    ) -> Result<EntryPointIndex, EntryPointNotFound> {
+        match self {
+            PipelineShaderModule::Interpreted { module } => module.find_entry_point(name, stage),
+            PipelineShaderModule::Compiled { module } => module.find_entry_point(name, stage),
+        }
+    }
+
+    fn run_entry_point<I, O>(&self, index: EntryPointIndex, input: I, output: O)
+    where
+        I: ShaderInput,
+        O: ShaderOutput,
+    {
+        match self {
+            PipelineShaderModule::Interpreted { module } => {
+                module.run_entry_point(index, input, output)
+            }
+            PipelineShaderModule::Compiled { module } => {
+                module.run_entry_point(index, input, output)
+            }
+        }
+    }
+
+    fn inter_stage_layout(&self, entry_point: EntryPointIndex) -> Option<&InterStageLayout> {
+        match self {
+            PipelineShaderModule::Interpreted { module } => module.inter_stage_layout(entry_point),
+            PipelineShaderModule::Compiled { module } => module.inter_stage_layout(entry_point),
+        }
+    }
+
+    fn early_depth_test(&self, entry_point: EntryPointIndex) -> Option<naga::EarlyDepthTest> {
+        match self {
+            PipelineShaderModule::Interpreted { module } => module.early_depth_test(entry_point),
+            PipelineShaderModule::Compiled { module } => module.early_depth_test(entry_point),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

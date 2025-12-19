@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     num::NonZeroU32,
     sync::Arc,
 };
@@ -10,6 +9,7 @@ use crate::{
         fragment::FragmentState,
         vertex::VertexState,
     },
+    shader::Error,
 };
 
 #[derive(Clone, Debug)]
@@ -54,21 +54,25 @@ pub struct RenderPipeline {
 }
 
 impl RenderPipeline {
-    pub fn new(descriptor: &wgpu::RenderPipelineDescriptor) -> Self {
-        Self {
+    pub fn new(descriptor: &wgpu::RenderPipelineDescriptor) -> Result<Self, Error> {
+        Ok(Self {
             descriptor: Arc::new(RenderPipelineDescriptor {
                 label: descriptor.label.map(ToOwned::to_owned),
                 layout: descriptor
                     .layout
                     .map(|layout| layout.as_custom::<PipelineLayout>().unwrap().clone()),
-                vertex: VertexState::new(&descriptor.vertex),
+                vertex: VertexState::new(&descriptor.vertex)?,
                 primitive: descriptor.primitive,
                 depth_stencil: descriptor.depth_stencil.clone(),
                 multisample: descriptor.multisample,
-                fragment: descriptor.fragment.as_ref().map(FragmentState::new),
+                fragment: descriptor
+                    .fragment
+                    .as_ref()
+                    .map(FragmentState::new)
+                    .transpose()?,
                 multiview_mask: descriptor.multiview_mask,
             }),
-        }
+        })
     }
 }
 
@@ -94,23 +98,4 @@ pub struct RenderPipelineDescriptor {
     pub multisample: wgpu::MultisampleState,
     pub fragment: Option<FragmentState>,
     pub multiview_mask: Option<NonZeroU32>,
-}
-
-#[derive(Debug)]
-pub struct PipelineCompilationOptions {
-    pub constants: HashMap<String, f64>,
-    pub zero_initialize_workgroup_memory: bool,
-}
-
-impl PipelineCompilationOptions {
-    pub fn new(options: &wgpu::PipelineCompilationOptions) -> Self {
-        Self {
-            constants: options
-                .constants
-                .iter()
-                .map(|(name, value)| ((*name).to_owned(), *value))
-                .collect(),
-            zero_initialize_workgroup_memory: options.zero_initialize_workgroup_memory,
-        }
-    }
 }

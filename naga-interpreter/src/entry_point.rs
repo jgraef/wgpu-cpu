@@ -77,6 +77,7 @@ impl<T> EntryPoints<T> {
             data,
             stage: entry_point.stage,
             inter_stage_layout: None,
+            early_depth_test: entry_point.early_depth_test,
         });
 
         self.by_name.insert(entry_point.name.clone(), index);
@@ -149,6 +150,7 @@ pub struct EntryPoint<T> {
     pub stage: naga::ShaderStage,
     pub data: T,
     pub inter_stage_layout: Option<InterStageLayout>,
+    pub early_depth_test: Option<naga::EarlyDepthTest>,
 }
 
 pub struct EntryPointBuilder<'a, T> {

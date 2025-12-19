@@ -38,7 +38,7 @@ pub fn main() -> Result<(), Error> {
         depth_or_array_layers: 1,
     };
 
-    let instance = wgpu_cpu::instance();
+    let instance = wgpu_cpu::instance(Default::default());
 
     let (_adapter, device, queue) = pollster::block_on(async {
         let adapter = instance.request_adapter(&Default::default()).await?;

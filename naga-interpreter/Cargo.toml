@@ -22,7 +22,7 @@ approx = "0.5.1"
 
 [features]
 interpreter = []
-cranelift = [
+compiler = [
     "dep:cranelift-codegen",
     "dep:cranelift-frontend",
     "dep:cranelift-jit",
