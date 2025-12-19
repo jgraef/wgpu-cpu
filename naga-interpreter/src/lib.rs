@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-
 pub mod bindings;
 #[cfg(feature = "cranelift")]
 pub mod cranelift;

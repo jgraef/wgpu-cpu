@@ -185,9 +185,9 @@ impl<'module, 'ty> Variable<'module, 'ty> {
                 })
             }
             TypeInner::ValuePointer {
-                size,
-                scalar,
-                space,
+                size: _,
+                scalar: _,
+                space: _,
             } => {
                 /*let ty = scalar.into();
                 let pointer = self.read::<Pointer, M>(memory);
@@ -270,6 +270,8 @@ where
     M: ReadMemory<Slice>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #![allow(unused_variables)]
+
         let ty = self.variable.ty.inner_with(&self.module);
 
         match ty {

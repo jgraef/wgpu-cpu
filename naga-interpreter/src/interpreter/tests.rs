@@ -3,7 +3,10 @@ use std::{
     ops::Range,
 };
 
-use approx::assert_abs_diff_eq;
+use approx::{
+    AbsDiffEq,
+    assert_abs_diff_eq,
+};
 use bytemuck::Pod;
 use naga::{
     BuiltIn,
@@ -96,7 +99,7 @@ fn run_vertex_shader(source: &str, vertices: Range<u32>) -> Vec<[f32; 4]> {
     }
 
     impl ShaderInput for VertexInput {
-        fn write_into(&self, binding: &naga::Binding, ty: &naga::Type, target: &mut [u8]) {
+        fn write_into(&self, binding: &naga::Binding, _ty: &naga::Type, target: &mut [u8]) {
             match binding {
                 naga::Binding::BuiltIn(BuiltIn::VertexIndex) => {
                     *bytemuck::from_bytes_mut(target) = self.vertex_index;
@@ -112,7 +115,7 @@ fn run_vertex_shader(source: &str, vertices: Range<u32>) -> Vec<[f32; 4]> {
     }
 
     impl ShaderOutput for VertexOutput {
-        fn read_from(&mut self, binding: &naga::Binding, ty: &naga::Type, source: &[u8]) {
+        fn read_from(&mut self, binding: &naga::Binding, _ty: &naga::Type, source: &[u8]) {
             match binding {
                 naga::Binding::BuiltIn(BuiltIn::Position { invariant: _ }) => {
                     let position = bytemuck::from_bytes::<[f32; 4]>(source);
@@ -184,7 +187,7 @@ where
     struct EvalInput;
 
     impl ShaderInput for EvalInput {
-        fn write_into(&self, binding: &naga::Binding, ty: &naga::Type, target: &mut [u8]) {
+        fn write_into(&self, _binding: &naga::Binding, _ty: &naga::Type, _target: &mut [u8]) {
             // nop
         }
     }
@@ -197,7 +200,7 @@ where
     where
         T: Pod,
     {
-        fn read_from(&mut self, binding: &naga::Binding, ty: &naga::Type, source: &[u8]) {
+        fn read_from(&mut self, binding: &naga::Binding, _ty: &naga::Type, source: &[u8]) {
             match binding {
                 naga::Binding::Location { location: 0, .. } => {
                     self.output = *bytemuck::from_bytes::<T>(source);
@@ -274,7 +277,7 @@ fn binops_scalars() {
     #[track_caller]
     fn test_binop<T>(ty: &str, left: &str, op: &str, right: &str, expected: T)
     where
-        T: Pod,
+        T: Pod + AbsDiffEq + Debug,
     {
         let output = eval::<T>(
             &format!("left {op} right"),
@@ -286,6 +289,8 @@ fn binops_scalars() {
             ),
             ty,
         );
+
+        assert_abs_diff_eq!(output, expected);
     }
 
     test_binop::<i32>("i32", "1", "+", "1", 2);
@@ -303,7 +308,7 @@ fn binops_scalars() {
     test_binop::<f32>("f32", "2", "*", "3", 6.0);
     test_binop::<f32>("f32", "2", "*", "-3", -6.0);
     test_binop::<f32>("f32", "6", "/", "2", 3.0);
-    test_binop::<f32>("f32", "3", "/", "2", 1.0);
+    test_binop::<f32>("f32", "3", "/", "2", 1.5);
     test_binop::<f32>("f32", "3", "%", "2", 1.0);
 }
 
@@ -341,7 +346,7 @@ fn unops() {
     #[track_caller]
     fn test_unop<T>(ty: &str, op: &str, input: &str, expected: T)
     where
-        T: Pod,
+        T: Pod + AbsDiffEq + Debug,
     {
         let output = eval::<T>(
             &format!("{op} input"),
@@ -352,6 +357,8 @@ fn unops() {
             ),
             ty,
         );
+
+        assert_abs_diff_eq!(output, expected);
     }
 
     #[track_caller]
@@ -364,6 +371,8 @@ fn unops() {
         "#
             ),
         );
+
+        assert_eq!(output, expected);
     }
 
     test_unop::<i32>("i32", "-", "123", -123);

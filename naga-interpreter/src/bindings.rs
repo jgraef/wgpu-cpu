@@ -236,7 +236,7 @@ where
         }
         else {
             match &ty.inner {
-                TypeInner::Struct { members, span } => {
+                TypeInner::Struct { members, span: _ } => {
                     for member in members {
                         self.visit(
                             member.binding.as_ref(),

@@ -1,14 +1,16 @@
-mod bindings;
-mod compiler;
-mod module;
+use crate::cranelift::{
+    compiler::{
+        Compiler,
+        Error,
+    },
+    module::CompiledModule,
+};
+
+pub mod bindings;
+pub mod compiler;
+pub mod module;
 #[cfg(test)]
 mod tests;
-
-pub use compiler::{
-    Compiler,
-    Error,
-};
-pub use module::CompiledModule;
 
 pub fn compile(
     module: &naga::Module,

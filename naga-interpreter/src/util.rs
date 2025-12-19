@@ -280,7 +280,7 @@ pub fn typifier_from_function(
         &function.arguments,
     );
 
-    for (handle, expression) in function.expressions.iter() {
+    for (handle, _expression) in function.expressions.iter() {
         typifier
             .grow(handle, &function.expressions, &resolve_context)
             .unwrap();

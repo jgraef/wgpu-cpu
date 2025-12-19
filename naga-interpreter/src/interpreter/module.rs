@@ -73,13 +73,13 @@ impl ShaderModule {
 
         let mut expression_types = ExpressionTypes {
             entry_points: Vec::with_capacity(module.entry_points.len()),
-            per_function: CoArena::from_arena(&module.functions, |handle, function| {
+            per_function: CoArena::from_arena(&module.functions, |_handle, function| {
                 typifier_from_function(&module, function)
             }),
         };
 
         let mut entry_points = EntryPoints::default();
-        for (i, entry_point) in module.entry_points.iter().enumerate() {
+        for entry_point in &module.entry_points {
             entry_points
                 .push(entry_point, ())
                 .collect_inter_stage_layouts(&module, &layouter);
@@ -107,7 +107,7 @@ impl ShaderModule {
             VariableType::Inner(type_inner) => {
                 // todo: type_inner has a size method
                 match type_inner {
-                    TypeInner::Scalar(Scalar { kind, width }) => {
+                    TypeInner::Scalar(Scalar { kind: _, width }) => {
                         TypeLayout {
                             size: *width as u32,
                             alignment: Alignment::from_width(*width),
@@ -147,22 +147,26 @@ impl ShaderModule {
     ) -> u32 {
         let outer_ty = outer_ty.into().inner_with(self);
         match outer_ty {
-            TypeInner::Vector { size, scalar } => {
+            TypeInner::Vector { size: _, scalar: _ } => {
                 let inner_ty_layout = self.type_layout(inner_ty);
                 let inner_stride = inner_ty_layout.to_stride();
                 inner_stride * index as u32
             }
             TypeInner::Matrix {
-                columns,
-                rows,
-                scalar,
+                columns: _,
+                rows: _,
+                scalar: _,
             } => todo!(),
-            TypeInner::Array { base, size, stride } => {
+            TypeInner::Array {
+                base,
+                size: _,
+                stride: _,
+            } => {
                 let inner_ty_layout = self.type_layout(*base);
                 let inner_stride = inner_ty_layout.to_stride();
                 inner_stride * index as u32
             }
-            TypeInner::Struct { members, span } => members[index].offset,
+            TypeInner::Struct { members, span: _ } => members[index].offset,
             _ => panic!("Can't produce offset into {outer_ty:?}"),
         }
     }

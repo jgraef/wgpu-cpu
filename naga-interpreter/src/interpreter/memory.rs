@@ -300,7 +300,7 @@ impl Pointer {
             AddressSpace::Private => todo!(),
             AddressSpace::WorkGroup => todo!(),
             AddressSpace::Uniform => todo!(),
-            AddressSpace::Storage { access } => todo!(),
+            AddressSpace::Storage { access: _ } => todo!(),
             AddressSpace::Handle => todo!(),
             AddressSpace::Immediate => todo!(),
             AddressSpace::TaskPayload => todo!(),
@@ -312,7 +312,7 @@ impl From<Slice> for Pointer {
     fn from(value: Slice) -> Self {
         match value {
             Slice::Stack(stack_slice) => Self::from(stack_slice),
-            Slice::Binding(binding_address) => todo!(),
+            Slice::Binding(_) => todo!(),
         }
     }
 }

@@ -51,6 +51,8 @@ where
         name: Option<&str>,
         top_level: bool,
     ) {
+        let _ = (name, top_level);
+
         let type_layout = &self.layouter[ty_handle];
         let target = self
             .memory
@@ -81,6 +83,8 @@ where
         name: Option<&str>,
         top_level: bool,
     ) {
+        let _ = (name, top_level);
+
         let type_layout = &self.layouter[ty_handle];
         let source = self
             .memory

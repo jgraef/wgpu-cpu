@@ -10,6 +10,7 @@ use cranelift_codegen::{
         Block,
         Immediate,
         InstBuilder,
+        MemFlags,
         StackSlotData,
         StackSlotKind,
         Type,
@@ -25,7 +26,10 @@ use cranelift_codegen::{
         },
         types,
     },
-    isa::CallConv,
+    isa::{
+        CallConv,
+        TargetFrontendConfig,
+    },
     settings::Configurable,
 };
 use cranelift_frontend::{
@@ -121,8 +125,7 @@ impl<'module> Compiler<'module> {
             module,
             info,
             layouter,
-            pointer_type: target_config.pointer_type(),
-            calling_convention: target_config.default_call_conv,
+            target_config,
         };
 
         Ok(Self {
@@ -173,12 +176,12 @@ impl<'module> Compiler<'module> {
             .func
             .signature
             .params
-            .push(AbiParam::new(self.context.pointer_type));
+            .push(AbiParam::new(self.context.pointer_type()));
         self.cl_context
             .func
             .signature
             .params
-            .push(AbiParam::new(self.context.pointer_type));
+            .push(AbiParam::new(self.context.pointer_type()));
 
         let mut function_builder = FunctionBuilder::new(
             &mut self.cl_context.func,
@@ -350,14 +353,14 @@ impl<'module> Compiler<'module> {
     }
 }
 
-#[derive(Debug)]
+#[derive(derive_more::Debug)]
 pub struct Context<'module> {
     pub module: &'module naga::Module,
     #[allow(unused)]
     pub info: &'module naga::valid::ModuleInfo,
     pub layouter: naga::proc::Layouter,
-    pub pointer_type: Type,
-    pub calling_convention: CallConv,
+    #[debug(skip)]
+    pub target_config: TargetFrontendConfig,
 }
 
 impl<'module> Context<'module> {
@@ -366,9 +369,7 @@ impl<'module> Context<'module> {
     }
 
     pub fn abi_ty(&self, ty: &naga::TypeInner) -> Result<Type, Error> {
-        use naga::TypeInner::*;
-
-        // todo: structs have to be lowered for the ABI. we can just pass a
+        // structs have to be lowered for the ABI. we can just pass a
         // pointer or struct offset? wgsl function arguments are not
         // variables. they can only be loaded via the FunctionCall
         // expression, so we don't have to worry about COW or anything
@@ -376,7 +377,7 @@ impl<'module> Context<'module> {
         //
         // https://users.rust-lang.org/t/help-trying-to-transfer-a-structure-from-cranelift-to-rust/106429/4
 
-        let unsupported = || Error::UnsupportedType { ty: ty.clone() };
+        use naga::TypeInner::*;
 
         let ty = match ty {
             Scalar(scalar) => self.scalar_type(*scalar)?,
@@ -387,26 +388,41 @@ impl<'module> Context<'module> {
                 scalar,
             } => self.matrix_type(*scalar, *columns, *rows)?,
             Atomic(scalar) => self.scalar_type(*scalar)?,
-            Pointer { base, space } => self.pointer_type,
+            Pointer { base: _, space: _ } => self.target_config.pointer_type(),
             ValuePointer {
-                size,
-                scalar,
-                space,
-            } => self.pointer_type,
-            Array { base, size, stride } => self.pointer_type,
-            Struct { members, span } => self.pointer_type,
+                size: _,
+                scalar: _,
+                space: _,
+            } => self.target_config.pointer_type(),
+            Array {
+                base: _,
+                size: _,
+                stride: _,
+            } => self.target_config.pointer_type(),
+            Struct {
+                members: _,
+                span: _,
+            } => self.target_config.pointer_type(),
             Image {
-                dim,
-                arrayed,
-                class,
-            } => self.pointer_type,
-            Sampler { comparison } => self.pointer_type,
-            AccelerationStructure { vertex_return } => self.pointer_type,
-            RayQuery { vertex_return } => self.pointer_type,
-            BindingArray { base, size } => self.pointer_type,
+                dim: _,
+                arrayed: _,
+                class: _,
+            } => self.target_config.pointer_type(),
+            Sampler { comparison: _ } => self.target_config.pointer_type(),
+            AccelerationStructure { vertex_return: _ } => self.target_config.pointer_type(),
+            RayQuery { vertex_return: _ } => self.target_config.pointer_type(),
+            BindingArray { base: _, size: _ } => self.target_config.pointer_type(),
         };
 
         Ok(ty)
+    }
+
+    pub fn calling_convention(&self) -> CallConv {
+        self.target_config.default_call_conv
+    }
+
+    pub fn pointer_type(&self) -> Type {
+        self.target_config.pointer_type()
     }
 
     pub fn scalar_type(&self, scalar: naga::Scalar) -> Result<Type, Error> {
@@ -504,6 +520,8 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
     }
 
     pub fn compile_statement(&mut self, statement: &naga::Statement) -> Result<(), Error> {
+        #![allow(unused_variables)]
+
         match statement {
             naga::Statement::Emit(range) => {
                 self.compile_emit(range.clone())?;
@@ -613,6 +631,8 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
         &mut self,
         expression: naga::Handle<naga::Expression>,
     ) -> Result<Value, Error> {
+        #![allow(unused_variables)]
+
         let value = if let Some(variable) = self.emitted_expression.get(expression) {
             self.function_builder.use_var(*variable)
         }
@@ -712,6 +732,9 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
         output_ty: &naga::TypeInner,
     ) -> Result<Value, Error> {
         use naga::TypeInner::*;
+
+        // these are not used actually
+        let _ = (kind, convert);
 
         let input_value = self.compile_expression(input_expression)?;
         let input_ty = self.expression_ty(input_expression);
@@ -834,15 +857,17 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
     ) -> Result<Value, Error> {
         use naga::TypeInner::*;
 
+        let _ = output_ty;
+
         let input_value = self.compile_expression(input_expression)?;
         let input_ty = self.expression_ty(input_expression);
 
         match input_ty {
             Scalar(scalar) => self.compile_unary_scalar(operator, input_value, *scalar),
-            Vector { size, scalar } => self.compile_unary_scalar(operator, input_value, *scalar),
+            Vector { size: _, scalar } => self.compile_unary_scalar(operator, input_value, *scalar),
             Matrix {
-                columns,
-                rows,
+                columns: _,
+                rows: _,
                 scalar,
             } => self.compile_unary_scalar(operator, input_value, *scalar),
             _ => panic!("invalid unary operator {operator:?} on {input_ty:?}"),
@@ -892,6 +917,8 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
             BinaryOperator::*,
             TypeInner::*,
         };
+
+        let _ = output_ty;
 
         let left_value = self.compile_expression(left_expression)?;
         let right_value = self.compile_expression(right_expression)?;
@@ -994,13 +1021,17 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
                 assert_eq!(matrix_scalar, vector_scalar);
                 assert_eq!(matrix_rows, vector_size);
 
+                // transpose matrix with shuffle
                 let matrix =
                     self.compile_matrix_transpose(left_value, *matrix_columns, *matrix_rows)?;
-
-                // transpose matrix with shuffle
                 // then vector * matrix
-
-                todo!("matrix * vector");
+                self.compile_vector_matrix_multiply(
+                    right_value,
+                    matrix,
+                    *matrix_scalar,
+                    *matrix_rows,
+                    *matrix_columns,
+                )?
             }
             (
                 Vector {
@@ -1258,12 +1289,12 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
         let reduce_output = match scalar.kind {
             Sint | Uint => {
                 self.compile_vector_reduce(value, |function_builder, accu, shuffled| {
-                    Ok(function_builder.ins().iadd(value, shuffled))
+                    Ok(function_builder.ins().iadd(accu, shuffled))
                 })?
             }
             Float => {
                 self.compile_vector_reduce(value, |function_builder, accu, shuffled| {
-                    Ok(function_builder.ins().fadd(value, shuffled))
+                    Ok(function_builder.ins().fadd(accu, shuffled))
                 })?
             }
             _ => panic!("Invalid scalar for multiplication: {scalar:?}"),
@@ -1303,6 +1334,8 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
         literal: naga::Literal,
         output_ty: &naga::TypeInner,
     ) -> Result<Value, Error> {
+        let _ = output_ty;
+
         let output = match literal {
             naga::Literal::F64(value) => self.function_builder.ins().f64const(value),
             naga::Literal::F32(value) => self.function_builder.ins().f32const(value),
@@ -1329,7 +1362,9 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
                     .ins()
                     .iconst(types::I64, Imm64::new(value))
             }
-            naga::Literal::Bool(value) => todo!(),
+            naga::Literal::Bool(value) => {
+                self.function_builder.ins().iconst(types::I8, value as i64)
+            }
             _ => panic!("abstract literal: {literal:?}"),
         };
 
@@ -1347,24 +1382,24 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
                 rows,
                 scalar,
             } => self.compile_matrix_zero(*scalar, *columns, *rows)?,
-            Atomic(scalar) => todo!(),
-            Pointer { base, space } => todo!(),
-            ValuePointer {
-                size,
-                scalar,
-                space,
-            } => todo!(),
-            Array { base, size, stride } => todo!(),
-            Struct { members, span } => todo!(),
-            Image {
-                dim,
-                arrayed,
-                class,
-            } => todo!(),
-            Sampler { comparison } => todo!(),
-            AccelerationStructure { vertex_return } => todo!(),
-            RayQuery { vertex_return } => todo!(),
-            BindingArray { base, size } => todo!(),
+            Atomic(scalar) => self.compile_scalar_zero(*scalar)?,
+            Array {
+                base,
+                size: _,
+                stride: _,
+            } => {
+                self.compile_stack_zero(naga::proc::TypeLayout {
+                    size: output_type.size(self.context.module.to_ctx()),
+                    alignment: self.context.layouter[*base].alignment,
+                })?
+            }
+            Struct { members, span } => {
+                self.compile_stack_zero(naga::proc::TypeLayout {
+                    size: *span,
+                    alignment: self.context.layouter[members[0].ty].alignment,
+                })?
+            }
+            _ => panic!("type can't be zeroed: {output_type:?}"),
         };
 
         Ok(output)
@@ -1413,6 +1448,37 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
         Ok(output)
     }
 
+    pub fn compile_stack_zero(
+        &mut self,
+        type_layout: naga::proc::TypeLayout,
+    ) -> Result<Value, Error> {
+        let alignment = alignment_log2(type_layout.alignment);
+        let stack_slot = self
+            .function_builder
+            .create_sized_stack_slot(StackSlotData {
+                kind: StackSlotKind::ExplicitSlot,
+                size: type_layout.size,
+                align_shift: alignment,
+                key: None,
+            });
+
+        let output =
+            self.function_builder
+                .ins()
+                .stack_addr(self.context.pointer_type(), stack_slot, 0);
+
+        self.function_builder.emit_small_memset(
+            self.context.target_config,
+            output,
+            0,
+            type_layout.size.into(),
+            alignment,
+            MemFlags::new(),
+        );
+
+        Ok(output)
+    }
+
     pub fn compile_matrix_transpose(
         &mut self,
         value: Value,
@@ -1435,6 +1501,9 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
         components: &[naga::Handle<naga::Expression>],
         output_ty: &naga::TypeInner,
     ) -> Result<Value, Error> {
+        #![allow(unused_variables)]
+
+        let _ = output_ty;
         let ty = &self.context.module.types[ty];
 
         let components = components
@@ -1451,7 +1520,7 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
             naga::TypeInner::Vector { size, scalar } => {
                 let mut output = self.compile_vector_zero(*scalar, *size)?;
 
-                for (i, (value, ty)) in components.into_iter().enumerate() {
+                for (i, (value, _ty)) in components.into_iter().enumerate() {
                     output = self
                         .function_builder
                         .ins()
@@ -1463,14 +1532,14 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
             naga::TypeInner::Matrix {
                 columns,
                 rows,
-                scalar,
+                scalar: _,
             } => {
                 match &components[0].1 {
                     naga::TypeInner::Scalar(scalar) => {
                         let mut output = self.compile_matrix_zero(*scalar, *columns, *rows)?;
                         let lanes = MatrixLanes::new(*columns, *rows);
 
-                        for (i, (value, ty)) in components.into_iter().enumerate() {
+                        for (i, (value, _ty)) in components.into_iter().enumerate() {
                             output = self.function_builder.ins().insertlane(
                                 output,
                                 value,
@@ -1500,27 +1569,20 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
                 }
             }
             naga::TypeInner::Array { base, size, stride } => {
-                let type_layout = self.context.layouter[*base];
+                /*let type_layout = self.context.layouter[*base];
+                let array = self.compile_stack_zero(type_layout)?;
 
-                let stack_slot = self
-                    .function_builder
-                    .create_sized_stack_slot(StackSlotData {
-                        kind: StackSlotKind::ExplicitSlot,
-                        size: type_layout.size,
-                        align_shift: alignment_log2(type_layout.alignment),
-                        key: None,
-                    });
-
+                let offset = 0;
                 for (value, ty) in components {
+
+                    self.function_builder.
+
+                    offset += *stride;
                     todo!();
                 }
 
-                // todo: we might want to create our own Value type that is a enum over
-                // cranelift's Value, or things that we also consider values, like arrays,
-                // structs, etc.
-                self.function_builder
-                    .ins()
-                    .stack_addr(self.context.pointer_type, stack_slot, 0)
+                array*/
+                todo!();
             }
             naga::TypeInner::Struct { members, span } => {
                 todo!();

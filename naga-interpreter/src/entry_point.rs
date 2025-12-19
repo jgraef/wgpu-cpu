@@ -264,6 +264,7 @@ impl<'module> VisitIoBindings for CollectUserDefinedInterStageLayout<'module> {
         // inter-stage buffer as we want. in particular the layout of the vertex
         // output and fragment input might not even match.
         let _ = offset;
+        let _ = (ty, name, top_level);
 
         match binding {
             naga::Binding::BuiltIn(_builtin) => {
@@ -271,10 +272,10 @@ impl<'module> VisitIoBindings for CollectUserDefinedInterStageLayout<'module> {
             }
             naga::Binding::Location {
                 location,
-                interpolation,
-                sampling,
-                blend_src,
-                per_primitive,
+                interpolation: _,
+                sampling: _,
+                blend_src: _,
+                per_primitive: _,
             } => {
                 let type_layout = self.layouter[ty_handle];
                 let offset = type_layout.alignment.round_up(self.buffer_offset);

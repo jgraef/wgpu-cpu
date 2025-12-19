@@ -119,26 +119,26 @@ pub struct ShimVtableSignatures {
 
 impl ShimVtableSignatures {
     pub fn new(function_builder: &mut FunctionBuilder, context: &Context) -> Self {
-        let data = AbiParam::new(context.pointer_type);
+        let data = AbiParam::new(context.pointer_type());
 
         let copy_inputs_to = function_builder.import_signature(Signature {
             params: vec![
                 data,
-                AbiParam::new(context.pointer_type),
-                AbiParam::new(context.pointer_type),
+                AbiParam::new(context.pointer_type()),
+                AbiParam::new(context.pointer_type()),
             ],
             returns: vec![AbiParam::new(types::I32)],
-            call_conv: context.calling_convention,
+            call_conv: context.calling_convention(),
         });
 
         let copy_outputs_from = function_builder.import_signature(Signature {
             params: vec![
                 data,
-                AbiParam::new(context.pointer_type),
-                AbiParam::new(context.pointer_type),
+                AbiParam::new(context.pointer_type()),
+                AbiParam::new(context.pointer_type()),
             ],
             returns: vec![AbiParam::new(types::I32)],
-            call_conv: context.calling_convention,
+            call_conv: context.calling_convention(),
         });
 
         Self {
@@ -211,6 +211,8 @@ impl<'module> VisitIoBindings for CollectBindingStackLayouts<'module> {
         name: Option<&str>,
         top_level: bool,
     ) {
+        let _ = (name, top_level);
+
         let type_layout = self.layouter[ty_handle];
         let size = type_layout.size;
 
@@ -243,7 +245,7 @@ impl ShimVtableCallCompiler {
             shim_vtable,
             shim_data,
             shim_vtable_signatures,
-            function_pointer_type: context.pointer_type,
+            function_pointer_type: context.pointer_type(),
         }
     }
     pub fn compile_call(
@@ -266,11 +268,9 @@ impl ShimVtableCallCompiler {
             self.shim_vtable,
             vtable_offset,
         );
-        let inst = function_builder.ins().call_indirect(
-            self.shim_vtable_signatures.copy_inputs_to,
-            func_ptr,
-            &arguments,
-        );
+        let inst = function_builder
+            .ins()
+            .call_indirect(signature, func_ptr, &arguments);
         let results = function_builder.inst_results(inst);
         assert_eq!(results.len(), 1);
         results[0]
@@ -368,12 +368,12 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
         let stack_slot_pointer =
             self.function_builder
                 .ins()
-                .stack_addr(self.context.pointer_type, stack_slot, 0);
+                .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
         let len = self
             .function_builder
             .ins()
-            .iconst(self.context.pointer_type, i64::from(type_layout.size));
+            .iconst(self.context.pointer_type(), i64::from(type_layout.size));
 
         let result = call_shim_vtable!(
             self.shim_vtable_caller,
@@ -445,16 +445,16 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
         let stack_slot_pointer =
             self.function_builder
                 .ins()
-                .stack_addr(self.context.pointer_type, stack_slot, 0);
+                .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
         let len = self
             .function_builder
             .ins()
-            .iconst(self.context.pointer_type, i64::from(type_layout.size));
+            .iconst(self.context.pointer_type(), i64::from(type_layout.size));
 
         match pass_result {
-            PassBy::Reference { offset } => {}
-            PassBy::Value { offset, ty } => {
+            PassBy::Reference { offset: _ } => {}
+            PassBy::Value { offset, ty: _ } => {
                 self.function_builder.ins().store(
                     MemFlags::new(),
                     value,
@@ -508,7 +508,10 @@ impl PassBy {
                 let ty = context.matrix_type(*scalar, *columns, *rows)?;
                 PassBy::Value { offset, ty }
             }
-            naga::TypeInner::Struct { members, span } => PassBy::Reference { offset },
+            naga::TypeInner::Struct {
+                members: _,
+                span: _,
+            } => PassBy::Reference { offset },
             _ => panic!("Invalid binding argument/result type: {ty:?}"),
         };
         Ok(pass_by)
