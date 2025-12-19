@@ -288,3 +288,7 @@ pub fn typifier_from_function(
 
     typifier
 }
+
+pub fn assert_send<T: Send>() {}
+pub fn assert_sync<T: Sync>() {}
+pub fn assert_send_sync<T: Send + Sync>() {}

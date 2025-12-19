@@ -1,4 +1,19 @@
-use crate::cranelift::Compiler;
+use crate::{
+    cranelift::CompiledModule,
+    entry_point::EntryPointIndex,
+};
+
+#[track_caller]
+fn compile(source: &str) -> CompiledModule {
+    let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| {
+        println!("{source}");
+        panic!("{e}");
+    });
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+
+    crate::cranelift::compile(&module, &info).unwrap()
+}
 
 #[test]
 fn vertex_triangle() {
@@ -10,11 +25,11 @@ fn vertex_triangle() {
         return vec4f(x, y, 0.0, 1.0);
     }
     "#;
-    let source_module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| {
-        println!("{source}");
-        panic!("{e}");
-    });
 
-    let compiler = Compiler::new(&source_module).unwrap();
-    let compiled_module = compiler.compile().unwrap();
+    let compiled_module = compile(&source);
+    let entry_point = compiled_module.entry_point(EntryPointIndex::from(0));
+    println!(
+        "function pointer (scary): {:?}",
+        entry_point.function_pointer()
+    );
 }

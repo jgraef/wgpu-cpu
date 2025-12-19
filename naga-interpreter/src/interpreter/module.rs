@@ -1,16 +1,12 @@
 use std::ops::Index;
 
 use naga::{
-    Binding,
     EntryPoint,
     Function,
-    FunctionArgument,
-    FunctionResult,
     Handle,
     Module,
     Scalar,
     ShaderStage,
-    Type,
     TypeInner,
     WithSpan,
     front::Typifier,
@@ -28,21 +24,15 @@ use naga::{
 };
 
 use crate::{
-    bindings::{
-        BindingLocationLayout,
-        IoBindingVisitor,
-        UserDefinedInterStageLayout,
-        VisitIoBindings,
-    },
     entry_point::{
         EntryPointIndex,
         EntryPointNotFound,
         EntryPoints,
+        InterStageLayout,
     },
     interpreter::variable::VariableType,
     util::{
         CoArena,
-        SparseVec,
         typifier_from_function,
     },
 };
@@ -55,7 +45,6 @@ pub struct ShaderModule {
     pub(crate) layouter: Layouter,
     entry_points: EntryPoints<()>,
     pub(crate) expression_types: ExpressionTypes,
-    user_defined_io_layouts: UserDefinedIoLayouts,
 }
 
 impl ShaderModule {
@@ -89,46 +78,15 @@ impl ShaderModule {
             }),
         };
 
-        let mut user_defined_io_layouts = SparseVec::with_capacity(module.entry_points.len());
         let mut entry_points = EntryPoints::default();
         for (i, entry_point) in module.entry_points.iter().enumerate() {
-            entry_points.push(entry_point, ());
+            entry_points
+                .push(entry_point, ())
+                .collect_inter_stage_layouts(&module, &layouter);
 
             expression_types
                 .entry_points
                 .push(typifier_from_function(&module, &entry_point.function));
-
-            match entry_point.stage {
-                ShaderStage::Vertex => {
-                    user_defined_io_layouts.insert(
-                        i,
-                        UserDefinedIoLayout::Vertex {
-                            output: collect_user_defined_inter_stage_layout_from_function_result(
-                                &module,
-                                &layouter,
-                                &entry_point.function.result,
-                            ),
-                        },
-                    )
-                }
-                ShaderStage::Task => todo!(),
-                ShaderStage::Mesh => todo!(),
-                ShaderStage::Fragment => {
-                    user_defined_io_layouts.insert(
-                        i,
-                        UserDefinedIoLayout::Fragment {
-                            input: collect_user_defined_inter_stage_layout_from_function_arguments(
-                                &module,
-                                &layouter,
-                                &entry_point.function.arguments,
-                            ),
-                        },
-                    );
-                }
-                ShaderStage::Compute => {
-                    // nop: these can't have user-defined io bindings
-                }
-            }
         }
 
         Ok(Self {
@@ -137,9 +95,6 @@ impl ShaderModule {
             layouter,
             entry_points,
             expression_types,
-            user_defined_io_layouts: UserDefinedIoLayouts {
-                inner: user_defined_io_layouts,
-            },
         })
     }
 
@@ -181,7 +136,7 @@ impl ShaderModule {
     pub fn entry_points(&self) -> impl Iterator<Item = (EntryPointIndex, &EntryPoint)> {
         self.entry_points
             .iter()
-            .map(|(index, ())| (index, &self.module.entry_points[index.index]))
+            .map(|(index, _)| (index, &self.module.entry_points[index.index]))
     }
 
     pub fn offset_of<'ty>(
@@ -217,8 +172,8 @@ impl ShaderModule {
         inner.size(self.module.to_ctx())
     }
 
-    pub fn user_defined_io_layout(&self, entry_point: EntryPointIndex) -> &UserDefinedIoLayout {
-        &self.user_defined_io_layouts[entry_point]
+    pub fn inter_stage_layout(&self, entry_point: EntryPointIndex) -> Option<&InterStageLayout> {
+        self.entry_points[entry_point].inter_stage_layout.as_ref()
     }
 }
 
@@ -264,125 +219,4 @@ impl Index<Handle<Function>> for ExpressionTypes {
     fn index(&self, index: Handle<Function>) -> &Self::Output {
         &self.per_function[index]
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct UserDefinedIoLayouts {
-    pub(super) inner: SparseVec<UserDefinedIoLayout>,
-}
-
-impl Index<EntryPointIndex> for UserDefinedIoLayouts {
-    type Output = UserDefinedIoLayout;
-
-    fn index(&self, index: EntryPointIndex) -> &Self::Output {
-        &self.inner[index.index]
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CollectUserDefinedInterStageLayout<'module> {
-    pub layouter: &'module Layouter,
-    pub buffer_offset: u32,
-    pub locations: SparseVec<BindingLocationLayout>,
-}
-
-impl<'module> VisitIoBindings for CollectUserDefinedInterStageLayout<'module> {
-    fn visit(
-        &mut self,
-        binding: &Binding,
-        ty_handle: Handle<Type>,
-        ty: &Type,
-        offset: u32,
-        name: Option<&str>,
-    ) {
-        // this is the offset in the struct that contains this inter-stage location
-        // binding. we don't care about this, since we can layout our
-        // inter-stage buffer as we want. in particular the layout of the vertex
-        // output and fragment input might not even match.
-        let _ = offset;
-
-        match binding {
-            Binding::BuiltIn(_builtin) => {
-                // nop
-            }
-            Binding::Location {
-                location,
-                interpolation,
-                sampling,
-                blend_src,
-                per_primitive,
-            } => {
-                let type_layout = self.layouter[ty_handle];
-                let offset = type_layout.alignment.round_up(self.buffer_offset);
-                let size = type_layout.size;
-                self.buffer_offset = offset + size;
-
-                let index = *location as usize;
-                self.locations
-                    .insert(index, BindingLocationLayout { offset, size });
-            }
-        }
-    }
-}
-
-pub fn collect_user_defined_inter_stage_layout_from_function_arguments<'a>(
-    module: &Module,
-    layouter: &Layouter,
-    arguments: impl IntoIterator<Item = &'a FunctionArgument>,
-) -> UserDefinedInterStageLayout {
-    let mut visit = CollectUserDefinedInterStageLayout {
-        layouter,
-        buffer_offset: 0,
-        locations: SparseVec::default(),
-    };
-
-    for argument in arguments {
-        IoBindingVisitor {
-            types: &module.types,
-            visit: &mut visit,
-        }
-        .visit_function_argument(argument, 0);
-    }
-
-    UserDefinedInterStageLayout {
-        locations: visit.locations.into_vec().into(),
-        size: visit.buffer_offset,
-    }
-}
-
-pub fn collect_user_defined_inter_stage_layout_from_function_result<'a>(
-    module: &Module,
-    layouter: &Layouter,
-    result: impl Into<Option<&'a FunctionResult>>,
-) -> UserDefinedInterStageLayout {
-    let mut visit = CollectUserDefinedInterStageLayout {
-        layouter,
-        buffer_offset: 0,
-        locations: SparseVec::new(),
-    };
-
-    if let Some(result) = result.into() {
-        IoBindingVisitor {
-            types: &module.types,
-            visit: &mut visit,
-        }
-        .visit_function_result(result, 0);
-    }
-
-    UserDefinedInterStageLayout {
-        locations: visit.locations.into_vec().into(),
-        size: visit.buffer_offset,
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum UserDefinedIoLayout {
-    Vertex {
-        // todo: input
-        output: UserDefinedInterStageLayout,
-    },
-    Fragment {
-        input: UserDefinedInterStageLayout,
-        // output: don't need it, but would be handy for verification
-    },
 }

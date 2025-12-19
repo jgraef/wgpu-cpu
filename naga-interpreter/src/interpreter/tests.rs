@@ -21,8 +21,8 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
+    entry_point::EntryPointIndex,
     interpreter::{
-        EntryPointIndex,
         Interpreter,
         ShaderModule,
     },

@@ -12,7 +12,7 @@ use naga_interpreter::{
         ShaderInput,
         ShaderOutput,
     },
-    interpreter::EntryPointIndex,
+    entry_point::EntryPointIndex,
     memory::ReadMemory,
 };
 use nalgebra::{

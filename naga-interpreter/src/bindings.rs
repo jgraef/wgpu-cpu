@@ -158,6 +158,7 @@ pub trait VisitIoBindings {
         ty: &Type,
         offset: u32,
         name: Option<&str>,
+        top_level: bool,
     );
 }
 
@@ -172,8 +173,29 @@ where
         ty: &Type,
         offset: u32,
         name: Option<&str>,
+        top_level: bool,
     ) {
-        T::visit(self, binding, ty_handle, ty, offset, name);
+        T::visit(self, binding, ty_handle, ty, offset, name, top_level);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FnVisitIoBindings<F>(pub F);
+
+impl<F> VisitIoBindings for FnVisitIoBindings<F>
+where
+    F: FnMut(&Binding, Handle<Type>, &Type, u32, Option<&str>, bool),
+{
+    fn visit(
+        &mut self,
+        binding: &Binding,
+        ty_handle: Handle<Type>,
+        ty: &Type,
+        offset: u32,
+        name: Option<&str>,
+        top_level: bool,
+    ) {
+        (self.0)(binding, ty_handle, ty, offset, name, top_level)
     }
 }
 
@@ -181,6 +203,18 @@ where
 pub struct IoBindingVisitor<'a, B> {
     pub types: &'a UniqueArena<Type>,
     pub visit: B,
+}
+
+impl<'a, B> IoBindingVisitor<'a, B> {
+    pub fn new(types: &'a UniqueArena<Type>, visit: B) -> Self {
+        Self { types, visit }
+    }
+}
+
+impl<'a, F> IoBindingVisitor<'a, FnVisitIoBindings<F>> {
+    pub fn from_fn(types: &'a UniqueArena<Type>, f: F) -> Self {
+        IoBindingVisitor::new(types, FnVisitIoBindings(f))
+    }
 }
 
 impl<'a, B> IoBindingVisitor<'a, B>
@@ -193,10 +227,12 @@ where
         ty_handle: Handle<Type>,
         offset: u32,
         name: Option<&str>,
+        top_level: bool,
     ) {
         let ty = &self.types[ty_handle];
         if let Some(binding) = binding {
-            self.visit.visit(binding, ty_handle, ty, offset, name);
+            self.visit
+                .visit(binding, ty_handle, ty, offset, name, top_level);
         }
         else {
             match &ty.inner {
@@ -207,6 +243,7 @@ where
                             member.ty,
                             offset + member.offset,
                             member.name.as_deref(),
+                            false,
                         );
                     }
                 }
@@ -221,10 +258,11 @@ where
             argument.ty,
             offset,
             argument.name.as_deref(),
+            true,
         );
     }
 
     pub fn visit_function_result(&mut self, result: &FunctionResult, offset: u32) {
-        self.visit(result.binding.as_ref(), result.ty, offset, None);
+        self.visit(result.binding.as_ref(), result.ty, offset, None, true);
     }
 }

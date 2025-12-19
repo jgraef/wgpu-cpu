@@ -49,6 +49,7 @@ where
         ty: &Type,
         offset: u32,
         name: Option<&str>,
+        top_level: bool,
     ) {
         let type_layout = &self.layouter[ty_handle];
         let target = self
@@ -78,6 +79,7 @@ where
         ty: &Type,
         offset: u32,
         name: Option<&str>,
+        top_level: bool,
     ) {
         let type_layout = &self.layouter[ty_handle];
         let source = self

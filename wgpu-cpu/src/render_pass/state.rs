@@ -4,10 +4,8 @@ use std::{
 };
 
 use naga_interpreter::{
-    interpreter::{
-        Interpreter,
-        UserDefinedIoLayout,
-    },
+    entry_point::InterStageLayout,
+    interpreter::Interpreter,
     memory::NullMemory,
 };
 use nalgebra::{
@@ -162,9 +160,9 @@ impl<'pass> State<'pass> {
         let vertex_output_layout = match &vertex_state
             .module
             .as_ref()
-            .user_defined_io_layout(vertex_state.entry_point_index)
+            .inter_stage_layout(vertex_state.entry_point_index)
         {
-            UserDefinedIoLayout::Vertex { output } => output,
+            Some(InterStageLayout::Vertex { output }) => output,
             _ => panic!("user defined io layouts for entry point are not for vertex stage"),
         };
 

@@ -3,18 +3,41 @@ use std::sync::Arc;
 use cranelift_jit::JITModule;
 use cranelift_module::FuncId;
 
-use crate::entry_point::{
-    EntryPointIndex,
-    EntryPointNotFound,
-    EntryPoints,
+use crate::{
+    bindings::{
+        ShaderInput,
+        ShaderOutput,
+    },
+    cranelift::bindings::{
+        BindingStackLayout,
+        ShimData,
+        ShimVtable,
+    },
+    entry_point::{
+        EntryPointIndex,
+        EntryPointNotFound,
+        EntryPoints,
+    },
 };
 
 #[derive(Clone, Debug)]
 pub struct CompiledModule {
-    pub(super) inner: Arc<CompiledModuleInner>,
+    inner: Arc<CompiledModuleInner>,
 }
 
 impl CompiledModule {
+    pub(super) fn new(
+        jit_module: JITModule,
+        entry_points: EntryPoints<CompiledEntryPoint>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(CompiledModuleInner {
+                jit_module: Some(jit_module),
+                entry_points,
+            }),
+        }
+    }
+
     pub fn find_entry_point(
         &self,
         name: Option<&str>,
@@ -22,17 +45,130 @@ impl CompiledModule {
     ) -> Result<EntryPointIndex, EntryPointNotFound> {
         self.inner.entry_points.find(name, stage)
     }
+
+    pub fn entry_point(&self, index: EntryPointIndex) -> EntryPoint<'_> {
+        let inner = &self.inner.entry_points[index];
+
+        let function_pointer = self
+            .inner
+            .jit_module
+            .as_ref()
+            .expect("JIT module gone")
+            .get_finalized_function(inner.data.function_id);
+
+        EntryPoint {
+            inner,
+            function_pointer,
+        }
+    }
 }
 
 #[derive(derive_more::Debug)]
-pub(super) struct CompiledModuleInner {
+struct CompiledModuleInner {
+    // this is in an Arc, so we can take it out on Drop. MaybeUninit would work too
     #[debug(skip)]
-    pub(super) jit_module: JITModule,
-    pub(super) entry_points: EntryPoints<EntryPoint>,
+    jit_module: Option<JITModule>,
+
+    entry_points: EntryPoints<CompiledEntryPoint>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct EntryPoint {
-    pub(super) function_id: FuncId,
-    // todo: io bindings
+impl Drop for CompiledModuleInner {
+    fn drop(&mut self) {
+        // JITModule leaks the memory when dropped:
+        //
+        // https://docs.rs/cranelift-jit/latest/src/cranelift_jit/memory/system.rs.html#222
+
+        let jit_module = self
+            .jit_module
+            .take()
+            .expect("JIT module not here on Drop!");
+        unsafe {
+            // SAFETY: make sure to keep this around when executing
+            jit_module.free_memory();
+        }
+    }
+}
+
+// SAFETY: Make sure to only compile modules that are safe to share. Also
+// therefore we must not make the constructor for `CompiledModule` pub.
+unsafe impl Sync for CompiledModuleInner {}
+
+#[derive(Debug)]
+pub struct CompiledEntryPoint {
+    pub function_id: FuncId,
+    pub input_layout: Vec<BindingStackLayout>,
+    pub output_layout: Vec<BindingStackLayout>,
+}
+
+#[derive(Clone, Copy)]
+pub struct EntryPoint<'a> {
+    inner: &'a crate::entry_point::EntryPoint<CompiledEntryPoint>,
+    function_pointer: *const u8,
+}
+
+impl<'a> EntryPoint<'a> {
+    pub fn name(&self) -> Option<&str> {
+        self.inner.name.as_deref()
+    }
+
+    pub fn stage(&self) -> naga::ShaderStage {
+        self.inner.stage
+    }
+
+    pub fn function_pointer(&self) -> *const u8 {
+        self.function_pointer
+    }
+
+    pub fn function<I, O>(&self) -> impl Fn(I, O)
+    where
+        I: ShaderInput,
+        O: ShaderOutput,
+    {
+        let function = unsafe {
+            // SAFETY: This function signature matches what our compiled code expects. This
+            // still returns an unsafe function, because it's the responsibility of the
+            // caller to ensure the vtable and data matches
+            std::mem::transmute::<_, unsafe fn(&ShimVtable, &mut ShimData<I, O>)>(
+                self.function_pointer,
+            )
+        };
+
+        let shim_vtable = ShimVtable::new::<I, O>();
+
+        move |input: I, output: O| {
+            let mut shim_data = ShimData {
+                input,
+                input_layout: &self.inner.data.input_layout,
+                output,
+                output_layout: &self.inner.data.output_layout,
+            };
+
+            unsafe {
+                // SAFETY: We just created the vtable and data with matching types. Thus it's
+                // safe to call the function with these arguments
+                function(&shim_vtable, &mut shim_data)
+            }
+        }
+    }
+
+    pub fn run<I, O>(&self, input: I, output: O)
+    where
+        I: ShaderInput,
+        O: ShaderOutput,
+    {
+        self.function()(input, output);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        cranelift::CompiledModule,
+        util::assert_send_sync,
+    };
+
+    #[test]
+    fn compiled_module_is_send_sync() {
+        assert_send_sync::<CompiledModule>();
+    }
 }

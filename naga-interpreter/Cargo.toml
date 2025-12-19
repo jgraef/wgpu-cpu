@@ -12,6 +12,7 @@ cranelift-module = { version = "0.126.1", optional = true }
 cranelift-native = { version = "0.126.1", optional = true }
 derive_more = { version = "2.1.0", features = ["debug"] }
 half = { version = "2.7.1", features = ["bytemuck"] }
+memoffset = "0.9.1"
 naga = "27.0.0"
 thiserror = "2.0.17"
 tracing = "0.1.43"

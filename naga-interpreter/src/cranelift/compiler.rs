@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     convert::Infallible,
-    sync::Arc,
 };
 
 use cranelift_codegen::{
@@ -25,6 +24,7 @@ use cranelift_codegen::{
         },
         types,
     },
+    isa::CallConv,
     settings::Configurable,
 };
 use cranelift_frontend::{
@@ -45,10 +45,12 @@ use cranelift_module::{
 use half::f16;
 
 use crate::{
-    cranelift::module::{
-        CompiledModule,
-        CompiledModuleInner,
-        EntryPoint,
+    cranelift::{
+        bindings::ShimBuilder,
+        module::{
+            CompiledEntryPoint,
+            CompiledModule,
+        },
     },
     entry_point::EntryPoints,
     util::{
@@ -74,7 +76,7 @@ pub enum Error {
 
 #[derive(derive_more::Debug)]
 pub struct Compiler<'module> {
-    source_module: SourceModule<'module>,
+    context: Context<'module>,
 
     #[debug(skip)]
     function_builder_context: FunctionBuilderContext,
@@ -89,12 +91,12 @@ pub struct Compiler<'module> {
 }
 
 impl<'module> Compiler<'module> {
-    pub fn new(module: &'module naga::Module) -> Result<Self, Error> {
+    pub fn new(
+        module: &'module naga::Module,
+        info: &'module naga::valid::ModuleInfo,
+    ) -> Result<Self, Error> {
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(module.to_ctx())?;
-
-        let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
-        let module_info = validator.validate(&module)?;
 
         let mut flag_builder = cranelift_codegen::settings::builder();
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
@@ -107,22 +109,25 @@ impl<'module> Compiler<'module> {
             .finish(cranelift_codegen::settings::Flags::new(flag_builder))
             .unwrap();
 
+        println!("calling convention: {}", isa.default_call_conv());
+
         let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let jit_module = JITModule::new(jit_builder);
 
         let cl_context = jit_module.make_context();
 
-        let pointer = jit_module.target_config().pointer_type();
+        let target_config = jit_module.target_config();
 
-        let source_module = SourceModule {
+        let source_module = Context {
             module,
-            module_info,
+            info,
             layouter,
-            pointer,
+            pointer_type: target_config.pointer_type(),
+            calling_convention: target_config.default_call_conv,
         };
 
         Ok(Self {
-            source_module,
+            context: source_module,
             function_builder_context: FunctionBuilderContext::new(),
             cl_context,
             jit_module,
@@ -133,42 +138,113 @@ impl<'module> Compiler<'module> {
 
 impl<'module> Compiler<'module> {
     pub fn compile(mut self) -> Result<CompiledModule, Error> {
-        let mut entry_points =
-            EntryPoints::with_capacity(self.source_module.module.entry_points.len());
+        let mut entry_points = EntryPoints::with_capacity(self.context.module.entry_points.len());
 
-        for entry_point in &self.source_module.module.entry_points {
-            let function_id = self.compile_function(&entry_point.function, Linkage::Export)?;
-            entry_points.push(entry_point, EntryPoint { function_id })
+        for entry_point in &self.context.module.entry_points {
+            let entry_point_data = self.compile_entry_point(entry_point)?;
+            entry_points.push(entry_point, entry_point_data);
         }
 
         self.jit_module.clear_context(&mut self.cl_context);
         self.jit_module.finalize_definitions()?;
 
-        Ok(CompiledModule {
-            inner: Arc::new(CompiledModuleInner {
-                jit_module: self.jit_module,
-                entry_points,
-            }),
-        })
+        Ok(CompiledModule::new(self.jit_module, entry_points))
     }
 
     pub fn anonymous_function_name(&mut self) -> String {
         let id = self.next_anonymous_function_id;
         self.next_anonymous_function_id += 1;
-        format!("__anonymous_{id}")
+        format!("__naga_interpreter_anonymous_{id}")
     }
 
-    pub fn compile_function(
+    pub fn compile_entry_point(
         &mut self,
-        function: &naga::Function,
-        linkage: impl Into<Option<Linkage>>,
-    ) -> Result<FuncId, Error> {
+        entry_point: &naga::EntryPoint,
+    ) -> Result<CompiledEntryPoint, Error> {
+        // compile entry point function
+        let main_function_id = self.compile_function(&entry_point.function)?;
+        let main_function_ref = self
+            .jit_module
+            .declare_func_in_func(main_function_id, &mut self.cl_context.func);
+
+        // build shim
+
+        // the shim takes one argument which is a pointer with inputs/outputs
+        self.cl_context
+            .func
+            .signature
+            .params
+            .push(AbiParam::new(self.context.pointer_type));
+
+        let mut function_builder = FunctionBuilder::new(
+            &mut self.cl_context.func,
+            &mut self.function_builder_context,
+        );
+
+        let entry_block = function_builder.create_block();
+
+        function_builder.append_block_params_for_function_params(entry_block);
+        function_builder.switch_to_block(entry_block);
+
+        let shim_vtable = function_builder.block_params(entry_block)[0];
+        let shim_data = function_builder.block_params(entry_block)[1];
+
+        let mut shim_builder =
+            ShimBuilder::new(&self.context, function_builder, shim_vtable, shim_data);
+        let (arguments, input_layout) =
+            shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
+
+        let output = {
+            let inst = shim_builder
+                .function_builder
+                .ins()
+                .call(main_function_ref, &arguments);
+            let results = shim_builder.function_builder.inst_results(inst);
+            assert!(results.len() <= 1);
+            results.get(0).copied()
+        };
+
+        let output_layout = entry_point
+            .function
+            .result
+            .as_ref()
+            .map(|result| {
+                shim_builder.compile_result_shim(
+                    result,
+                    output.expect(
+                        "compiled entry point doesn't return anything, but in naga IR it does.",
+                    ),
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        shim_builder.function_builder.seal_block(entry_block);
+        shim_builder.function_builder.finalize();
+
+        let shim_function = self.jit_module.declare_function(
+            "__naga_interpreter_shim", // this name is not accuarate anymore, isn't it :D
+            Linkage::Local,
+            &self.cl_context.func.signature,
+        )?;
+
+        self.jit_module
+            .define_function(shim_function, &mut self.cl_context)?;
+
+        Ok(CompiledEntryPoint {
+            function_id: shim_function,
+            input_layout,
+            output_layout,
+        })
+    }
+
+    pub fn compile_function(&mut self, function: &naga::Function) -> Result<FuncId, Error> {
         let function_name = function
             .name
             .as_ref()
             .map_or_else(|| Cow::Owned(self.anonymous_function_name()), Cow::Borrowed);
 
-        let typifier = typifier_from_function(&self.source_module.module, function);
+        let typifier = typifier_from_function(&self.context.module, function);
 
         // some immediates that we might use
         const VECTOR_REDUCE_SHUFFLE_MASKS: [V128Imm; 2] = [
@@ -189,24 +265,24 @@ impl<'module> Compiler<'module> {
 
         // function result
         if let Some(result) = &function.result {
-            let ty = &self.source_module.module.types[result.ty];
+            let ty = &self.context.module.types[result.ty];
 
             self.cl_context
                 .func
                 .signature
                 .returns
-                .push(self.source_module.abi_param(&ty.inner)?);
+                .push(self.context.abi_param(&ty.inner)?);
         }
 
         // function arguments
         for argument in &function.arguments {
-            let ty = &self.source_module.module.types[argument.ty];
+            let ty = &self.context.module.types[argument.ty];
 
             self.cl_context
                 .func
                 .signature
                 .params
-                .push(self.source_module.abi_param(&ty.inner)?);
+                .push(self.context.abi_param(&ty.inner)?);
         }
 
         let mut function_builder = FunctionBuilder::new(
@@ -220,7 +296,7 @@ impl<'module> Compiler<'module> {
         function_builder.switch_to_block(entry_block);
 
         let mut function_compiler = FunctionCompiler {
-            source_module: &self.source_module,
+            context: &self.context,
             function,
             typifier: &typifier,
             function_builder,
@@ -238,7 +314,7 @@ impl<'module> Compiler<'module> {
 
         let function_id = self.jit_module.declare_function(
             &function_name,
-            linkage.into().unwrap_or(Linkage::Local),
+            Linkage::Local,
             &self.cl_context.func.signature,
         )?;
 
@@ -250,15 +326,16 @@ impl<'module> Compiler<'module> {
 }
 
 #[derive(Debug)]
-struct SourceModule<'module> {
-    module: &'module naga::Module,
+pub struct Context<'module> {
+    pub module: &'module naga::Module,
     #[allow(unused)]
-    module_info: naga::valid::ModuleInfo,
-    layouter: naga::proc::Layouter,
-    pointer: Type,
+    pub info: &'module naga::valid::ModuleInfo,
+    pub layouter: naga::proc::Layouter,
+    pub pointer_type: Type,
+    pub calling_convention: CallConv,
 }
 
-impl<'module> SourceModule<'module> {
+impl<'module> Context<'module> {
     pub fn abi_param(&self, ty: &naga::TypeInner) -> Result<AbiParam, Error> {
         Ok(AbiParam::new(self.abi_ty(ty)?))
     }
@@ -277,37 +354,37 @@ impl<'module> SourceModule<'module> {
         let unsupported = || Error::UnsupportedType { ty: ty.clone() };
 
         let ty = match ty {
-            Scalar(scalar) => self.scalar_ty(*scalar)?,
-            Vector { size, scalar } => self.vector_ty(*scalar, *size)?,
+            Scalar(scalar) => self.scalar_type(*scalar)?,
+            Vector { size, scalar } => self.vector_type(*scalar, *size)?,
             Matrix {
                 columns,
                 rows,
                 scalar,
-            } => self.matrix_ty(*scalar, *columns, *rows)?,
-            Atomic(scalar) => self.scalar_ty(*scalar)?,
-            Pointer { base, space } => self.pointer,
+            } => self.matrix_type(*scalar, *columns, *rows)?,
+            Atomic(scalar) => self.scalar_type(*scalar)?,
+            Pointer { base, space } => self.pointer_type,
             ValuePointer {
                 size,
                 scalar,
                 space,
-            } => self.pointer,
-            Array { base, size, stride } => self.pointer,
-            Struct { members, span } => self.pointer,
+            } => self.pointer_type,
+            Array { base, size, stride } => self.pointer_type,
+            Struct { members, span } => self.pointer_type,
             Image {
                 dim,
                 arrayed,
                 class,
-            } => self.pointer,
-            Sampler { comparison } => self.pointer,
-            AccelerationStructure { vertex_return } => self.pointer,
-            RayQuery { vertex_return } => self.pointer,
-            BindingArray { base, size } => self.pointer,
+            } => self.pointer_type,
+            Sampler { comparison } => self.pointer_type,
+            AccelerationStructure { vertex_return } => self.pointer_type,
+            RayQuery { vertex_return } => self.pointer_type,
+            BindingArray { base, size } => self.pointer_type,
         };
 
         Ok(ty)
     }
 
-    pub fn scalar_ty(&self, scalar: naga::Scalar) -> Result<Type, Error> {
+    pub fn scalar_type(&self, scalar: naga::Scalar) -> Result<Type, Error> {
         use naga::ScalarKind::*;
 
         match scalar.kind {
@@ -341,8 +418,8 @@ impl<'module> SourceModule<'module> {
         })
     }
 
-    pub fn vector_ty(&self, scalar: naga::Scalar, size: naga::VectorSize) -> Result<Type, Error> {
-        let lane = self.scalar_ty(scalar)?;
+    pub fn vector_type(&self, scalar: naga::Scalar, size: naga::VectorSize) -> Result<Type, Error> {
+        let lane = self.scalar_type(scalar)?;
         lane.by(size.into()).ok_or_else(|| {
             Error::UnsupportedType {
                 ty: naga::TypeInner::Vector { size, scalar },
@@ -350,13 +427,13 @@ impl<'module> SourceModule<'module> {
         })
     }
 
-    pub fn matrix_ty(
+    pub fn matrix_type(
         &self,
         scalar: naga::Scalar,
         columns: naga::VectorSize,
         rows: naga::VectorSize,
     ) -> Result<Type, Error> {
-        let lane = self.scalar_ty(scalar)?;
+        let lane = self.scalar_type(scalar)?;
         let column_lanes = match columns {
             naga::VectorSize::Bi => 2,
             naga::VectorSize::Tri => 4, // this is intentional, for alignment
@@ -376,8 +453,8 @@ impl<'module> SourceModule<'module> {
 }
 
 #[derive(derive_more::Debug)]
-pub struct FunctionCompiler<'module, 'compiler> {
-    source_module: &'compiler SourceModule<'module>,
+struct FunctionCompiler<'module, 'compiler> {
+    context: &'compiler Context<'module>,
     function: &'module naga::Function,
     typifier: &'compiler naga::front::Typifier,
     #[debug(skip)]
@@ -391,7 +468,7 @@ pub struct FunctionCompiler<'module, 'compiler> {
 
 impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
     pub fn expression_ty(&self, expression: naga::Handle<naga::Expression>) -> &naga::TypeInner {
-        self.typifier[expression].inner_with(&self.source_module.module.types)
+        self.typifier[expression].inner_with(&self.context.module.types)
     }
 
     pub fn compile_block(&mut self, naga_block: &naga::Block) -> Result<(), Error> {
@@ -515,8 +592,7 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
             self.function_builder.use_var(*variable)
         }
         else {
-            let output_type =
-                self.typifier[expression].inner_with(&self.source_module.module.types);
+            let output_type = self.typifier[expression].inner_with(&self.context.module.types);
             let expression = &self.function.expressions[expression];
 
             match expression {
@@ -662,7 +738,7 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
 
         // https://gpuweb.github.io/gpuweb/wgsl/#value-constructor-builtin-function
 
-        let output_ty = self.source_module.scalar_ty(output_scalar)?;
+        let output_ty = self.context.scalar_type(output_scalar)?;
 
         let output_value = match (input_scalar.kind, output_scalar.kind) {
             (Sint, Uint) | (Uint, Sint) => input_value,
@@ -794,8 +870,8 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
 
         let left_value = self.compile_expression(left_expression)?;
         let right_value = self.compile_expression(right_expression)?;
-        let left_ty = self.typifier[left_expression].inner_with(&self.source_module.module.types);
-        let right_ty = self.typifier[right_expression].inner_with(&self.source_module.module.types);
+        let left_ty = self.typifier[left_expression].inner_with(&self.context.module.types);
+        let right_ty = self.typifier[right_expression].inner_with(&self.context.module.types);
 
         let output_value = match (left_ty, right_ty) {
             (Scalar(left_scalar), Scalar(right_scalar)) => {
@@ -857,8 +933,8 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
                 Scalar(scalar),
             ) if operator == Multiply => {
                 let scalar_splat = self.function_builder.ins().splat(
-                    self.source_module
-                        .matrix_ty(*scalar, *matrix_columns, *matrix_rows)?,
+                    self.context
+                        .matrix_type(*scalar, *matrix_columns, *matrix_rows)?,
                     left_value,
                 );
                 self.compile_scalar_multiply(left_value, scalar_splat, *scalar)?
@@ -873,8 +949,8 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
             ) if operator == Multiply => {
                 assert_eq!(matrix_scalar, scalar);
                 let scalar_splat = self.function_builder.ins().splat(
-                    self.source_module
-                        .matrix_ty(*scalar, *matrix_columns, *matrix_rows)?,
+                    self.context
+                        .matrix_type(*scalar, *matrix_columns, *matrix_rows)?,
                     left_value,
                 );
                 self.compile_scalar_multiply(scalar_splat, right_value, *scalar)?
@@ -1274,12 +1350,12 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
 
         let output = match (scalar.kind, scalar.width) {
             (Sint, 4) | (Uint, 4) => self.function_builder.ins().iconst(types::I64, 0),
-            (Float, 2) => self.function_builder.ins().f32const(0.0),
-            (Float, 4) => {
+            (Float, 2) => {
                 self.function_builder
                     .ins()
                     .f16const(ieee16_from_f16(f16::ZERO))
             }
+            (Float, 4) => self.function_builder.ins().f32const(0.0),
             (Bool, 1) => self.function_builder.ins().iconst(types::I8, 0),
             _ => panic!("Invalid scalar type: {scalar:?}"),
         };
@@ -1294,7 +1370,7 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
     ) -> Result<Value, Error> {
         // todo: use vconst
         let zero = self.compile_scalar_zero(scalar)?;
-        let vector_ty = self.source_module.vector_ty(scalar, size)?;
+        let vector_ty = self.context.vector_type(scalar, size)?;
         let output = self.function_builder.ins().splat(vector_ty, zero);
         Ok(output)
     }
@@ -1307,7 +1383,7 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
     ) -> Result<Value, Error> {
         // todo: use vconst
         let zero = self.compile_scalar_zero(scalar)?;
-        let vector_ty = self.source_module.matrix_ty(scalar, columns, rows)?;
+        let vector_ty = self.context.matrix_type(scalar, columns, rows)?;
         let output = self.function_builder.ins().splat(vector_ty, zero);
         Ok(output)
     }
@@ -1334,14 +1410,14 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
         components: &[naga::Handle<naga::Expression>],
         output_ty: &naga::TypeInner,
     ) -> Result<Value, Error> {
-        let ty = &self.source_module.module.types[ty];
+        let ty = &self.context.module.types[ty];
 
         let components = components
             .into_iter()
             .copied()
             .map(|expression| {
                 let value = self.compile_expression(expression)?;
-                let ty = self.typifier[expression].inner_with(&self.source_module.module.types);
+                let ty = self.typifier[expression].inner_with(&self.context.module.types);
                 Ok::<_, Error>((value, ty))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1399,7 +1475,7 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
                 }
             }
             naga::TypeInner::Array { base, size, stride } => {
-                let type_layout = self.source_module.layouter[*base];
+                let type_layout = self.context.layouter[*base];
 
                 let stack_slot = self
                     .function_builder
@@ -1419,7 +1495,7 @@ impl<'module, 'compiler> FunctionCompiler<'module, 'compiler> {
                 // structs, etc.
                 self.function_builder
                     .ins()
-                    .stack_addr(self.source_module.pointer, stack_slot, 0)
+                    .stack_addr(self.context.pointer_type, stack_slot, 0)
             }
             naga::TypeInner::Struct { members, span } => {
                 todo!();
@@ -1503,7 +1579,7 @@ fn make_transpose_shuffle_mask(columns: u8, rows: u8) -> V128Imm {
     V128Imm(mask)
 }
 
-fn alignment_log2(alignment: naga::proc::Alignment) -> u8 {
+pub(super) fn alignment_log2(alignment: naga::proc::Alignment) -> u8 {
     const ALIGNMENTS: [naga::proc::Alignment; 5] = [
         naga::proc::Alignment::ONE,
         naga::proc::Alignment::TWO,

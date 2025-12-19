@@ -10,10 +10,8 @@ use naga_interpreter::{
         ShaderInput,
         ShaderOutput,
     },
-    interpreter::{
-        EntryPointIndex,
-        Interpreter,
-    },
+    entry_point::EntryPointIndex,
+    interpreter::Interpreter,
     memory::{
         NullMemory,
         WriteMemory,

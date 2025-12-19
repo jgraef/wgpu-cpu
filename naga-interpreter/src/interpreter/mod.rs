@@ -10,10 +10,4 @@ pub use interpreter::Interpreter;
 pub use module::{
     Error as ModuleError,
     ShaderModule,
-    UserDefinedIoLayout,
-};
-
-pub use crate::entry_point::{
-    EntryPointIndex,
-    EntryPointNotFound,
 };

@@ -3,7 +3,7 @@
 pub mod bindings;
 #[cfg(feature = "cranelift")]
 pub mod cranelift;
-mod entry_point;
+pub mod entry_point;
 #[cfg(feature = "interpreter")]
 pub mod interpreter;
 pub mod memory;
