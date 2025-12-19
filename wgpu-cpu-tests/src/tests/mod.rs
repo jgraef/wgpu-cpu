@@ -28,11 +28,29 @@ use crate::util::{
 
 mod colored_triangle;
 
+const ALL_SHADER_BACKENDS: &[ShaderBackend] = &[
+    wgpu_cpu::ShaderBackend::Interpreter,
+    wgpu_cpu::ShaderBackend::Compiler,
+];
+
 #[derive(Debug)]
 pub struct TestFunction {
     pub name: &'static str,
     pub renderer: fn(wgpu::Device, wgpu::Queue) -> RgbaImage,
     pub shader_backends: &'static [ShaderBackend],
+}
+
+impl TestFunction {
+    pub fn shader_backends(&self) -> impl Iterator<Item = ShaderBackend> {
+        if self.shader_backends.is_empty() {
+            ALL_SHADER_BACKENDS
+        }
+        else {
+            self.shader_backends
+        }
+        .into_iter()
+        .copied()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,14 +64,17 @@ impl<'files> Test<'files> {
         self.test.name
     }
 
-    pub fn run(&self) -> Result<TestResults, Error> {
+    pub fn run(&self, test_config: &TestConfig) -> Result<TestResults, Error> {
         let reference = self.files.load_reference(self.test.name)?;
         let mut test_results = vec![];
 
-        for shader_backend in self.test.shader_backends {
-            let config = Config {
-                shader_backend: *shader_backend,
-            };
+        let shader_backends = self
+            .test
+            .shader_backends()
+            .filter(|backend| test_config.shader_backends.contains(backend));
+
+        for shader_backend in shader_backends {
+            let config = Config { shader_backend };
             let test_result = self.run_with(&reference, config)?;
             test_results.push((format!("{shader_backend:?}"), test_result));
         }
@@ -185,7 +206,7 @@ macro_rules! test {
         inventory::submit! {crate::tests::TestFunction {
             name: stringify!($func),
             renderer: $func,
-            shader_backends: &[wgpu_cpu::ShaderBackend::Interpreter, wgpu_cpu::ShaderBackend::Compiler],
+            shader_backends: &[],
         }}
     };
 }
@@ -244,4 +265,9 @@ impl Tests {
 
         Ok(())
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct TestConfig {
+    pub shader_backends: Vec<ShaderBackend>,
 }

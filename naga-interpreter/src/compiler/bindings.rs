@@ -365,15 +365,15 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
                 key: None,
             });
 
-        let stack_slot_pointer =
-            self.function_builder
-                .ins()
-                .stack_addr(self.context.pointer_type(), stack_slot, 0);
-
         let len = self
             .function_builder
             .ins()
             .iconst(self.context.pointer_type(), i64::from(type_layout.size));
+
+        let stack_slot_pointer =
+            self.function_builder
+                .ins()
+                .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
         let result = call_shim_vtable!(
             self.shim_vtable_caller,
@@ -395,15 +395,16 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
             .map(|pass| {
                 match pass {
                     PassBy::Reference { offset } => {
-                        self.function_builder
-                            .ins()
-                            .iadd_imm(stack_slot_pointer, i64::from(offset))
+                        self.function_builder.ins().stack_addr(
+                            self.context.pointer_type(),
+                            stack_slot,
+                            i32::try_from(offset).expect("stack offset overflow"),
+                        )
                     }
                     PassBy::Value { offset, ty } => {
-                        self.function_builder.ins().load(
+                        self.function_builder.ins().stack_load(
                             ty,
-                            MemFlags::new(),
-                            stack_slot_pointer,
+                            stack_slot,
                             i32::try_from(offset).expect("stack offset overflow"),
                         )
                     }
@@ -442,11 +443,6 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
                 key: None,
             });
 
-        let stack_slot_pointer =
-            self.function_builder
-                .ins()
-                .stack_addr(self.context.pointer_type(), stack_slot, 0);
-
         let len = self
             .function_builder
             .ins()
@@ -455,14 +451,18 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
         match pass_result {
             PassBy::Reference { offset: _ } => {}
             PassBy::Value { offset, ty: _ } => {
-                self.function_builder.ins().store(
-                    MemFlags::new(),
+                self.function_builder.ins().stack_store(
                     value,
-                    stack_slot_pointer,
+                    stack_slot,
                     i32::try_from(offset).expect("stack offset overflow"),
                 );
             }
         }
+
+        let stack_slot_pointer =
+            self.function_builder
+                .ins()
+                .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
         let result = call_shim_vtable!(
             self.shim_vtable_caller,

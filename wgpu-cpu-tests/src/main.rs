@@ -15,6 +15,7 @@ use wgpu_cpu::{
 };
 
 use crate::tests::{
+    TestConfig,
     TestFiles,
     Tests,
 };
@@ -32,8 +33,12 @@ struct Args {
 enum Command {
     Test {
         tests: Vec<String>,
+
         #[clap(short, long)]
         no_unit_tests: bool,
+
+        #[clap(short = 'b')]
+        shader_backends: Vec<ShaderBackendArg>,
     },
     GenerateReference {
         tests: Vec<String>,
@@ -53,6 +58,15 @@ enum ShaderBackendArg {
     Compiler,
 }
 
+impl From<ShaderBackendArg> for ShaderBackend {
+    fn from(value: ShaderBackendArg) -> Self {
+        match value {
+            ShaderBackendArg::Interpreter => ShaderBackend::Interpreter,
+            ShaderBackendArg::Compiler => ShaderBackend::Compiler,
+        }
+    }
+}
+
 fn main() -> Result<(), Error> {
     let _ = dotenv();
     color_eyre::install()?;
@@ -66,7 +80,12 @@ fn main() -> Result<(), Error> {
         Command::Test {
             tests: names,
             no_unit_tests,
+            shader_backends,
         } => {
+            let test_config = TestConfig {
+                shader_backends: shader_backends.into_iter().map(Into::into).collect(),
+            };
+
             if !no_unit_tests {
                 let mut cargo = std::process::Command::new("cargo")
                     .args(["test", "--all-features"])
@@ -79,7 +98,7 @@ fn main() -> Result<(), Error> {
             tests.for_names(&names, |test| {
                 println!("{} {}", "Running".green(), test.name());
 
-                for (variant, result) in test.run()? {
+                for (variant, result) in test.run(&test_config)? {
                     if let Some(message) = result.error_message() {
                         println!("Test {} ({variant})", "failed".red());
                         println!("{message}");
@@ -120,10 +139,7 @@ fn main() -> Result<(), Error> {
             }
             else {
                 let config = Config {
-                    shader_backend: match shader_backend.unwrap_or_default() {
-                        ShaderBackendArg::Interpreter => ShaderBackend::Interpreter,
-                        ShaderBackendArg::Compiler => ShaderBackend::Compiler,
-                    },
+                    shader_backend: shader_backend.unwrap_or_default().into(),
                 };
 
                 tests.for_names(&names, |test| {
