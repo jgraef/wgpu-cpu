@@ -289,6 +289,321 @@ pub fn typifier_from_function(
     typifier
 }
 
-pub fn assert_send<T: Send>() {}
-pub fn assert_sync<T: Sync>() {}
-pub fn assert_send_sync<T: Send + Sync>() {}
+#[cfg(test)]
+pub(crate) mod test {
+    use std::fmt::Debug;
+
+    pub fn assert_send<T: Send>() {}
+    pub fn assert_sync<T: Sync>() {}
+    pub fn assert_send_sync<T: Send + Sync>() {}
+
+    #[macro_export]
+    macro_rules! make_tests {
+        ($backend:ty => ($($name:ident,)*)) => {
+            $(
+                #[test]
+                fn $name() {
+                    $crate::util::test::BackendTestHelper(<$backend as ::std::default::Default>::default()).$name();
+                }
+            )*
+        };
+    }
+
+    #[macro_export]
+    macro_rules! make_all_tests {
+        ($backend:ty) => {
+            make_tests!(
+                $backend => (
+                    init_variable,
+                    store_variable,
+                    casts,
+                    binops_scalars,
+                    comparisions,
+                    unops,
+                    if_stmt,
+                    early_return,
+                    if_early_return,
+                )
+            );
+        };
+    }
+
+    use approx::{
+        AbsDiffEq,
+        assert_abs_diff_eq,
+    };
+    use bytemuck::Pod;
+
+    use crate::{
+        backend::{
+            Backend,
+            Module,
+        },
+        bindings::{
+            ShaderInput,
+            ShaderOutput,
+        },
+        entry_point::EntryPointIndex,
+    };
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct BackendTestHelper<B>(pub B);
+
+    impl<B> BackendTestHelper<B>
+    where
+        B: Backend,
+    {
+        #[track_caller]
+        pub fn eval<T>(&self, expression: &str, preamble: &str, out_ty: &str) -> T
+        where
+            T: Pod,
+        {
+            let source = format!(
+                r#"
+        struct Output {{
+            @builtin(position) p: vec4f,
+            @location(0) output: {out_ty},
+        }}
+
+        @vertex
+        fn main(@builtin(vertex_index) vertex_index: u32) -> Output {{
+            {preamble}
+            return Output(vec4f(), {expression});
+        }}
+        "#
+            );
+
+            let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| {
+                println!("{source}");
+                panic!("{e}");
+            });
+            let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+            let info = validator.validate(&module).unwrap();
+
+            let module = self.0.create_module(module, info).unwrap();
+
+            struct EvalInput;
+
+            impl ShaderInput for EvalInput {
+                fn write_into(
+                    &self,
+                    _binding: &naga::Binding,
+                    _ty: &naga::Type,
+                    _target: &mut [u8],
+                ) {
+                    // nop
+                }
+            }
+
+            struct EvalOutput<T> {
+                output: T,
+            }
+
+            impl<T> ShaderOutput for EvalOutput<T>
+            where
+                T: Pod,
+            {
+                fn read_from(&mut self, binding: &naga::Binding, _ty: &naga::Type, source: &[u8]) {
+                    match binding {
+                        naga::Binding::Location { location: 0, .. } => {
+                            self.output = *bytemuck::from_bytes::<T>(source);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut output = EvalOutput {
+                output: T::zeroed(),
+            };
+
+            module.run_entry_point(EntryPointIndex::from(0), EvalInput, &mut output);
+
+            output.output
+        }
+
+        #[track_caller]
+        pub fn eval_bool(&self, expression: &str, preamble: &str) -> bool {
+            let output: u32 = self.eval::<u32>(&format!("u32({expression})"), preamble, "u32");
+            match output {
+                0 => false,
+                1 => true,
+                x => panic!("invalid bool: {x}"),
+            }
+        }
+
+        #[track_caller]
+        pub fn assert_wgsl(&self, assertion: &str, preamble: &str) {
+            let output = self.eval_bool(assertion, preamble);
+            assert!(output);
+        }
+
+        pub fn init_variable(&self) {
+            let a = self.eval::<u32>("a", "var a: u32 = 123;", "u32");
+            assert_eq!(a, 123);
+        }
+
+        pub fn store_variable(&self) {
+            let a = self.eval::<u32>("a", "var a: u32; a = 123;", "u32");
+            assert_eq!(a, 123);
+        }
+
+        #[track_caller]
+        pub fn test_cast(&self, value: &str, input_ty: &str, output_ty: &str, expected: &str) {
+            self.assert_wgsl(
+                &format!("output == {expected}"),
+                &format!(
+                    r#"
+        var input: {input_ty} = {value};
+        var output: {output_ty} = {output_ty}(input);
+        "#
+                ),
+            );
+        }
+
+        pub fn casts(&self) {
+            self.test_cast("false", "bool", "u32", "0");
+            self.test_cast("true", "bool", "u32", "1");
+            self.test_cast("false", "bool", "i32", "0");
+            self.test_cast("true", "bool", "i32", "1");
+            self.test_cast("false", "bool", "f32", "0.0");
+            self.test_cast("true", "bool", "f32", "1.0");
+            self.test_cast("5", "u32", "f32", "5.0");
+            self.test_cast("-3", "i32", "f32", "-3.0");
+        }
+
+        #[track_caller]
+        pub fn test_binop<T>(&self, ty: &str, left: &str, op: &str, right: &str, expected: T)
+        where
+            T: Pod + AbsDiffEq + Debug,
+        {
+            let output = self.eval::<T>(
+                &format!("left {op} right"),
+                &format!(
+                    r#"
+        var left: {ty} = {left};
+        var right: {ty} = {right};
+        "#
+                ),
+                ty,
+            );
+
+            assert_abs_diff_eq!(output, expected);
+        }
+
+        pub fn binops_scalars(&self) {
+            self.test_binop::<i32>("i32", "1", "+", "1", 2);
+            self.test_binop::<i32>("i32", "2", "-", "1", 1);
+            self.test_binop::<i32>("i32", "1", "-", "2", -1);
+            self.test_binop::<i32>("i32", "2", "*", "3", 6);
+            self.test_binop::<i32>("i32", "2", "*", "-3", -6);
+            self.test_binop::<i32>("i32", "6", "/", "2", 3);
+            self.test_binop::<i32>("i32", "3", "/", "2", 1);
+            self.test_binop::<i32>("i32", "3", "%", "2", 1);
+
+            self.test_binop::<f32>("f32", "1", "+", "1", 2.0);
+            self.test_binop::<f32>("f32", "2", "-", "1", 1.0);
+            self.test_binop::<f32>("f32", "1", "-", "2", -1.0);
+            self.test_binop::<f32>("f32", "2", "*", "3", 6.0);
+            self.test_binop::<f32>("f32", "2", "*", "-3", -6.0);
+            self.test_binop::<f32>("f32", "6", "/", "2", 3.0);
+            self.test_binop::<f32>("f32", "3", "/", "2", 1.5);
+            self.test_binop::<f32>("f32", "3", "%", "2", 1.0);
+        }
+
+        #[track_caller]
+        pub fn test_compare(&self, ty: &str, left: &str, cmp: &str, right: &str, expected: bool) {
+            let output = self.eval_bool(
+                &format!("left {cmp} right"),
+                &format!(
+                    r#"
+        var left: {ty} = {left};
+        var right: {ty} = {right};
+        "#
+                ),
+            );
+
+            assert_eq!(output, expected, "{left} {cmp} {right}");
+        }
+
+        pub fn comparisions(&self) {
+            self.test_compare("i32", "2", "==", "2", true);
+            self.test_compare("i32", "1", "==", "2", false);
+            self.test_compare("i32", "1", "!=", "2", true);
+            self.test_compare("i32", "1", "<", "2", true);
+            self.test_compare("i32", "2", ">", "1", true);
+            self.test_compare("i32", "1", "<=", "2", true);
+            self.test_compare("i32", "2", "<=", "2", true);
+            self.test_compare("i32", "2", ">=", "2", true);
+            self.test_compare("i32", "3", ">=", "2", true);
+            self.test_compare("i32", "-1", "<", "1", true);
+        }
+
+        #[track_caller]
+        pub fn test_unop<T>(&self, ty: &str, op: &str, input: &str, expected: T)
+        where
+            T: Pod + AbsDiffEq + Debug,
+        {
+            let output = self.eval::<T>(
+                &format!("{op} input"),
+                &format!(
+                    r#"
+        var input: {ty} = {input};
+        "#
+                ),
+                ty,
+            );
+
+            assert_abs_diff_eq!(output, expected);
+        }
+
+        #[track_caller]
+        pub fn test_bool_unop(&self, op: &str, input: &str, expected: bool) {
+            let output = self.eval_bool(
+                &format!("{op} input"),
+                &format!(
+                    r#"
+        var input: bool = {input};
+        "#
+                ),
+            );
+
+            assert_eq!(output, expected);
+        }
+
+        pub fn unops(&self) {
+            self.test_unop::<i32>("i32", "-", "123", -123);
+            self.test_unop::<i32>("i32", "-", "-123", 123);
+            self.test_unop::<f32>("f32", "-", "123.0", -123.0);
+            self.test_unop::<f32>("f32", "-", "-123.0", 123.0);
+            self.test_bool_unop("!", "true", false);
+            self.test_bool_unop("!", "false", true);
+            self.test_unop("u32", "~", "123", !123);
+        }
+
+        pub fn if_stmt(&self) {
+            self.assert_wgsl(
+                "x == 1",
+                "var x: u32; var c: bool = true; if c { x = 1; } else { x = 2; }",
+            );
+            self.assert_wgsl(
+                "x == 2",
+                "var x: u32; var c: bool = false; if c { x = 1; } else { x = 2; }",
+            );
+        }
+
+        pub fn early_return(&self) {
+            let out = self.eval::<u32>("123", "return Output(vec4f(), 456);", "u32");
+            assert_eq!(out, 456);
+        }
+
+        pub fn if_early_return(&self) {
+            let out = self.eval::<u32>(
+                "123",
+                "var c: bool = true; if c { return Output(vec4f(), 456); }",
+                "u32",
+            );
+            assert_eq!(out, 456);
+        }
+    }
+}

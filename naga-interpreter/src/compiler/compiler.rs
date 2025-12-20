@@ -71,10 +71,15 @@ where
         let cl_context = output.make_context();
         let target_config = output.target_config();
 
-        println!("target: {}", output.isa().triple());
-        println!("dynamic_vector_bytes:");
-        println!(" i32: {}", output.isa().dynamic_vector_bytes(types::I32));
-        println!(" f32: {}", output.isa().dynamic_vector_bytes(types::F32));
+        let isa = output.isa();
+        println!("target: {}", isa.triple());
+        println!(
+            "dynamic_vector_bytes i8: {}, i32: {}, f16: {}, f32: {}",
+            isa.dynamic_vector_bytes(types::I8),
+            isa.dynamic_vector_bytes(types::I32),
+            isa.dynamic_vector_bytes(types::F16),
+            isa.dynamic_vector_bytes(types::F32)
+        );
 
         Ok(Self {
             context: Context {

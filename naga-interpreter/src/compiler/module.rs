@@ -178,7 +178,7 @@ impl<'a> EntryPoint<'a> {
 mod tests {
     use crate::{
         compiler::CompiledModule,
-        util::assert_send_sync,
+        util::test::assert_send_sync,
     };
 
     #[test]

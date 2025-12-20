@@ -6,8 +6,12 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
-    compiler::CompiledModule,
+    compiler::{
+        CompiledModule,
+        CompilerBackend,
+    },
     entry_point::EntryPointIndex,
+    make_tests,
 };
 
 #[track_caller]
@@ -90,3 +94,17 @@ fn vertex_triangle() {
         ]
     );
 }
+
+make_tests!(
+    CompilerBackend => (
+        init_variable,
+        store_variable,
+        casts,
+        binops_scalars,
+        comparisions,
+        unops,
+        if_stmt,
+        early_return,
+        if_early_return,
+    )
+);
