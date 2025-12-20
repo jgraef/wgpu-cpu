@@ -66,7 +66,7 @@ impl CompiledModule {
 
 #[derive(derive_more::Debug)]
 struct CompiledModuleInner {
-    // this is in an Arc, so we can take it out on Drop. MaybeUninit would work too
+    // this is in an Option, so we can take it out on Drop. MaybeUninit would work too
     #[debug(skip)]
     jit_module: Option<JITModule>,
 

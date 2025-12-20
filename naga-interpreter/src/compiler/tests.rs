@@ -19,7 +19,7 @@ fn compile(source: &str) -> CompiledModule {
     let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
     let info = validator.validate(&module).unwrap();
 
-    crate::compiler::compile(&module, &info).unwrap()
+    crate::compiler::compile_jit(&module, &info).unwrap()
 }
 
 #[test]

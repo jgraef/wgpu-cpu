@@ -31,10 +31,8 @@ use crate::{
     },
     compiler::{
         Error,
-        compiler::{
-            Context,
-            alignment_log2,
-        },
+        context::Context,
+        util::alignment_log2,
     },
 };
 
@@ -196,12 +194,12 @@ pub struct BindingStackLayout {
 }
 
 #[derive(Clone, Debug)]
-pub struct CollectBindingStackLayouts<'module> {
-    pub layouter: &'module naga::proc::Layouter,
+pub struct CollectBindingStackLayouts<'source> {
+    pub layouter: &'source naga::proc::Layouter,
     pub layouts: Vec<BindingStackLayout>,
 }
 
-impl<'module> VisitIoBindings for CollectBindingStackLayouts<'module> {
+impl<'source> VisitIoBindings for CollectBindingStackLayouts<'source> {
     fn visit(
         &mut self,
         binding: &naga::Binding,
@@ -287,16 +285,16 @@ macro_rules! call_shim_vtable {
     };
 }
 
-pub struct ShimBuilder<'module, 'compiler> {
-    context: &'compiler Context<'module>,
+pub struct ShimBuilder<'source, 'compiler> {
+    context: &'compiler Context<'source>,
     pub function_builder: FunctionBuilder<'compiler>,
     shim_vtable_caller: ShimVtableCallCompiler,
     panic_block: Block,
 }
 
-impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
+impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
     pub fn new(
-        context: &'compiler Context<'module>,
+        context: &'compiler Context<'source>,
         mut function_builder: FunctionBuilder<'compiler>,
         shim_vtable: Value,
         shim_data: Value,
@@ -323,7 +321,7 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
             layouts: vec![],
         };
         let mut visitor = IoBindingVisitor::new(
-            &self.context.module.types,
+            &self.context.source.types,
             &mut collect_binding_stack_layouts,
         );
 
@@ -335,13 +333,13 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
                 return Ok((vec![], vec![]));
             };
 
-            let argument_type = &self.context.module.types[first.ty];
+            let argument_type = &self.context.source.types[first.ty];
             let mut type_layout = self.context.layouter[first.ty];
             visitor.visit_function_argument(first, 0);
             pass_arguments.push(PassBy::new(&self.context, &argument_type.inner, 0)?);
 
             for argument in arguments {
-                let argument_type = &self.context.module.types[argument.ty];
+                let argument_type = &self.context.source.types[argument.ty];
                 let argument_type_layout = &self.context.layouter[argument.ty];
 
                 let offset = type_layout.alignment.round_up(type_layout.size);
@@ -421,14 +419,14 @@ impl<'module, 'compiler> ShimBuilder<'module, 'compiler> {
         value: Value,
     ) -> Result<Vec<BindingStackLayout>, Error> {
         let type_layout = self.context.layouter[result.ty];
-        let result_type = &self.context.module.types[result.ty];
+        let result_type = &self.context.source.types[result.ty];
 
         let mut collect_binding_stack_layouts = CollectBindingStackLayouts {
             layouter: &self.context.layouter,
             layouts: vec![],
         };
         let mut visitor = IoBindingVisitor::new(
-            &self.context.module.types,
+            &self.context.source.types,
             &mut collect_binding_stack_layouts,
         );
         visitor.visit_function_result(result, 0);

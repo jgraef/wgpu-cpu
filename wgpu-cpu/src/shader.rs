@@ -87,7 +87,7 @@ impl ShaderModule {
             }
             ShaderBackend::Compiler => {
                 PipelineShaderModule::Compiled {
-                    module: naga_interpreter::compiler::compile(&module, &info)?,
+                    module: naga_interpreter::compiler::compile_jit(&module, &info)?,
                 }
             }
         };
