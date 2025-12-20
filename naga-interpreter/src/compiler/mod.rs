@@ -1,10 +1,12 @@
 pub mod bindings;
 pub mod compiler;
-pub mod context;
+pub mod expression;
 pub mod function;
 pub mod module;
+pub mod simd;
 #[cfg(test)]
 mod tests;
+pub mod types;
 pub(self) mod util;
 pub mod value;
 
@@ -21,7 +23,11 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
-    compiler::compiler::Compiler,
+    compiler::{
+        compiler::Compiler,
+        types::InvalidType,
+        value::UnexpectedType,
+    },
     entry_point::{
         EntryPointIndex,
         EntryPointNotFound,
@@ -42,6 +48,12 @@ pub enum Error {
 
     #[error("Host machine is not supported: {0}")]
     HostNotSupported(&'static str),
+
+    #[error(transparent)]
+    InvalidType(#[from] InvalidType),
+
+    #[error(transparent)]
+    UnexpectedType(#[from] UnexpectedType),
 }
 
 pub fn compile_jit(

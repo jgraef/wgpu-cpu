@@ -8,17 +8,8 @@ use std::{
 };
 
 use cranelift_codegen::ir::{
-    AbiParam,
-    Block,
+    self,
     InstBuilder,
-    MemFlags,
-    SigRef,
-    Signature,
-    StackSlotData,
-    StackSlotKind,
-    Type,
-    Value,
-    types,
 };
 use cranelift_frontend::FunctionBuilder;
 
@@ -31,8 +22,16 @@ use crate::{
     },
     compiler::{
         Error,
-        context::Context,
+        compiler::Context,
+        types::Type,
         util::alignment_log2,
+        value::{
+            Load,
+            Location,
+            StackLocation,
+            Store,
+            Value,
+        },
     },
 };
 
@@ -111,31 +110,31 @@ impl ShimVtable {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShimVtableSignatures {
-    pub copy_inputs_to: SigRef,
-    pub copy_outputs_from: SigRef,
+    pub copy_inputs_to: ir::SigRef,
+    pub copy_outputs_from: ir::SigRef,
 }
 
 impl ShimVtableSignatures {
     pub fn new(function_builder: &mut FunctionBuilder, context: &Context) -> Self {
-        let data = AbiParam::new(context.pointer_type());
+        let data = ir::AbiParam::new(context.pointer_type());
 
-        let copy_inputs_to = function_builder.import_signature(Signature {
+        let copy_inputs_to = function_builder.import_signature(ir::Signature {
             params: vec![
                 data,
-                AbiParam::new(context.pointer_type()),
-                AbiParam::new(context.pointer_type()),
+                ir::AbiParam::new(context.pointer_type()),
+                ir::AbiParam::new(context.pointer_type()),
             ],
-            returns: vec![AbiParam::new(types::I32)],
+            returns: vec![ir::AbiParam::new(ir::types::I32)],
             call_conv: context.calling_convention(),
         });
 
-        let copy_outputs_from = function_builder.import_signature(Signature {
+        let copy_outputs_from = function_builder.import_signature(ir::Signature {
             params: vec![
                 data,
-                AbiParam::new(context.pointer_type()),
-                AbiParam::new(context.pointer_type()),
+                ir::AbiParam::new(context.pointer_type()),
+                ir::AbiParam::new(context.pointer_type()),
             ],
-            returns: vec![AbiParam::new(types::I32)],
+            returns: vec![ir::AbiParam::new(ir::types::I32)],
             call_conv: context.calling_convention(),
         });
 
@@ -225,18 +224,18 @@ impl<'source> VisitIoBindings for CollectBindingStackLayouts<'source> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShimVtableCallCompiler {
-    pub shim_vtable: Value,
-    pub shim_data: Value,
+    pub shim_vtable: ir::Value,
+    pub shim_data: ir::Value,
     pub shim_vtable_signatures: ShimVtableSignatures,
-    pub function_pointer_type: Type,
+    pub function_pointer_type: ir::Type,
 }
 
 impl ShimVtableCallCompiler {
     pub fn new(
         context: &Context,
         function_builder: &mut FunctionBuilder,
-        shim_vtable: Value,
-        shim_data: Value,
+        shim_vtable: ir::Value,
+        shim_data: ir::Value,
     ) -> Self {
         let shim_vtable_signatures = ShimVtableSignatures::new(function_builder, context);
         Self {
@@ -250,9 +249,9 @@ impl ShimVtableCallCompiler {
         &self,
         function_builder: &mut FunctionBuilder,
         vtable_offset: usize,
-        signature: SigRef,
-        arguments: impl IntoIterator<Item = Value>,
-    ) -> Value {
+        signature: ir::SigRef,
+        arguments: impl IntoIterator<Item = ir::Value>,
+    ) -> ir::Value {
         let vtable_offset =
             i32::try_from(vtable_offset).expect("shim vtable offset does not fit into an i32");
 
@@ -262,7 +261,7 @@ impl ShimVtableCallCompiler {
 
         let func_ptr = function_builder.ins().load(
             self.function_pointer_type,
-            MemFlags::new(),
+            ir::MemFlags::new(),
             self.shim_vtable,
             vtable_offset,
         );
@@ -289,16 +288,16 @@ pub struct ShimBuilder<'source, 'compiler> {
     context: &'compiler Context<'source>,
     pub function_builder: FunctionBuilder<'compiler>,
     shim_vtable_caller: ShimVtableCallCompiler,
-    panic_block: Block,
+    panic_block: ir::Block,
 }
 
 impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
     pub fn new(
         context: &'compiler Context<'source>,
         mut function_builder: FunctionBuilder<'compiler>,
-        shim_vtable: Value,
-        shim_data: Value,
-        panic_block: Block,
+        shim_vtable: ir::Value,
+        shim_data: ir::Value,
+        panic_block: ir::Block,
     ) -> Self {
         let shim_vtable_caller =
             ShimVtableCallCompiler::new(context, &mut function_builder, shim_vtable, shim_data);
@@ -316,6 +315,8 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
         arguments: &[naga::FunctionArgument],
     ) -> Result<(Vec<Value>, Vec<BindingStackLayout>), Error> {
         let mut arguments = arguments.iter();
+        let mut argument_values = vec![];
+
         let mut collect_binding_stack_layouts = CollectBindingStackLayouts {
             layouter: &self.context.layouter,
             layouts: vec![],
@@ -325,21 +326,19 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
             &mut collect_binding_stack_layouts,
         );
 
-        let mut pass_arguments = vec![];
-
         let type_layout = {
             let Some(first) = arguments.next()
             else {
                 return Ok((vec![], vec![]));
             };
 
-            let argument_type = &self.context.source.types[first.ty];
+            let argument_type = Type::from_naga(&self.context.source, first.ty)?;
             let mut type_layout = self.context.layouter[first.ty];
             visitor.visit_function_argument(first, 0);
-            pass_arguments.push(PassBy::new(&self.context, &argument_type.inner, 0)?);
+            argument_values.push((argument_type, 0));
 
             for argument in arguments {
-                let argument_type = &self.context.source.types[argument.ty];
+                let argument_type = Type::from_naga(&self.context.source, argument.ty)?;
                 let argument_type_layout = &self.context.layouter[argument.ty];
 
                 let offset = type_layout.alignment.round_up(type_layout.size);
@@ -348,7 +347,7 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
                 type_layout.size += len;
 
                 visitor.visit_function_argument(argument, offset);
-                pass_arguments.push(PassBy::new(&self.context, &argument_type.inner, offset)?);
+                argument_values.push((argument_type, offset));
             }
 
             type_layout
@@ -356,8 +355,8 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
 
         let stack_slot = self
             .function_builder
-            .create_sized_stack_slot(StackSlotData {
-                kind: StackSlotKind::ExplicitSlot,
+            .create_sized_stack_slot(ir::StackSlotData {
+                kind: ir::StackSlotKind::ExplicitSlot,
                 size: type_layout.size,
                 align_shift: alignment_log2(type_layout.alignment),
                 key: None,
@@ -388,27 +387,18 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
         self.function_builder.switch_to_block(continue_block);
         self.function_builder.seal_block(continue_block);
 
-        let argument_values = pass_arguments
+        let argument_values = argument_values
             .into_iter()
-            .map(|pass| {
-                match pass {
-                    PassBy::Reference { offset } => {
-                        self.function_builder.ins().stack_addr(
-                            self.context.pointer_type(),
-                            stack_slot,
-                            i32::try_from(offset).expect("stack offset overflow"),
-                        )
-                    }
-                    PassBy::Value { offset, ty } => {
-                        self.function_builder.ins().stack_load(
-                            ty,
-                            stack_slot,
-                            i32::try_from(offset).expect("stack offset overflow"),
-                        )
-                    }
-                }
+            .map(|(ty, offset)| {
+                Value::load(
+                    self.context,
+                    &mut self.function_builder,
+                    ty,
+                    StackLocation::from(stack_slot)
+                        .with_offset(offset.try_into().expect("stack offset overflow")),
+                )
             })
-            .collect();
+            .collect::<Result<Vec<Value>, Error>>()?;
 
         Ok((argument_values, collect_binding_stack_layouts.layouts))
     }
@@ -419,7 +409,6 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
         value: Value,
     ) -> Result<Vec<BindingStackLayout>, Error> {
         let type_layout = self.context.layouter[result.ty];
-        let result_type = &self.context.source.types[result.ty];
 
         let mut collect_binding_stack_layouts = CollectBindingStackLayouts {
             layouter: &self.context.layouter,
@@ -430,12 +419,11 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
             &mut collect_binding_stack_layouts,
         );
         visitor.visit_function_result(result, 0);
-        let pass_result = PassBy::new(&self.context, &result_type.inner, 0)?;
 
         let stack_slot = self
             .function_builder
-            .create_sized_stack_slot(StackSlotData {
-                kind: StackSlotKind::ExplicitSlot,
+            .create_sized_stack_slot(ir::StackSlotData {
+                kind: ir::StackSlotKind::ExplicitSlot,
                 size: type_layout.size,
                 align_shift: alignment_log2(type_layout.alignment),
                 key: None,
@@ -446,16 +434,11 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
             .ins()
             .iconst(self.context.pointer_type(), i64::from(type_layout.size));
 
-        match pass_result {
-            PassBy::Reference { offset: _ } => {}
-            PassBy::Value { offset, ty: _ } => {
-                self.function_builder.ins().stack_store(
-                    value,
-                    stack_slot,
-                    i32::try_from(offset).expect("stack offset overflow"),
-                );
-            }
-        }
+        value.store(
+            self.context,
+            &mut self.function_builder,
+            StackLocation::from(stack_slot),
+        )?;
 
         let stack_slot_pointer =
             self.function_builder
@@ -478,40 +461,5 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
         self.function_builder.seal_block(continue_block);
 
         Ok(collect_binding_stack_layouts.layouts)
-    }
-}
-
-#[derive(Debug)]
-enum PassBy {
-    Reference { offset: u32 },
-    Value { offset: u32, ty: Type },
-}
-
-impl PassBy {
-    pub fn new(context: &Context, ty: &naga::TypeInner, offset: u32) -> Result<Self, Error> {
-        let pass_by = match ty {
-            naga::TypeInner::Scalar(scalar) => {
-                let ty = context.scalar_type(*scalar)?;
-                PassBy::Value { offset, ty }
-            }
-            naga::TypeInner::Vector { size, scalar } => {
-                let ty = context.vector_type(*scalar, *size)?;
-                PassBy::Value { offset, ty }
-            }
-            naga::TypeInner::Matrix {
-                columns,
-                rows,
-                scalar,
-            } => {
-                let ty = context.matrix_type(*scalar, *columns, *rows)?;
-                PassBy::Value { offset, ty }
-            }
-            naga::TypeInner::Struct {
-                members: _,
-                span: _,
-            } => PassBy::Reference { offset },
-            _ => panic!("Invalid binding argument/result type: {ty:?}"),
-        };
-        Ok(pass_by)
     }
 }

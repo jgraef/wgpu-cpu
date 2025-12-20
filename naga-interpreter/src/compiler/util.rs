@@ -1,25 +1,8 @@
-use std::convert::Infallible;
-
-use cranelift_codegen::ir::immediates::{
-    Ieee16,
-    V128Imm,
-};
+use cranelift_codegen::ir::immediates::Ieee16;
 use half::f16;
 
 pub fn ieee16_from_f16(x: f16) -> Ieee16 {
     Ieee16::with_bits(x.to_bits())
-}
-
-pub fn make_transpose_shuffle_mask(columns: u8, rows: u8) -> V128Imm {
-    let mut mask = [0; 16];
-
-    let lanes = MatrixLanes::new(columns, rows);
-
-    lanes.for_each(|lane, row, column| {
-        mask[usize::from(lane)] = lanes.lane(row, column);
-    });
-
-    V128Imm(mask)
 }
 
 pub(super) fn alignment_log2(alignment: naga::proc::Alignment) -> u8 {
@@ -39,7 +22,7 @@ pub(super) fn alignment_log2(alignment: naga::proc::Alignment) -> u8 {
         .try_into()
         .unwrap()
 }
-
+/*
 #[derive(Debug)]
 pub struct MatrixLanes {
     columns: u8,
@@ -99,13 +82,4 @@ impl MatrixLanes {
         u32::from(self.stride) * u32::from(column) * u32::from(scalar_width)
     }
 }
-
-pub fn lanes_for_vector_size(size: impl Into<u8>) -> u32 {
-    let size = size.into();
-    match size {
-        2 => 2,
-        3 => 4,
-        4 => 4,
-        _ => panic!("Invalid vector size: {size}"),
-    }
-}
+ */

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arrayvec = "0.7.6"
 bytemuck = "1.24.0"
 cranelift-codegen = { version = "0.126.1", optional = true }
 cranelift-frontend = { version = "0.126.1", optional = true }
@@ -11,6 +12,7 @@ cranelift-jit = { version = "0.126.1", optional = true }
 cranelift-module = { version = "0.126.1", optional = true }
 cranelift-native = { version = "0.126.1", optional = true }
 derive_more = { version = "2.1.0", features = ["debug"] }
+either = "1.15.0"
 half = { version = "2.7.1", features = ["bytemuck"] }
 memoffset = "0.9.1"
 naga = "27.0.0"

@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use std::{
+    convert::Infallible,
     fmt::Debug,
+    hash::Hash,
     marker::PhantomData,
     ops::{
         Index,
@@ -13,6 +15,7 @@ use naga::{
     Arena,
     Handle,
     Range,
+    UniqueArena,
 };
 
 #[derive(derive_more::Debug)]
@@ -23,18 +26,56 @@ pub struct CoArena<K, V> {
 }
 
 impl<K, V> CoArena<K, V> {
-    pub fn from_arena(arena: &Arena<K>, mut map: impl FnMut(Handle<K>, &K) -> V) -> Self {
-        Self {
+    fn try_from_arena_iter<'a, E>(
+        arena: impl Iterator<Item = (Handle<K>, &'a K)>,
+        mut map: impl FnMut(Handle<K>, &'a K) -> Result<V, E>,
+    ) -> Result<Self, E>
+    where
+        K: 'a,
+    {
+        Ok(Self {
             items: arena
-                .iter()
                 .enumerate()
                 .map(|(i, (handle, value))| {
                     assert_eq!(i, handle.index());
                     map(handle, value)
                 })
-                .collect(),
+                .collect::<Result<_, E>>()?,
             _phantom: PhantomData,
-        }
+        })
+    }
+
+    pub fn from_arena<'a>(arena: &'a Arena<K>, mut map: impl FnMut(Handle<K>, &'a K) -> V) -> Self {
+        Self::try_from_arena_iter::<Infallible>(arena.iter(), |h, k| Ok(map(h, k)))
+            .unwrap_or_else(|e| match e {})
+    }
+
+    pub fn from_unique_arena<'a>(
+        arena: &'a UniqueArena<K>,
+        mut map: impl FnMut(Handle<K>, &'a K) -> V,
+    ) -> Self
+    where
+        K: Eq + Hash,
+    {
+        Self::try_from_arena_iter::<Infallible>(arena.iter(), |h, k| Ok(map(h, k)))
+            .unwrap_or_else(|e| match e {})
+    }
+
+    pub fn try_from_arena<'a, E>(
+        arena: &'a Arena<K>,
+        map: impl FnMut(Handle<K>, &'a K) -> Result<V, E>,
+    ) -> Result<Self, E> {
+        Self::try_from_arena_iter(arena.iter(), map)
+    }
+
+    pub fn try_from_unique_arena<'a, E>(
+        arena: &'a UniqueArena<K>,
+        map: impl FnMut(Handle<K>, &'a K) -> Result<V, E>,
+    ) -> Result<Self, E>
+    where
+        K: Eq + Hash,
+    {
+        Self::try_from_arena_iter(arena.iter(), map)
     }
 }
 

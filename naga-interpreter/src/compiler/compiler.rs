@@ -1,7 +1,10 @@
-use cranelift_codegen::ir::{
-    AbiParam,
-    InstBuilder,
-    types,
+use cranelift_codegen::{
+    ir::{
+        self,
+        AbiParam,
+        InstBuilder,
+    },
+    isa,
 };
 use cranelift_frontend::{
     FunctionBuilder,
@@ -17,19 +20,47 @@ use crate::{
     compiler::{
         Error,
         bindings::ShimBuilder,
-        context::Context,
         function::{
             FunctionCompiler,
             FunctionName,
         },
         module::CompiledEntryPoint,
+        simd::SimdContext,
+        types::Type,
+        value::{
+            AsIrValues,
+            FromIrValues,
+            Value,
+        },
     },
     entry_point::EntryPoints,
-    util::typifier_from_function,
+    util::CoArena,
 };
 
 #[derive(derive_more::Debug)]
-pub struct CodegenState {
+pub struct Context<'source> {
+    pub source: &'source naga::Module,
+    #[allow(unused)]
+    pub info: &'source naga::valid::ModuleInfo,
+    pub layouter: naga::proc::Layouter,
+    #[debug(skip)]
+    pub target_config: isa::TargetFrontendConfig,
+    pub simd_context: SimdContext,
+    pub types: CoArena<naga::Type, Type>,
+}
+
+impl<'source> Context<'source> {
+    pub fn calling_convention(&self) -> isa::CallConv {
+        self.target_config.default_call_conv
+    }
+
+    pub fn pointer_type(&self) -> ir::Type {
+        self.target_config.pointer_type()
+    }
+}
+
+#[derive(derive_more::Debug)]
+pub struct State {
     #[debug(skip)]
     pub(super) fb_context: FunctionBuilderContext,
 
@@ -39,7 +70,7 @@ pub struct CodegenState {
     next_anonymous_function_id: usize,
 }
 
-impl CodegenState {
+impl State {
     pub fn anonymous_function_name(&mut self) -> FunctionName {
         let id = self.next_anonymous_function_id;
         self.next_anonymous_function_id += 1;
@@ -50,7 +81,7 @@ impl CodegenState {
 #[derive(derive_more::Debug)]
 pub struct Compiler<'source, Output> {
     context: Context<'source>,
-    state: CodegenState,
+    state: State,
 
     #[debug(skip)]
     output: Output,
@@ -72,14 +103,15 @@ where
         let target_config = output.target_config();
 
         let isa = output.isa();
-        println!("target: {}", isa.triple());
-        println!(
-            "dynamic_vector_bytes i8: {}, i32: {}, f16: {}, f32: {}",
-            isa.dynamic_vector_bytes(types::I8),
-            isa.dynamic_vector_bytes(types::I32),
-            isa.dynamic_vector_bytes(types::F16),
-            isa.dynamic_vector_bytes(types::F32)
-        );
+        tracing::debug!(target = %isa.triple());
+
+        let vector_registers = SimdContext::new(isa);
+        dbg!(vector_registers);
+        tracing::debug!(?vector_registers);
+
+        let types = CoArena::try_from_unique_arena(&source.types, |handle, _ty| {
+            Type::from_naga(&source, handle)
+        })?;
 
         Ok(Self {
             context: Context {
@@ -87,8 +119,10 @@ where
                 info,
                 layouter,
                 target_config,
+                simd_context: vector_registers,
+                types,
             },
-            state: CodegenState {
+            state: State {
                 fb_context: FunctionBuilderContext::new(),
                 cl_context,
                 next_anonymous_function_id: 1,
@@ -161,31 +195,29 @@ where
             shim_data,
             panic_block,
         );
+
         let (arguments, input_layout) =
             shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
 
-        let output = {
-            let inst = shim_builder
-                .function_builder
-                .ins()
-                .call(main_function_ref, &arguments);
-            let results = shim_builder.function_builder.inst_results(inst);
-            assert!(results.len() <= 1);
-            results.get(0).copied()
-        };
+        let return_type = entry_point
+            .function
+            .result
+            .as_ref()
+            .map(|function_result| Type::from_naga(&self.context.source, function_result.ty))
+            .transpose()?;
+
+        let return_value = shim_builder.function_builder.call_(
+            main_function_ref,
+            arguments,
+            return_type,
+            &self.context,
+        );
 
         let output_layout = entry_point
             .function
             .result
             .as_ref()
-            .map(|result| {
-                shim_builder.compile_result_shim(
-                    result,
-                    output.expect(
-                        "compiled entry point doesn't return anything, but in naga IR it does.",
-                    ),
-                )
-            })
+            .map(|result| shim_builder.compile_result_shim(result, return_value.unwrap()))
             .transpose()?
             .unwrap_or_default();
 
@@ -222,13 +254,12 @@ where
     pub fn compile_function(&mut self, function: &'source naga::Function) -> Result<FuncId, Error> {
         self.output.clear_context(&mut self.state.cl_context);
 
-        let typifier = typifier_from_function(&self.context.source, function);
-
         let mut function_compiler =
-            FunctionCompiler::new(&self.context, &mut self.state, &typifier, function)?;
+            FunctionCompiler::new(&self.context, &mut self.state, function)?;
 
         let function_id = function_compiler.declare(&mut self.output)?;
 
+        function_compiler.initialize_local_variables()?;
         function_compiler.compile_block(&function.body)?;
 
         function_compiler.finish();
@@ -237,5 +268,40 @@ where
             .define_function(function_id, &mut self.state.cl_context)?;
 
         Ok(function_id)
+    }
+}
+
+pub trait FuncBuilderExt {
+    fn call_(
+        &mut self,
+        func_ref: ir::FuncRef,
+        arguments: impl IntoIterator<Item = Value>,
+        return_type: Option<Type>,
+        context: &Context,
+    ) -> Option<Value>;
+}
+
+impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
+    fn call_(
+        &mut self,
+        func_ref: ir::FuncRef,
+        arguments: impl IntoIterator<Item = Value>,
+        return_type: Option<Type>,
+        context: &Context,
+    ) -> Option<Value> {
+        let mut values = vec![];
+        for argument in arguments {
+            values.extend(argument.as_ir_values());
+        }
+
+        let inst = self.ins().call(func_ref, &values);
+
+        return_type.map(|return_type| {
+            Value::from_ir_values_iter(
+                context,
+                return_type,
+                self.inst_results(inst).iter().copied(),
+            )
+        })
     }
 }
