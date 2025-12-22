@@ -37,13 +37,13 @@ use crate::{
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
-pub struct ShimVtable {
+pub struct RuntimeVtable {
     // the size of the stack slot is not strictly needed, but let's keep it somewhat safe :D
     pub copy_inputs_to: unsafe fn(*mut c_void, *mut u8, usize) -> c_int,
     pub copy_outputs_from: unsafe fn(*mut c_void, *const u8, usize) -> c_int,
 }
 
-impl ShimVtable {
+impl RuntimeVtable {
     pub const fn new<I, O>() -> Self
     where
         I: ShaderInput,
@@ -54,10 +54,10 @@ impl ShimVtable {
             I: ShaderInput,
         {
             let data = unsafe {
-                // SAFETY: It is unsafe to pass anything but a pointer to ShimData<I, O> to this
-                // function. The lifetime of the ShimData is ensured by the code calling into
-                // the generated code.
-                &mut *(data as *mut ShimData<I, O>)
+                // SAFETY: It is unsafe to pass anything but a pointer to RuntimeData<I, O> to
+                // this function. The lifetime of the RuntimeData is ensured by
+                // the code calling into the generated code.
+                &mut *(data as *mut RuntimeData<I, O>)
             };
 
             let target = std::ptr::slice_from_raw_parts_mut(target, len);
@@ -67,6 +67,8 @@ impl ShimVtable {
                 &mut *target
             };
 
+            // any panics in the bindings implementations will be catched here and
+            // propagated manually to where the entry point was called
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 data.copy_inputs_to(target);
             }));
@@ -80,10 +82,10 @@ impl ShimVtable {
             O: ShaderOutput,
         {
             let data = unsafe {
-                // SAFETY: It is unsafe to pass anything but a pointer to ShimData<I, O> to this
-                // function. The lifetime of the ShimData is ensured by the code calling into
-                // the generated code.
-                &mut *(data as *mut ShimData<I, O>)
+                // SAFETY: It is unsafe to pass anything but a pointer to RuntimeData<I, O> to
+                // this function. The lifetime of the RuntimeData is ensured by
+                // the code calling into the generated code.
+                &mut *(data as *mut RuntimeData<I, O>)
             };
 
             let source = std::ptr::slice_from_raw_parts(source, len);
@@ -101,7 +103,7 @@ impl ShimVtable {
             data.panic.is_ok() as i32
         }
 
-        ShimVtable {
+        RuntimeVtable {
             copy_inputs_to: copy_inputs_to::<I, O>,
             copy_outputs_from: copy_outputs_from::<I, O>,
         }
@@ -109,12 +111,12 @@ impl ShimVtable {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ShimVtableSignatures {
+pub struct RuntimeMethodSignatures {
     pub copy_inputs_to: ir::SigRef,
     pub copy_outputs_from: ir::SigRef,
 }
 
-impl ShimVtableSignatures {
+impl RuntimeMethodSignatures {
     pub fn new(function_builder: &mut FunctionBuilder, context: &Context) -> Self {
         let data = ir::AbiParam::new(context.pointer_type());
 
@@ -146,7 +148,7 @@ impl ShimVtableSignatures {
 }
 
 #[derive(Debug)]
-pub struct ShimData<'layout, I, O> {
+pub struct RuntimeData<'layout, I, O> {
     pub input: I,
     pub input_layout: &'layout [BindingStackLayout],
     pub output: O,
@@ -154,7 +156,7 @@ pub struct ShimData<'layout, I, O> {
     pub panic: Result<(), Box<dyn Any + Send + 'static>>,
 }
 
-impl<'layout, I, O> ShimData<'layout, I, O>
+impl<'layout, I, O> RuntimeData<'layout, I, O>
 where
     I: ShaderInput,
 {
@@ -169,7 +171,7 @@ where
     }
 }
 
-impl<'layout, I, O> ShimData<'layout, I, O>
+impl<'layout, I, O> RuntimeData<'layout, I, O>
 where
     O: ShaderOutput,
 {
@@ -223,89 +225,92 @@ impl<'source> VisitIoBindings for CollectBindingStackLayouts<'source> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ShimVtableCallCompiler {
-    pub shim_vtable: ir::Value,
-    pub shim_data: ir::Value,
-    pub shim_vtable_signatures: ShimVtableSignatures,
-    pub function_pointer_type: ir::Type,
+pub struct RuntimeContextValue {
+    pub vtable_pointer: ir::Value,
+    pub data_pointer: ir::Value,
+    pub method_signatures: RuntimeMethodSignatures,
 }
 
-impl ShimVtableCallCompiler {
+impl RuntimeContextValue {
     pub fn new(
         context: &Context,
         function_builder: &mut FunctionBuilder,
-        shim_vtable: ir::Value,
-        shim_data: ir::Value,
+        vtable_pointer: ir::Value,
+        data_pointer: ir::Value,
     ) -> Self {
-        let shim_vtable_signatures = ShimVtableSignatures::new(function_builder, context);
+        let method_signatures = RuntimeMethodSignatures::new(function_builder, context);
         Self {
-            shim_vtable,
-            shim_data,
-            shim_vtable_signatures,
-            function_pointer_type: context.pointer_type(),
+            vtable_pointer,
+            data_pointer,
+            method_signatures,
         }
     }
-    pub fn compile_call(
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeMethod<'a> {
+    pub runtime: &'a RuntimeContextValue,
+    pub vtable_offset: i32,
+    pub signature: ir::SigRef,
+}
+
+impl<'a> RuntimeMethod<'a> {
+    pub fn call(
         &self,
+        context: &Context,
         function_builder: &mut FunctionBuilder,
-        vtable_offset: usize,
-        signature: ir::SigRef,
         arguments: impl IntoIterator<Item = ir::Value>,
     ) -> ir::Value {
-        let vtable_offset =
-            i32::try_from(vtable_offset).expect("shim vtable offset does not fit into an i32");
-
-        let arguments = std::iter::once(self.shim_data)
+        let arguments = std::iter::once(self.runtime.data_pointer)
             .chain(arguments)
             .collect::<Vec<_>>();
 
         let func_ptr = function_builder.ins().load(
-            self.function_pointer_type,
+            context.pointer_type(),
             ir::MemFlags::new(),
-            self.shim_vtable,
-            vtable_offset,
+            self.runtime.vtable_pointer,
+            self.vtable_offset,
         );
         let inst = function_builder
             .ins()
-            .call_indirect(signature, func_ptr, &arguments);
+            .call_indirect(self.signature, func_ptr, &arguments);
         let results = function_builder.inst_results(inst);
         assert_eq!(results.len(), 1);
         results[0]
     }
 }
 
-macro_rules! call_shim_vtable {
-    ($compiler: expr, $function_builder:expr, $func:ident($($arg:expr),*)) => {
-        {
-            let vtable_offset = memoffset::offset_of!(ShimVtable, $func);
-            let signature = $compiler.shim_vtable_signatures.$func;
-            $compiler.compile_call($function_builder, vtable_offset, signature, [$($arg),*])
+macro_rules! runtime_method {
+    ($runtime:expr, $func:ident) => {{
+        let vtable_offset = memoffset::offset_of!(RuntimeVtable, $func);
+        let vtable_offset = i32::try_from(vtable_offset).expect("runtime vtable offset overflow");
+        let signature = $runtime.method_signatures.$func;
+        RuntimeMethod {
+            runtime: &$runtime,
+            vtable_offset,
+            signature,
         }
-    };
+    }};
 }
 
-pub struct ShimBuilder<'source, 'compiler> {
-    context: &'compiler Context<'source>,
+pub struct RuntimeEntryPointBuilder<'source, 'compiler> {
+    pub context: &'compiler Context<'source>,
     pub function_builder: FunctionBuilder<'compiler>,
-    shim_vtable_caller: ShimVtableCallCompiler,
-    panic_block: ir::Block,
+    pub runtime: RuntimeContextValue,
+    pub panic_block: ir::Block,
 }
 
-impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
+impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
     pub fn new(
         context: &'compiler Context<'source>,
-        mut function_builder: FunctionBuilder<'compiler>,
-        shim_vtable: ir::Value,
-        shim_data: ir::Value,
+        function_builder: FunctionBuilder<'compiler>,
+        runtime: RuntimeContextValue,
         panic_block: ir::Block,
     ) -> Self {
-        let shim_vtable_caller =
-            ShimVtableCallCompiler::new(context, &mut function_builder, shim_vtable, shim_data);
-
         Self {
             context,
             function_builder,
-            shim_vtable_caller,
+            runtime,
             panic_block,
         }
     }
@@ -372,10 +377,10 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
                 .ins()
                 .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
-        let result = call_shim_vtable!(
-            self.shim_vtable_caller,
+        let result = runtime_method!(self.runtime, copy_inputs_to).call(
+            self.context,
             &mut self.function_builder,
-            copy_inputs_to(stack_slot_pointer, len)
+            [stack_slot_pointer, len],
         );
 
         // check result (error?)
@@ -445,10 +450,10 @@ impl<'source, 'compiler> ShimBuilder<'source, 'compiler> {
                 .ins()
                 .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
-        let result = call_shim_vtable!(
-            self.shim_vtable_caller,
+        let result = runtime_method!(self.runtime, copy_outputs_from).call(
+            self.context,
             &mut self.function_builder,
-            copy_outputs_from(stack_slot_pointer, len)
+            [stack_slot_pointer, len],
         );
 
         // check result (error?)

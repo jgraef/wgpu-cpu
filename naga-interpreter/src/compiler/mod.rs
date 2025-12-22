@@ -1,8 +1,8 @@
-pub mod bindings;
 pub mod compiler;
 pub mod expression;
 pub mod function;
 pub mod module;
+pub mod runtime;
 pub mod simd;
 #[cfg(test)]
 mod tests;
@@ -73,6 +73,7 @@ pub fn compile_jit(
     let mut jit_module = JITModule::new(jit_builder);
 
     let mut compiler = Compiler::new(module, info, &mut jit_module)?;
+    compiler.declare_all_functions()?;
     let entry_points = compiler.compile_all_entry_points()?;
 
     jit_module.finalize_definitions()?;

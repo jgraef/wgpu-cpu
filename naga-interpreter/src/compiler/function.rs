@@ -8,15 +8,10 @@ use std::{
 
 use cranelift_codegen::ir::{
     self,
-    AbiParam,
     InstBuilder as _,
 };
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::{
-    FuncId,
-    Linkage,
-    Module,
-};
+use cranelift_module::FuncId;
 
 use crate::{
     compiler::{
@@ -54,7 +49,6 @@ use crate::{
         },
         simd::SimdImmediates,
         types::{
-            AsIrTypes,
             CastTo,
             InvalidType,
             MatrixType,
@@ -86,10 +80,9 @@ use crate::{
 pub struct FunctionContext<'source, 'compiler> {
     pub compiler_context: &'compiler Context<'source>,
     pub function: &'source naga::Function,
-    pub function_name: String,
+    pub declaration: &'compiler FunctionDeclaration,
     pub typifier: naga::front::Typifier,
     pub entry_block: ir::Block,
-    pub function_arguments: Vec<FunctionArgument>,
     pub local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
     pub simd_immediates: SimdImmediates,
 }
@@ -98,9 +91,8 @@ impl<'source, 'compiler> FunctionContext<'source, 'compiler> {
     pub fn new(
         compiler_context: &'compiler Context<'source>,
         function: &'source naga::Function,
-        function_name: String,
+        declaration: &'compiler FunctionDeclaration,
         entry_block: ir::Block,
-        function_arguments: Vec<FunctionArgument>,
         local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
         simd_immediates: SimdImmediates,
     ) -> Self {
@@ -109,10 +101,9 @@ impl<'source, 'compiler> FunctionContext<'source, 'compiler> {
         Self {
             compiler_context,
             function,
-            function_name,
+            declaration,
             typifier,
             entry_block,
-            function_arguments,
             local_variables,
             simd_immediates,
         }
@@ -165,6 +156,14 @@ pub struct LocalVariable<'source> {
     pub stack_slot: ir::StackSlot,
 }
 
+#[derive(Clone, Debug)]
+pub struct FunctionDeclaration {
+    pub name: FunctionName,
+    pub function_id: FuncId,
+    pub signature: ir::Signature,
+    pub arguments: Vec<FunctionArgument>,
+}
+
 #[derive(derive_more::Debug)]
 pub struct FunctionCompiler<'source, 'compiler> {
     pub context: FunctionContext<'source, 'compiler>,
@@ -180,40 +179,11 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         compiler_context: &'compiler Context<'source>,
         state: &'compiler mut State,
         function: &'source naga::Function,
+        declaration: &'compiler FunctionDeclaration,
     ) -> Result<Self, Error> {
-        let function_name = function
-            .name
-            .clone()
-            .map_or_else(|| state.anonymous_function_name(), FunctionName::Named);
-
         let simd_immediates = compiler_context.simd_context.simd_immediates(state);
 
-        // function result
-        if let Some(result) = &function.result {
-            state.cl_context.func.signature.returns.extend(
-                compiler_context.types[result.ty]
-                    .as_ir_types(compiler_context)
-                    .map(AbiParam::new),
-            );
-        }
-
-        // function arguments
-        let mut function_arguments = Vec::with_capacity(function.arguments.len());
-        assert!(state.cl_context.func.signature.params.is_empty());
-        for argument in &function.arguments {
-            let start = state.cl_context.func.signature.params.len();
-
-            state.cl_context.func.signature.params.extend(
-                compiler_context.types[argument.ty]
-                    .as_ir_types(compiler_context)
-                    .map(AbiParam::new),
-            );
-
-            let end = state.cl_context.func.signature.params.len();
-            function_arguments.push(FunctionArgument {
-                block_inputs: start..end,
-            })
-        }
+        state.cl_context.func.signature = declaration.signature.clone();
 
         let mut function_builder =
             FunctionBuilder::new(&mut state.cl_context.func, &mut state.fb_context);
@@ -250,27 +220,14 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             context: FunctionContext::new(
                 compiler_context,
                 function,
-                function_name.to_string(),
+                declaration,
                 entry_block,
-                function_arguments,
                 local_variables,
                 simd_immediates,
             ),
             function_builder,
             emitted_expression: Default::default(),
         })
-    }
-
-    pub fn declare<M>(&self, module: &mut M) -> Result<FuncId, Error>
-    where
-        M: Module,
-    {
-        let function_id = module.declare_function(
-            &self.context.function_name,
-            Linkage::Local,
-            &self.function_builder.func.signature,
-        )?;
-        Ok(function_id)
     }
 
     pub fn initialize_local_variables(&mut self) -> Result<(), Error> {
@@ -537,7 +494,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         index: u32,
         output_type: Type,
     ) -> Result<Value, Error> {
-        let argument = &self.context.function_arguments[index as usize];
+        let argument = &self.context.declaration.arguments[index as usize];
         let block_params = self.function_builder.block_params(self.context.entry_block);
         let block_params = block_params[argument.block_inputs.clone()].iter().copied();
 

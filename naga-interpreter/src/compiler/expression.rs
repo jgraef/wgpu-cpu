@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 
-use arrayvec::ArrayVec;
 use cranelift_codegen::ir::{
     self,
     InstBuilder as _,
@@ -28,7 +27,6 @@ use crate::compiler::{
     value::{
         ArrayValue,
         AsIrValue,
-        FromIrValues,
         MatrixValue,
         ScalarValue,
         StructValue,
@@ -798,6 +796,7 @@ impl CompileCompose<ScalarValue> for VectorValue {
     }
 }
 
+#[allow(unused_variables)]
 impl CompileCompose<ScalarValue> for MatrixValue {
     fn compile_compose(
         ty: MatrixType,
@@ -808,6 +807,7 @@ impl CompileCompose<ScalarValue> for MatrixValue {
     }
 }
 
+#[allow(unused_variables)]
 impl CompileCompose<VectorValue> for MatrixValue {
     fn compile_compose(
         ty: MatrixType,

@@ -8,10 +8,10 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
-    compiler::bindings::{
+    compiler::runtime::{
         BindingStackLayout,
-        ShimData,
-        ShimVtable,
+        RuntimeData,
+        RuntimeVtable,
     },
     entry_point::{
         EntryPointIndex,
@@ -137,15 +137,15 @@ impl<'a> EntryPoint<'a> {
             // SAFETY: This function signature matches what our compiled code expects. This
             // still returns an unsafe function, because it's the responsibility of the
             // caller to ensure the vtable and data matches
-            std::mem::transmute::<_, unsafe fn(&ShimVtable, &mut ShimData<I, O>)>(
+            std::mem::transmute::<_, unsafe fn(&RuntimeVtable, &mut RuntimeData<I, O>)>(
                 self.function_pointer,
             )
         };
 
-        let shim_vtable = ShimVtable::new::<I, O>();
+        let runtime_vtable = RuntimeVtable::new::<I, O>();
 
         move |input: I, output: O| {
-            let mut shim_data = ShimData {
+            let mut runtime_data = RuntimeData {
                 input,
                 input_layout: &self.inner.data.input_layout,
                 output,
@@ -156,10 +156,13 @@ impl<'a> EntryPoint<'a> {
             unsafe {
                 // SAFETY: We just created the vtable and data with matching types. Thus it's
                 // safe to call the function with these arguments
-                function(&shim_vtable, &mut shim_data)
+
+                // note: the order of these arguments must be synchronized with the compiled
+                // code, which is generated in [`Compiler::compile_entry_point`].
+                function(&runtime_vtable, &mut runtime_data)
             }
 
-            if let Err(panic) = shim_data.panic {
+            if let Err(panic) = runtime_data.panic {
                 std::panic::resume_unwind(panic);
             }
         }

@@ -11,7 +11,6 @@ use cranelift_frontend::{
     FunctionBuilderContext,
 };
 use cranelift_module::{
-    FuncId,
     Linkage,
     Module,
 };
@@ -19,14 +18,22 @@ use cranelift_module::{
 use crate::{
     compiler::{
         Error,
-        bindings::ShimBuilder,
         function::{
+            FunctionArgument,
             FunctionCompiler,
+            FunctionDeclaration,
             FunctionName,
         },
         module::CompiledEntryPoint,
+        runtime::{
+            RuntimeContextValue,
+            RuntimeEntryPointBuilder,
+        },
         simd::SimdContext,
-        types::Type,
+        types::{
+            AsIrTypes,
+            Type,
+        },
         value::{
             AsIrValues,
             FromIrValues,
@@ -34,7 +41,10 @@ use crate::{
         },
     },
     entry_point::EntryPoints,
-    util::CoArena,
+    util::{
+        CoArena,
+        SparseCoArena,
+    },
 };
 
 #[derive(derive_more::Debug)]
@@ -47,6 +57,7 @@ pub struct Context<'source> {
     pub target_config: isa::TargetFrontendConfig,
     pub simd_context: SimdContext,
     pub types: CoArena<naga::Type, Type>,
+    pub function_declarations: SparseCoArena<naga::Function, FunctionDeclaration>,
 }
 
 impl<'source> Context<'source> {
@@ -120,6 +131,7 @@ where
                 target_config,
                 simd_context: vector_registers,
                 types,
+                function_declarations: Default::default(),
             },
             state: State {
                 fb_context: FunctionBuilderContext::new(),
@@ -151,14 +163,16 @@ where
         entry_point: &'source naga::EntryPoint,
     ) -> Result<CompiledEntryPoint, Error> {
         // compile entry point function
-        let main_function_id = self.compile_function(&entry_point.function)?;
+        let entry_point_declaration = self.declare_function(&entry_point.function)?;
+        self.compile_function(&entry_point.function, &entry_point_declaration)?;
 
         // build shim
         self.output.clear_context(&mut self.state.cl_context);
 
-        let main_function_ref = self
-            .output
-            .declare_func_in_func(main_function_id, &mut self.state.cl_context.func);
+        let main_function_ref = self.output.declare_func_in_func(
+            entry_point_declaration.function_id,
+            &mut self.state.cl_context.func,
+        );
 
         self.state
             .cl_context
@@ -182,18 +196,24 @@ where
         function_builder.append_block_params_for_function_params(entry_block);
         function_builder.switch_to_block(entry_block);
 
-        let shim_vtable = function_builder.block_params(entry_block)[0];
-        let shim_data = function_builder.block_params(entry_block)[1];
+        let runtime = {
+            let block_params = function_builder.block_params(entry_block);
+            // note: the order of these arguments must be synchronized with the call to the
+            // compiled code in `module.rs`.
+            let vtable_pointer = block_params[0];
+            let data_pointer = block_params[1];
+            RuntimeContextValue::new(
+                &self.context,
+                &mut function_builder,
+                vtable_pointer,
+                data_pointer,
+            )
+        };
 
         function_builder.seal_block(entry_block);
 
-        let mut shim_builder = ShimBuilder::new(
-            &self.context,
-            function_builder,
-            shim_vtable,
-            shim_data,
-            panic_block,
-        );
+        let mut shim_builder =
+            RuntimeEntryPointBuilder::new(&self.context, function_builder, runtime, panic_block);
 
         let (arguments, input_layout) =
             shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
@@ -225,7 +245,9 @@ where
         // return from the block we're in
         function_builder.ins().return_(&[]);
 
-        // the panic block will also just return
+        // the panic block will just return
+        // we don't need to return any error code since errors are written into a field
+        // in the runtime data.
         function_builder.switch_to_block(panic_block);
         function_builder.ins().return_(&[]);
         function_builder.seal_block(panic_block);
@@ -250,13 +272,15 @@ where
         })
     }
 
-    pub fn compile_function(&mut self, function: &'source naga::Function) -> Result<FuncId, Error> {
+    pub fn compile_function(
+        &mut self,
+        function: &'source naga::Function,
+        declaration: &FunctionDeclaration,
+    ) -> Result<(), Error> {
         self.output.clear_context(&mut self.state.cl_context);
 
         let mut function_compiler =
-            FunctionCompiler::new(&self.context, &mut self.state, function)?;
-
-        let function_id = function_compiler.declare(&mut self.output)?;
+            FunctionCompiler::new(&self.context, &mut self.state, function, declaration)?;
 
         function_compiler.initialize_local_variables()?;
         function_compiler.compile_block(&function.body)?;
@@ -264,9 +288,66 @@ where
         function_compiler.finish();
 
         self.output
-            .define_function(function_id, &mut self.state.cl_context)?;
+            .define_function(declaration.function_id, &mut self.state.cl_context)?;
 
-        Ok(function_id)
+        Ok(())
+    }
+
+    pub fn declare_function(
+        &mut self,
+        function: &'source naga::Function,
+    ) -> Result<FunctionDeclaration, Error> {
+        let function_name = function
+            .name
+            .clone()
+            .map_or_else(|| self.state.anonymous_function_name(), FunctionName::Named);
+
+        let mut signature = self.output.make_signature();
+
+        // return values
+        if let Some(result) = &function.result {
+            signature.returns.extend(
+                self.context.types[result.ty]
+                    .as_ir_types(&self.context)
+                    .map(AbiParam::new),
+            );
+        }
+
+        // arguments
+        let mut arguments = Vec::with_capacity(function.arguments.len());
+        for argument in &function.arguments {
+            let start = signature.params.len();
+
+            signature.params.extend(
+                self.context.types[argument.ty]
+                    .as_ir_types(&self.context)
+                    .map(AbiParam::new),
+            );
+
+            let end = signature.params.len();
+            arguments.push(FunctionArgument {
+                block_inputs: start..end,
+            })
+        }
+
+        let function_id =
+            self.output
+                .declare_function(&function_name.to_string(), Linkage::Local, &signature)?;
+
+        Ok(FunctionDeclaration {
+            name: function_name,
+            function_id,
+            signature,
+            arguments,
+        })
+    }
+
+    pub fn declare_all_functions(&mut self) -> Result<(), Error> {
+        for (_handle, function) in self.context.source.functions.iter() {
+            self.declare_function(function)?;
+        }
+
+        Ok(())
     }
 }
 
