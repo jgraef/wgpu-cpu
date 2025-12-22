@@ -106,7 +106,6 @@ where
         tracing::debug!(target = %isa.triple());
 
         let vector_registers = SimdContext::new(isa);
-        dbg!(vector_registers);
         tracing::debug!(?vector_registers);
 
         let types = CoArena::try_from_unique_arena(&source.types, |handle, _ty| {

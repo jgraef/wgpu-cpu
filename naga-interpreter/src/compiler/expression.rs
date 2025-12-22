@@ -60,6 +60,7 @@ impl CompileAs for ScalarValue {
 
         let input_type = self.ty;
         let output_type = input_type.cast(cast_to);
+
         let value = match (input_type, output_type) {
             (ScalarType::Bool, ScalarType::Bool) => self.value,
             (ScalarType::Bool, ScalarType::Int(_signedness, _int_width)) => {
@@ -231,28 +232,30 @@ pub trait CompileZero<Type>: Sized {
     fn compile_zero(ty: Type, function_compiler: &mut FunctionCompiler) -> Result<Self, Error>;
 }
 
-impl CompileZero<ScalarType> for ir::Value {
-    fn compile_zero(
-        ty: ScalarType,
-        function_compiler: &mut FunctionCompiler,
-    ) -> Result<Self, Error> {
-        let ir_type = ty.ir_type();
-        let output = match ty {
-            ScalarType::Bool | ScalarType::Int(_, _) => {
-                function_compiler.function_builder.ins().iconst(ir_type, 0)
-            }
-            ScalarType::Float(FloatWidth::F16) => {
-                function_compiler
-                    .function_builder
-                    .ins()
-                    .f16const(ieee16_from_f16(f16::ZERO))
-            }
-            ScalarType::Float(FloatWidth::F32) => {
-                function_compiler.function_builder.ins().f32const(0.0)
-            }
+impl CompileZero<ir::Type> for ir::Value {
+    fn compile_zero(ty: ir::Type, function_compiler: &mut FunctionCompiler) -> Result<Self, Error> {
+        let base_ty = ty.lane_of();
+        let mut value = if base_ty.is_int() {
+            function_compiler.function_builder.ins().iconst(base_ty, 0)
+        }
+        else if base_ty == ir::types::F16 {
+            function_compiler
+                .function_builder
+                .ins()
+                .f16const(ieee16_from_f16(f16::ZERO))
+        }
+        else if base_ty == ir::types::F32 {
+            function_compiler.function_builder.ins().f32const(0.0)
+        }
+        else {
+            panic!("Invalid to zero {ty:?}");
         };
 
-        Ok(output)
+        if ty.lane_count() > 1 {
+            value = function_compiler.function_builder.ins().splat(ty, value);
+        }
+
+        Ok(value)
     }
 }
 
@@ -261,9 +264,8 @@ impl CompileZero<ScalarType> for ScalarValue {
         ty: ScalarType,
         function_compiler: &mut FunctionCompiler,
     ) -> Result<Self, Error> {
-        Self::try_from_ir_values_fn(function_compiler.context.compiler_context, ty, |_| {
-            ir::Value::compile_zero(ty, function_compiler)
-        })
+        let value = ir::Value::compile_zero(ty.ir_type(), function_compiler)?;
+        Ok(Self { ty, value })
     }
 }
 
@@ -272,9 +274,18 @@ impl CompileZero<VectorType> for VectorValue {
         ty: VectorType,
         function_compiler: &mut FunctionCompiler,
     ) -> Result<Self, Error> {
-        Self::try_from_ir_values_fn(function_compiler.context.compiler_context, ty, |_| {
-            ir::Value::compile_zero(ty.scalar, function_compiler)
-        })
+        let vectorized = function_compiler
+            .context
+            .compiler_context
+            .simd_context
+            .vector(ty);
+
+        let value = ir::Value::compile_zero(vectorized.ty, function_compiler)?;
+        let values = std::iter::repeat(value)
+            .take(vectorized.count.into())
+            .collect();
+
+        Ok(Self { ty, values })
     }
 }
 
@@ -283,9 +294,32 @@ impl CompileZero<MatrixType> for MatrixValue {
         ty: MatrixType,
         function_compiler: &mut FunctionCompiler,
     ) -> Result<Self, Error> {
-        Self::try_from_ir_values_fn(function_compiler.context.compiler_context, ty, |_| {
-            ir::Value::compile_zero(ty.scalar, function_compiler)
-        })
+        let vectorized = function_compiler
+            .context
+            .compiler_context
+            .simd_context
+            .matrix(ty);
+
+        let value = ir::Value::compile_zero(vectorized.ty, function_compiler)?;
+        let values = std::iter::repeat(value)
+            .take(vectorized.count.into())
+            .collect();
+
+        Ok(Self { ty, values })
+    }
+}
+
+impl CompileZero<Type> for Value {
+    fn compile_zero(ty: Type, function_compiler: &mut FunctionCompiler) -> Result<Self, Error> {
+        let value = match ty {
+            Type::Scalar(ty) => ScalarValue::compile_zero(ty, function_compiler)?.into(),
+            Type::Vector(ty) => VectorValue::compile_zero(ty, function_compiler)?.into(),
+            Type::Matrix(ty) => MatrixValue::compile_zero(ty, function_compiler)?.into(),
+            Type::Struct(_ty) => todo!(),
+            Type::Array(_ty) => todo!(),
+            _ => panic!("Invalid to zero {ty:?}"),
+        };
+        Ok(value)
     }
 }
 
@@ -621,7 +655,7 @@ macro_rules! impl_comparisions {
                         _ => panic!("{} is not valid for {:?}", stringify!($trait), self.ty)
                     };
 
-                    Ok(self.with_ir_value(value))
+                    Ok(Self { ty: ScalarType::Bool, value })
                 }
             }
         )*
@@ -770,7 +804,7 @@ impl CompileCompose<ScalarValue> for MatrixValue {
         components: Vec<ScalarValue>,
         function_compiler: &mut FunctionCompiler,
     ) -> Result<Self, Error> {
-        todo!()
+        todo!("compose matrix from scalars");
     }
 }
 
@@ -780,7 +814,7 @@ impl CompileCompose<VectorValue> for MatrixValue {
         components: Vec<VectorValue>,
         function_compiler: &mut FunctionCompiler,
     ) -> Result<Self, Error> {
-        todo!()
+        todo!("compose matrix from vectors");
     }
 }
 
@@ -790,7 +824,11 @@ impl CompileCompose<Value> for StructValue {
         components: Vec<Value>,
         function_compiler: &mut FunctionCompiler,
     ) -> Result<Self, Error> {
-        todo!()
+        let _ = function_compiler;
+        Ok(Self {
+            ty,
+            members: components,
+        })
     }
 }
 
@@ -800,7 +838,11 @@ impl CompileCompose<Value> for ArrayValue {
         components: Vec<Value>,
         function_compiler: &mut FunctionCompiler,
     ) -> Result<Self, Error> {
-        todo!()
+        let _ = function_compiler;
+        Ok(Self {
+            ty,
+            values: components,
+        })
     }
 }
 

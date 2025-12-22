@@ -321,7 +321,7 @@ pub enum PointerValueInner {
 }
 
 impl PointerValue {
-    pub fn deref(
+    pub fn deref_load(
         &self,
         context: &Context,
         function_builder: &mut FunctionBuilder,
@@ -338,6 +338,24 @@ impl PointerValue {
         };
 
         Ok(value)
+    }
+
+    pub fn deref_store(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        value: &Value,
+    ) -> Result<(), Error> {
+        match self.inner {
+            PointerValueInner::Pointer(pointer) => {
+                value.store(context, function_builder, pointer)?
+            }
+            PointerValueInner::StackLocation(stack_location) => {
+                value.store(context, function_builder, stack_location)?
+            }
+        }
+
+        Ok(())
     }
 
     pub fn from_ir_value(ty: PointerType, value: ir::Value) -> Self {

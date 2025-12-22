@@ -50,6 +50,7 @@ use crate::{
             CompileShl,
             CompileShr,
             CompileSub,
+            CompileZero,
         },
         simd::SimdImmediates,
         types::{
@@ -64,9 +65,11 @@ use crate::{
         },
         util::alignment_log2,
         value::{
+            AsIrValue,
             AsIrValues,
             FromIrValues,
             PointerValue,
+            ScalarValue,
             StackLocation,
             Store,
             Value,
@@ -326,7 +329,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
                 condition,
                 accept,
                 reject,
-            } => todo!(),
+            } => self.compile_if(*condition, accept, reject)?,
             naga::Statement::Switch { selector, cases } => todo!(),
             naga::Statement::Loop {
                 body,
@@ -341,7 +344,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             naga::Statement::Kill => todo!(),
             naga::Statement::ControlBarrier(barrier) => todo!(),
             naga::Statement::MemoryBarrier(barrier) => todo!(),
-            naga::Statement::Store { pointer, value } => todo!(),
+            naga::Statement::Store { pointer, value } => self.compile_store(*pointer, *value)?,
             naga::Statement::ImageStore {
                 image,
                 coordinate,
@@ -407,6 +410,15 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         }
 
         self.function_builder.ins().return_(&return_values);
+
+        // fixme: return ControlFlow to stop compiling this block. this is a bit tricky
+        // because we also return Results for now we'll just switch to a new
+        // block for the rest. this block will not be jumped to, but we still do the
+        // work compiling it.
+        let void_block = self.function_builder.create_block();
+        self.function_builder.seal_block(void_block);
+        self.function_builder.switch_to_block(void_block);
+
         Ok(())
     }
 
@@ -427,10 +439,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
                 naga::Expression::Literal(literal) => self.compile_literal(*literal)?,
                 naga::Expression::Constant(handle) => todo!(),
                 naga::Expression::Override(handle) => todo!(),
-                naga::Expression::ZeroValue(handle) => {
-                    //self.compile_zero(output_type)?
-                    todo!();
-                }
+                naga::Expression::ZeroValue(handle) => self.compile_zero(*handle)?,
                 naga::Expression::Compose { ty, components } => {
                     self.compile_compose(*ty, components)?
                 }
@@ -543,6 +552,33 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Value::compile_literal(literal, self)
     }
 
+    pub fn compile_zero(&mut self, ty: naga::Handle<naga::Type>) -> Result<Value, Error> {
+        let ty = self.context.compiler_context.types[ty];
+        Value::compile_zero(ty, self)
+    }
+
+    pub fn compile_load(
+        &mut self,
+        pointer: naga::Handle<naga::Expression>,
+    ) -> Result<Value, Error> {
+        let pointer: PointerValue = self.compile_expression(pointer)?.try_into()?;
+        pointer.deref_load(self.context.compiler_context, &mut self.function_builder)
+    }
+
+    pub fn compile_store(
+        &mut self,
+        pointer: naga::Handle<naga::Expression>,
+        expression: naga::Handle<naga::Expression>,
+    ) -> Result<(), Error> {
+        let pointer: PointerValue = self.compile_expression(pointer)?.try_into()?;
+        let value: Value = self.compile_expression(expression)?;
+        pointer.deref_store(
+            self.context.compiler_context,
+            &mut self.function_builder,
+            &value,
+        )
+    }
+
     pub fn compile_compose(
         &mut self,
         ty: naga::Handle<naga::Type>,
@@ -619,12 +655,38 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Ok(output)
     }
 
-    pub fn compile_load(
+    pub fn compile_if(
         &mut self,
-        pointer: naga::Handle<naga::Expression>,
-    ) -> Result<Value, Error> {
-        let pointer: PointerValue = self.compile_expression(pointer)?.try_into()?;
-        pointer.deref(self.context.compiler_context, &mut self.function_builder)
+        condition: naga::Handle<naga::Expression>,
+        accept: &naga::Block,
+        reject: &naga::Block,
+    ) -> Result<(), Error> {
+        let condition_value: ScalarValue = self.compile_expression(condition)?.try_into()?;
+        let condition_value = condition_value.as_ir_value();
+
+        let accept_block = self.function_builder.create_block();
+        let reject_block = self.function_builder.create_block();
+        let continue_block = self.function_builder.create_block();
+
+        self.function_builder
+            .ins()
+            .brif(condition_value, accept_block, [], reject_block, []);
+
+        self.function_builder.seal_block(accept_block);
+        self.function_builder.seal_block(reject_block);
+
+        self.function_builder.switch_to_block(accept_block);
+        self.compile_block(accept)?;
+        self.function_builder.ins().jump(continue_block, []);
+
+        self.function_builder.switch_to_block(reject_block);
+        self.compile_block(reject)?;
+        self.function_builder.ins().jump(continue_block, []);
+
+        self.function_builder.seal_block(continue_block);
+        self.function_builder.switch_to_block(continue_block);
+
+        Ok(())
     }
 }
 
