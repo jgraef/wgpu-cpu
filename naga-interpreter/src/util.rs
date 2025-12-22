@@ -395,25 +395,10 @@ pub(crate) mod test {
         B: Backend,
     {
         #[track_caller]
-        pub fn eval<T>(&self, expression: &str, preamble: &str, out_ty: &str) -> T
+        pub fn exec<T>(&self, source: &str) -> T
         where
             T: Pod,
         {
-            let source = format!(
-                r#"
-        struct Output {{
-            @builtin(position) p: vec4f,
-            @location(0) output: {out_ty},
-        }}
-
-        @vertex
-        fn main(@builtin(vertex_index) vertex_index: u32) -> Output {{
-            {preamble}
-            return Output(vec4f(), {expression});
-        }}
-        "#
-            );
-
             let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| {
                 println!("{source}");
                 panic!("{e}");
@@ -461,6 +446,29 @@ pub(crate) mod test {
             module.run_entry_point(EntryPointIndex::from(0), EvalInput, &mut output);
 
             output.output
+        }
+
+        #[track_caller]
+        pub fn eval<T>(&self, expression: &str, preamble: &str, out_ty: &str) -> T
+        where
+            T: Pod,
+        {
+            let source = format!(
+                r#"
+        struct Output {{
+            @builtin(position) p: vec4f,
+            @location(0) output: {out_ty},
+        }}
+
+        @vertex
+        fn main(@builtin(vertex_index) vertex_index: u32) -> Output {{
+            {preamble}
+            return Output(vec4f(), {expression});
+        }}
+        "#
+            );
+
+            self.exec(&source)
         }
 
         #[track_caller]

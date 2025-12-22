@@ -9,9 +9,12 @@ use crate::{
     compiler::{
         CompiledModule,
         CompilerBackend,
+        compile_clif,
+        compiler::Config,
     },
     entry_point::EntryPointIndex,
     make_tests,
+    util::test::BackendTestHelper,
 };
 
 #[track_caller]
@@ -39,10 +42,6 @@ fn vertex_triangle() {
 
     let compiled_module = compile(&source);
     let entry_point = compiled_module.entry_point(EntryPointIndex::from(0));
-    println!(
-        "function pointer (scary): {:?}",
-        entry_point.function_pointer()
-    );
 
     #[derive(Debug)]
     struct VertexInput {
@@ -50,8 +49,7 @@ fn vertex_triangle() {
     }
 
     impl ShaderInput for VertexInput {
-        fn write_into(&self, binding: &naga::Binding, ty: &naga::Type, target: &mut [u8]) {
-            println!("shader input: {binding:?} {ty:?}");
+        fn write_into(&self, binding: &naga::Binding, _ty: &naga::Type, target: &mut [u8]) {
             match binding {
                 naga::Binding::BuiltIn(BuiltIn::VertexIndex) => {
                     *bytemuck::from_bytes_mut(target) = self.vertex_index;
@@ -108,3 +106,65 @@ make_tests!(
         if_early_return,
     )
 );
+
+fn helper() -> BackendTestHelper<CompilerBackend> {
+    BackendTestHelper(CompilerBackend::default())
+}
+
+#[test]
+fn function_call() {
+    let output = helper().exec::<i32>(
+        r#"
+        fn my_sum(a: i32, b: i32) -> i32 {
+            return a + b;
+        }
+
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            let output = my_sum(13, 12);
+            return Output(vec4f(), output);
+        }
+        "#,
+    );
+    assert_eq!(output, 25);
+}
+
+#[test]
+fn clif_output() {
+    let source = r#"
+    @vertex
+    fn main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4f {
+        let x = f32(i32(vertex_index) - 1);
+        let y = f32(i32(vertex_index & 1u) * 2 - 1);
+        return vec4f(x, y, 0.0, 1.0);
+    }
+    "#;
+
+    let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| {
+        println!("{source}");
+        panic!("{e}");
+    });
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+
+    let mut output = vec![];
+    compile_clif(
+        &module,
+        &info,
+        Config {
+            collect_debug_info: true,
+            ..Default::default()
+        },
+        None,
+        &mut output,
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+
+    println!("{output}");
+}

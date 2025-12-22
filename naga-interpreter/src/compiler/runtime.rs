@@ -39,8 +39,8 @@ use crate::{
 #[repr(C)]
 pub struct RuntimeVtable {
     // the size of the stack slot is not strictly needed, but let's keep it somewhat safe :D
-    pub copy_inputs_to: unsafe fn(*mut c_void, *mut u8, usize) -> c_int,
-    pub copy_outputs_from: unsafe fn(*mut c_void, *const u8, usize) -> c_int,
+    pub copy_inputs_to: unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> c_int,
+    pub copy_outputs_from: unsafe extern "C" fn(*mut c_void, *const u8, usize) -> c_int,
 }
 
 impl RuntimeVtable {
@@ -49,7 +49,11 @@ impl RuntimeVtable {
         I: ShaderInput,
         O: ShaderOutput,
     {
-        unsafe fn copy_inputs_to<I, O>(data: *mut c_void, target: *mut u8, len: usize) -> i32
+        unsafe extern "C" fn copy_inputs_to<I, O>(
+            data: *mut c_void,
+            target: *mut u8,
+            len: usize,
+        ) -> i32
         where
             I: ShaderInput,
         {
@@ -77,7 +81,11 @@ impl RuntimeVtable {
             data.panic.is_ok() as i32
         }
 
-        unsafe fn copy_outputs_from<I, O>(data: *mut c_void, source: *const u8, len: usize) -> i32
+        unsafe extern "C" fn copy_outputs_from<I, O>(
+            data: *mut c_void,
+            source: *const u8,
+            len: usize,
+        ) -> i32
         where
             O: ShaderOutput,
         {
@@ -127,7 +135,7 @@ impl RuntimeMethodSignatures {
                 ir::AbiParam::new(context.pointer_type()),
             ],
             returns: vec![ir::AbiParam::new(ir::types::I32)],
-            call_conv: context.calling_convention(),
+            call_conv: context.target_config.default_call_conv,
         });
 
         let copy_outputs_from = function_builder.import_signature(ir::Signature {
@@ -137,7 +145,7 @@ impl RuntimeMethodSignatures {
                 ir::AbiParam::new(context.pointer_type()),
             ],
             returns: vec![ir::AbiParam::new(ir::types::I32)],
-            call_conv: context.calling_convention(),
+            call_conv: context.target_config.default_call_conv,
         });
 
         Self {

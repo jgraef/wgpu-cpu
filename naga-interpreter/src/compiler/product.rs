@@ -27,7 +27,11 @@ pub struct CompiledModule {
 }
 
 impl CompiledModule {
-    pub(super) fn new(
+    /// # Safety
+    ///
+    /// This is unsafe because we want to guarantuee that these the contained
+    /// entry points are safe to run at creation.
+    pub unsafe fn new(
         jit_module: JITModule,
         entry_points: EntryPoints<CompiledEntryPoint>,
     ) -> Self {
@@ -94,6 +98,8 @@ impl Drop for CompiledModuleInner {
 // therefore we must not make the constructor for `CompiledModule` pub.
 unsafe impl Sync for CompiledModuleInner {}
 
+// note: the fields can be pub because it doesn't actually do anything with the
+// function yet.
 #[derive(Debug)]
 pub struct CompiledEntryPoint {
     pub function_id: FuncId,
@@ -133,17 +139,6 @@ impl<'a> EntryPoint<'a> {
         I: ShaderInput,
         O: ShaderOutput,
     {
-        let function = unsafe {
-            // SAFETY: This function signature matches what our compiled code expects. This
-            // still returns an unsafe function, because it's the responsibility of the
-            // caller to ensure the vtable and data matches
-            std::mem::transmute::<_, unsafe fn(&RuntimeVtable, &mut RuntimeData<I, O>)>(
-                self.function_pointer,
-            )
-        };
-
-        let runtime_vtable = RuntimeVtable::new::<I, O>();
-
         move |input: I, output: O| {
             let mut runtime_data = RuntimeData {
                 input,
@@ -153,13 +148,23 @@ impl<'a> EntryPoint<'a> {
                 panic: Ok(()),
             };
 
+            let runtime_vtable = RuntimeVtable::new::<I, O>();
+
             unsafe {
                 // SAFETY: We just created the vtable and data with matching types. Thus it's
-                // safe to call the function with these arguments
+                // safe to call the function with these arguments. The function itself is safe
+                // because `EntryPoint`s can only be created from `CompiledModule`s, which can
+                // only be created with an safety guarantuee that the compiled code is safe,
+                // takes 2 pointer arguments and returns nothing.
+
+                let function = std::mem::transmute::<
+                    _,
+                    unsafe fn(*const RuntimeVtable, *mut RuntimeData<I, O>),
+                >(self.function_pointer);
 
                 // note: the order of these arguments must be synchronized with the compiled
                 // code, which is generated in [`Compiler::compile_entry_point`].
-                function(&runtime_vtable, &mut runtime_data)
+                function(&runtime_vtable as *const _, &mut runtime_data as *mut _);
             }
 
             if let Err(panic) = runtime_data.panic {

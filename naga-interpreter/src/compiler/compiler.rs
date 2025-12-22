@@ -1,3 +1,43 @@
+//! Module compiler
+//!
+//! [`Compiler`] compiles a [`naga::Module`] into a
+//! [`cranelift_module::Module`].
+//!
+//! # Example
+//!
+//! This JIT-compiles a WGSL module into a set of entry points that can be
+//! called from Rust.
+//!
+//! ```
+//! # use naga_interpreter::compiler::{compiler::Compiler, system_isa};
+//! # use cranelift_jit::{JITModule, JITBuilder};
+//! # use cranelift_codegen::settings::Configurable;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let source = r#"
+//! # @vertex
+//! # fn main() -> @builtin(position) vec4f {
+//! #   return vec4f();
+//! # }
+//! # "#;
+//! // Parse the naga::Module
+//! let module = naga::front::wgsl::parse_str(&source)?;
+//! let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+//! let info = validator.validate(&module)?;
+//!
+//! // Create a JIT module output
+//! let isa = system_isa()?;
+//! let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+//! let mut jit_module = JITModule::new(jit_builder);
+//!
+//! let mut compiler = Compiler::new(&module, &info, &mut jit_module, Default::default())?;
+//! compiler.declare_all_functions()?;
+//! compiler.compile_all_functions()?;
+//! let entry_points = compiler.compile_all_entry_points()?;
+//! #
+//! # Ok(())
+//! # }
+//! ```
+
 use cranelift_codegen::{
     ir::{
         self,
@@ -20,11 +60,10 @@ use crate::{
         Error,
         function::{
             FunctionArgument,
-            FunctionCompiler,
             FunctionDeclaration,
-            FunctionName,
+            compile_function,
         },
-        module::CompiledEntryPoint,
+        product::CompiledEntryPoint,
         runtime::{
             RuntimeContextValue,
             RuntimeEntryPointBuilder,
@@ -47,22 +86,60 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Config {
+    /// Calling convention used for internal function
+    ///
+    /// This calling convention will be used for all functions. Technically the
+    /// shader entry points will have this calling convention too, but the
+    /// function returned as entry point from the compiler is another function
+    /// that sets everything up. This outer entry point will have the default
+    /// calling convention of the target.
+    ///
+    /// If this is not set, the default calling convention of the target will be
+    /// used.
+    pub calling_convention: Option<isa::CallConv>,
+
+    pub collect_debug_info: bool,
+}
+
+/// Immutable data shared during compilation of a [`naga::Module`].
 #[derive(derive_more::Debug)]
 pub struct Context<'source> {
+    /// Compiler config
+    pub config: Config,
+
+    /// The [naga source module](naga::Module)
     pub source: &'source naga::Module,
-    #[allow(unused)]
+
+    /// [`ModuleInfo`](naga::valid::ModuleInfo) returned by validation.
     pub info: &'source naga::valid::ModuleInfo,
+
+    /// Used for getting size and alignment of naga's types.
     pub layouter: naga::proc::Layouter,
+
+    /// Target ISA information that we need during compilation.
+    ///
+    /// This contains the default calling convention and pointer type.
     #[debug(skip)]
     pub target_config: isa::TargetFrontendConfig,
+
+    /// Information on how we can use SIMD for vectors and matrices.
     pub simd_context: SimdContext,
+
+    /// Maps naga's types to our types
     pub types: CoArena<naga::Type, Type>,
+
+    /// Contains signatures and function IDs of functions declared by the shader
+    /// module
     pub function_declarations: SparseCoArena<naga::Function, FunctionDeclaration>,
 }
 
 impl<'source> Context<'source> {
-    pub fn calling_convention(&self) -> isa::CallConv {
-        self.target_config.default_call_conv
+    pub fn internal_calling_convention(&self) -> isa::CallConv {
+        self.config
+            .calling_convention
+            .unwrap_or(self.target_config.default_call_conv)
     }
 
     pub fn pointer_type(&self) -> ir::Type {
@@ -70,25 +147,31 @@ impl<'source> Context<'source> {
     }
 }
 
+/// Mutable state used during compilation of a shader module.
 #[derive(derive_more::Debug)]
 pub struct State {
+    /// This is used by cranelift to compile functions and can be reused
     #[debug(skip)]
     pub(super) fb_context: FunctionBuilderContext,
 
+    /// Contains reusable state that is used by cranelift for compilation
     #[debug(skip)]
     pub(super) cl_context: cranelift_codegen::Context,
-
-    next_anonymous_function_id: usize,
 }
 
 impl State {
-    pub fn anonymous_function_name(&mut self) -> FunctionName {
-        let id = self.next_anonymous_function_id;
-        self.next_anonymous_function_id += 1;
-        FunctionName::Anonymous(id)
+    pub fn new(cl_context: cranelift_codegen::Context) -> Self {
+        Self {
+            fb_context: FunctionBuilderContext::new(),
+            cl_context,
+        }
     }
 }
 
+/// Compiler backend
+///
+/// This compiles [naga IR](naga::ir) to [cranelift IR](ir). The compiler is
+/// generic over the [output module](Module).
 #[derive(derive_more::Debug)]
 pub struct Compiler<'source, Output> {
     context: Context<'source>,
@@ -102,10 +185,14 @@ impl<'source, Output> Compiler<'source, Output>
 where
     Output: Module,
 {
+    /// Create a new compiler.
     pub fn new(
         source: &'source naga::Module,
+        // note: we don't use this at the moment. but you can only get this by validating a module,
+        // so we know that `source` is valid
         info: &'source naga::valid::ModuleInfo,
         output: Output,
+        config: Config,
     ) -> Result<Self, Error> {
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(source.to_ctx())?;
@@ -132,12 +219,9 @@ where
                 simd_context: vector_registers,
                 types,
                 function_declarations: Default::default(),
+                config,
             },
-            state: State {
-                fb_context: FunctionBuilderContext::new(),
-                cl_context,
-                next_anonymous_function_id: 1,
-            },
+            state: State::new(cl_context),
             output,
         })
     }
@@ -147,6 +231,33 @@ impl<'source, Output> Compiler<'source, Output>
 where
     Output: Module,
 {
+    pub fn declare_all_functions(&mut self) -> Result<(), Error> {
+        for (handle, function) in self.context.source.functions.iter() {
+            let declaration = self.declare_function(function)?;
+            self.context
+                .function_declarations
+                .insert(handle, declaration);
+        }
+
+        Ok(())
+    }
+
+    pub fn compile_all_functions(&mut self) -> Result<(), Error> {
+        for (handle, function) in self.context.source.functions.iter() {
+            if let Some(declaration) = self.context.function_declarations.get(handle) {
+                compile_function(
+                    &self.context,
+                    &mut self.state,
+                    &mut self.output,
+                    function,
+                    declaration,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn compile_all_entry_points(&mut self) -> Result<EntryPoints<CompiledEntryPoint>, Error> {
         let mut entry_points = EntryPoints::with_capacity(self.context.source.entry_points.len());
 
@@ -156,6 +267,73 @@ where
         }
 
         Ok(entry_points)
+    }
+
+    pub fn compile_function(
+        &mut self,
+        function: &'source naga::Function,
+        declaration: &FunctionDeclaration,
+    ) -> Result<(), Error> {
+        compile_function(
+            &self.context,
+            &mut self.state,
+            &mut self.output,
+            function,
+            declaration,
+        )
+    }
+
+    pub fn declare_function(
+        &mut self,
+        function: &'source naga::Function,
+    ) -> Result<FunctionDeclaration, Error> {
+        //let mut signature = self.output.make_signature();
+        let mut signature = ir::Signature::new(self.context.internal_calling_convention());
+
+        // return values
+        let return_type = function.result.as_ref().map(|result| {
+            let return_type = self.context.types[result.ty];
+            signature
+                .returns
+                .extend(return_type.as_ir_types(&self.context).map(AbiParam::new));
+            return_type
+        });
+
+        // arguments
+        let mut arguments = Vec::with_capacity(function.arguments.len());
+        for argument in &function.arguments {
+            let start = signature.params.len();
+            signature.params.extend(
+                self.context.types[argument.ty]
+                    .as_ir_types(&self.context)
+                    .map(AbiParam::new),
+            );
+            let end = signature.params.len();
+
+            let ty = self.context.types[argument.ty];
+
+            arguments.push(FunctionArgument {
+                block_inputs: start..end,
+                ty,
+            })
+        }
+
+        let function_id = if let Some(name) = &function.name {
+            self.output
+                .declare_function(&name, Linkage::Local, &signature)?
+        }
+        else {
+            self.output.declare_anonymous_function(&signature)?
+        };
+
+        let declaration = FunctionDeclaration {
+            function_id,
+            signature,
+            arguments,
+            return_type,
+        };
+
+        Ok(declaration)
     }
 
     pub fn compile_entry_point(
@@ -226,10 +404,10 @@ where
             .transpose()?;
 
         let return_value = shim_builder.function_builder.call_(
+            &self.context,
             main_function_ref,
             arguments,
             return_type,
-            &self.context,
         );
 
         let output_layout = entry_point
@@ -271,103 +449,25 @@ where
             output_layout,
         })
     }
-
-    pub fn compile_function(
-        &mut self,
-        function: &'source naga::Function,
-        declaration: &FunctionDeclaration,
-    ) -> Result<(), Error> {
-        self.output.clear_context(&mut self.state.cl_context);
-
-        let mut function_compiler =
-            FunctionCompiler::new(&self.context, &mut self.state, function, declaration)?;
-
-        function_compiler.initialize_local_variables()?;
-        function_compiler.compile_block(&function.body)?;
-
-        function_compiler.finish();
-
-        self.output
-            .define_function(declaration.function_id, &mut self.state.cl_context)?;
-
-        Ok(())
-    }
-
-    pub fn declare_function(
-        &mut self,
-        function: &'source naga::Function,
-    ) -> Result<FunctionDeclaration, Error> {
-        let function_name = function
-            .name
-            .clone()
-            .map_or_else(|| self.state.anonymous_function_name(), FunctionName::Named);
-
-        let mut signature = self.output.make_signature();
-
-        // return values
-        if let Some(result) = &function.result {
-            signature.returns.extend(
-                self.context.types[result.ty]
-                    .as_ir_types(&self.context)
-                    .map(AbiParam::new),
-            );
-        }
-
-        // arguments
-        let mut arguments = Vec::with_capacity(function.arguments.len());
-        for argument in &function.arguments {
-            let start = signature.params.len();
-
-            signature.params.extend(
-                self.context.types[argument.ty]
-                    .as_ir_types(&self.context)
-                    .map(AbiParam::new),
-            );
-
-            let end = signature.params.len();
-            arguments.push(FunctionArgument {
-                block_inputs: start..end,
-            })
-        }
-
-        let function_id =
-            self.output
-                .declare_function(&function_name.to_string(), Linkage::Local, &signature)?;
-
-        Ok(FunctionDeclaration {
-            name: function_name,
-            function_id,
-            signature,
-            arguments,
-        })
-    }
-
-    pub fn declare_all_functions(&mut self) -> Result<(), Error> {
-        for (_handle, function) in self.context.source.functions.iter() {
-            self.declare_function(function)?;
-        }
-
-        Ok(())
-    }
 }
 
 pub trait FuncBuilderExt {
     fn call_(
         &mut self,
+        context: &Context,
         func_ref: ir::FuncRef,
         arguments: impl IntoIterator<Item = Value>,
         return_type: Option<Type>,
-        context: &Context,
     ) -> Option<Value>;
 }
 
 impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
     fn call_(
         &mut self,
+        context: &Context,
         func_ref: ir::FuncRef,
         arguments: impl IntoIterator<Item = Value>,
         return_type: Option<Type>,
-        context: &Context,
     ) -> Option<Value> {
         let mut values = vec![];
         for argument in arguments {

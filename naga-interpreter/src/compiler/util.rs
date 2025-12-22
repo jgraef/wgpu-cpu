@@ -1,3 +1,8 @@
+use std::{
+    collections::HashMap,
+    sync::Arc,
+};
+
 use cranelift_codegen::ir::immediates::Ieee16;
 use half::f16;
 
@@ -5,7 +10,7 @@ pub fn ieee16_from_f16(x: f16) -> Ieee16 {
     Ieee16::with_bits(x.to_bits())
 }
 
-pub(super) fn alignment_log2(alignment: naga::proc::Alignment) -> u8 {
+pub fn alignment_log2(alignment: naga::proc::Alignment) -> u8 {
     const ALIGNMENTS: [naga::proc::Alignment; 5] = [
         naga::proc::Alignment::ONE,
         naga::proc::Alignment::TWO,
@@ -22,6 +27,116 @@ pub(super) fn alignment_log2(alignment: naga::proc::Alignment) -> u8 {
         .try_into()
         .unwrap()
 }
+
+#[derive(derive_more::Debug)]
+pub struct ClifOutput {
+    #[debug(skip)]
+    pub isa: Arc<dyn cranelift_codegen::isa::TargetIsa>,
+    pub declarations: cranelift_module::ModuleDeclarations,
+    pub functions: HashMap<cranelift_module::FuncId, cranelift_codegen::ir::Function>,
+}
+
+impl ClifOutput {
+    pub fn new(isa: Arc<dyn cranelift_codegen::isa::TargetIsa>) -> Self {
+        Self {
+            isa,
+            declarations: Default::default(),
+            functions: Default::default(),
+        }
+    }
+
+    pub fn finalize(&mut self) {
+        for (func_id, function) in self.functions.iter_mut() {
+            let decl = self.declarations.get_function_decl(*func_id);
+            if let Some(name) = &decl.name {
+                function.name = cranelift_codegen::ir::UserFuncName::testcase(name);
+            }
+        }
+    }
+}
+
+impl cranelift_module::Module for ClifOutput {
+    fn isa(&self) -> &dyn cranelift_codegen::isa::TargetIsa {
+        &*self.isa
+    }
+
+    fn declarations(&self) -> &cranelift_module::ModuleDeclarations {
+        &self.declarations
+    }
+
+    fn declare_function(
+        &mut self,
+        name: &str,
+        linkage: cranelift_module::Linkage,
+        signature: &cranelift_codegen::ir::Signature,
+    ) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
+        let (func_id, _) = self
+            .declarations
+            .declare_function(name, linkage, signature)?;
+        Ok(func_id)
+    }
+
+    fn declare_anonymous_function(
+        &mut self,
+        signature: &cranelift_codegen::ir::Signature,
+    ) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
+        self.declarations.declare_anonymous_function(signature)
+    }
+
+    fn declare_data(
+        &mut self,
+        name: &str,
+        linkage: cranelift_module::Linkage,
+        writable: bool,
+        tls: bool,
+    ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+        let (data_id, _) = self
+            .declarations
+            .declare_data(name, linkage, writable, tls)?;
+        Ok(data_id)
+    }
+
+    fn declare_anonymous_data(
+        &mut self,
+        writable: bool,
+        tls: bool,
+    ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+        self.declarations.declare_anonymous_data(writable, tls)
+    }
+
+    fn define_function_with_control_plane(
+        &mut self,
+        func: cranelift_module::FuncId,
+        ctx: &mut cranelift_codegen::Context,
+        ctrl_plane: &mut cranelift_codegen::control::ControlPlane,
+    ) -> cranelift_module::ModuleResult<()> {
+        let _ = ctrl_plane;
+        let function = std::mem::replace(&mut ctx.func, cranelift_codegen::ir::Function::new());
+        self.functions.insert(func, function);
+        Ok(())
+    }
+
+    fn define_function_bytes(
+        &mut self,
+        func_id: cranelift_module::FuncId,
+        alignment: u64,
+        bytes: &[u8],
+        relocs: &[cranelift_module::ModuleReloc],
+    ) -> cranelift_module::ModuleResult<()> {
+        let _ = (func_id, alignment, bytes, relocs);
+        Ok(())
+    }
+
+    fn define_data(
+        &mut self,
+        data_id: cranelift_module::DataId,
+        data: &cranelift_module::DataDescription,
+    ) -> cranelift_module::ModuleResult<()> {
+        let _ = (data_id, data);
+        Ok(())
+    }
+}
+
 /*
 #[derive(Debug)]
 pub struct MatrixLanes {

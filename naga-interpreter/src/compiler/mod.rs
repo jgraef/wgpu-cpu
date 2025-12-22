@@ -1,22 +1,23 @@
 pub mod compiler;
 pub mod expression;
 pub mod function;
-pub mod module;
+pub mod product;
 pub mod runtime;
 pub mod simd;
 #[cfg(test)]
 mod tests;
 pub mod types;
-pub(self) mod util;
+pub mod util;
 pub mod value;
 
-use cranelift_codegen::settings::Configurable;
-use cranelift_jit::{
-    JITBuilder,
-    JITModule,
+use std::sync::Arc;
+
+use cranelift_codegen::{
+    isa,
+    settings::Configurable as _,
 };
-use cranelift_module::ModuleError;
-pub use module::CompiledModule;
+use cranelift_jit as jit;
+pub use product::CompiledModule;
 
 use crate::{
     bindings::{
@@ -24,8 +25,12 @@ use crate::{
         ShaderOutput,
     },
     compiler::{
-        compiler::Compiler,
+        compiler::{
+            Compiler,
+            Config,
+        },
         types::InvalidType,
+        util::ClifOutput,
         value::UnexpectedType,
     },
     entry_point::{
@@ -41,7 +46,10 @@ pub enum Error {
     UnsupportedType { ty: naga::TypeInner },
 
     #[error(transparent)]
-    Cranelift(#[from] ModuleError),
+    Output(#[from] cranelift_module::ModuleError),
+
+    #[error(transparent)]
+    Codegen(#[from] cranelift_codegen::CodegenError),
 
     #[error(transparent)]
     Layout(#[from] naga::proc::LayoutError),
@@ -54,31 +62,47 @@ pub enum Error {
 
     #[error(transparent)]
     UnexpectedType(#[from] UnexpectedType),
+
+    #[error("Call to undeclared function: {name:?}")]
+    UndeclaredFunctionCall {
+        name: Option<String>,
+        handle: naga::Handle<naga::Function>,
+    },
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
+/// JIT-compile a [`naga::Module`] for execution on the CPU.
 pub fn compile_jit(
     module: &naga::Module,
     info: &naga::valid::ModuleInfo,
 ) -> Result<CompiledModule, Error> {
-    let mut flag_builder = cranelift_codegen::settings::builder();
-    flag_builder.set("use_colocated_libcalls", "false").unwrap();
-    flag_builder.set("is_pic", "false").unwrap();
+    let isa = system_isa()?;
+    let jit_builder = jit::JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let mut jit_module = jit::JITModule::new(jit_builder);
 
-    let isa_builder = cranelift_native::builder().map_err(Error::HostNotSupported)?;
-    let isa = isa_builder
-        .finish(cranelift_codegen::settings::Flags::new(flag_builder))
-        .unwrap();
+    // since we're compiling for JIT we can use any calling convention internally.
+    let config = Config {
+        calling_convention: Some(isa::CallConv::Fast),
+        ..Default::default()
+    };
 
-    let jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-    let mut jit_module = JITModule::new(jit_builder);
-
-    let mut compiler = Compiler::new(module, info, &mut jit_module)?;
+    let mut compiler = Compiler::new(module, info, &mut jit_module, config)?;
     compiler.declare_all_functions()?;
+    compiler.compile_all_functions()?;
     let entry_points = compiler.compile_all_entry_points()?;
 
     jit_module.finalize_definitions()?;
 
-    Ok(CompiledModule::new(jit_module, entry_points))
+    let compiled_module = unsafe {
+        // SAFETY: The whole compilation process was done without any outside
+        // intervention. Therefore the compiled entry point functions follow our rules:
+        // They take 2 pointer arguments, return nothing, and are safe to run.
+        CompiledModule::new(jit_module, entry_points)
+    };
+
+    Ok(compiled_module)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -121,4 +145,47 @@ impl crate::backend::Module for CompiledModule {
     fn early_depth_test(&self, entry_point: EntryPointIndex) -> Option<naga::EarlyDepthTest> {
         self.entry_point(entry_point).early_depth_test()
     }
+}
+
+/// JIT-compile a [`naga::Module`] for execution on the CPU.
+pub fn compile_clif<Writer>(
+    module: &naga::Module,
+    info: &naga::valid::ModuleInfo,
+    config: Config,
+    isa: Option<Arc<dyn isa::TargetIsa>>,
+    output: &mut Writer,
+) -> Result<(), Error>
+where
+    Writer: std::io::Write,
+{
+    let isa = if let Some(isa) = isa {
+        isa
+    }
+    else {
+        system_isa()?
+    };
+
+    let mut clif_output = ClifOutput::new(isa);
+    let mut compiler = Compiler::new(module, info, &mut clif_output, config)?;
+    compiler.declare_all_functions()?;
+    compiler.compile_all_functions()?;
+    let _entry_points = compiler.compile_all_entry_points()?;
+    clif_output.finalize();
+
+    for (_func_id, function) in &clif_output.functions {
+        writeln!(output, "{function:#?}")?;
+    }
+
+    Ok(())
+}
+
+pub fn system_isa() -> Result<Arc<dyn isa::TargetIsa>, Error> {
+    let mut flag_builder = cranelift_codegen::settings::builder();
+    flag_builder.set("use_colocated_libcalls", "false").unwrap();
+    flag_builder.set("is_pic", "false").unwrap();
+
+    let isa_builder = cranelift_native::builder().map_err(Error::HostNotSupported)?;
+    let isa = isa_builder.finish(cranelift_codegen::settings::Flags::new(flag_builder))?;
+
+    Ok(isa)
 }

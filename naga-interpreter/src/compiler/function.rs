@@ -1,23 +1,29 @@
 use std::{
-    fmt::{
-        Debug,
-        Display,
-    },
+    fmt::Debug,
     ops::Range,
 };
 
-use cranelift_codegen::ir::{
-    self,
-    InstBuilder as _,
+use cranelift_codegen::{
+    entity::EntityRef,
+    ir::{
+        self,
+        FuncRef,
+        InstBuilder as _,
+        ValueLabel,
+    },
 };
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::FuncId;
+use cranelift_module::{
+    FuncId,
+    Module,
+};
 
 use crate::{
     compiler::{
         Error,
         compiler::{
             Context,
+            FuncBuilderExt,
             State,
         },
         expression::{
@@ -50,12 +56,8 @@ use crate::{
         simd::SimdImmediates,
         types::{
             CastTo,
-            InvalidType,
-            MatrixType,
             PointerType,
-            ScalarType,
             Type,
-            VectorType,
         },
         util::alignment_log2,
         value::{
@@ -72,7 +74,6 @@ use crate::{
     util::{
         CoArena,
         SparseCoArena,
-        typifier_from_function,
     },
 };
 
@@ -81,10 +82,10 @@ pub struct FunctionContext<'source, 'compiler> {
     pub compiler_context: &'compiler Context<'source>,
     pub function: &'source naga::Function,
     pub declaration: &'compiler FunctionDeclaration,
-    pub typifier: naga::front::Typifier,
     pub entry_block: ir::Block,
     pub local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
     pub simd_immediates: SimdImmediates,
+    pub imported_functions: SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
 }
 
 impl<'source, 'compiler> FunctionContext<'source, 'compiler> {
@@ -96,56 +97,24 @@ impl<'source, 'compiler> FunctionContext<'source, 'compiler> {
         local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
         simd_immediates: SimdImmediates,
     ) -> Self {
-        let typifier = typifier_from_function(&compiler_context.source, function);
-
         Self {
             compiler_context,
             function,
             declaration,
-            typifier,
             entry_block,
             local_variables,
             simd_immediates,
+            imported_functions: Default::default(),
         }
-    }
-
-    pub fn expression_type(
-        &self,
-        expression: naga::Handle<naga::Expression>,
-    ) -> Result<Type, InvalidType> {
-        let type_resolution = &self.typifier[expression];
-        let output = match type_resolution {
-            naga::proc::TypeResolution::Handle(handle) => self.compiler_context.types[*handle],
-            naga::proc::TypeResolution::Value(type_inner) => {
-                match type_inner {
-                    naga::TypeInner::Scalar(scalar) => ScalarType::from_naga(*scalar)?.into(),
-                    naga::TypeInner::Vector { size, scalar } => {
-                        VectorType::from_naga(*scalar, *size)?.into()
-                    }
-                    naga::TypeInner::Matrix {
-                        columns,
-                        rows,
-                        scalar,
-                    } => MatrixType::from_naga(*scalar, *columns, *rows)?.into(),
-                    naga::TypeInner::Pointer { base, space } => {
-                        PointerType::from_naga(*base, *space)?.into()
-                    }
-                    naga::TypeInner::ValuePointer {
-                        size,
-                        scalar,
-                        space,
-                    } => PointerType::from_naga_value(*scalar, *size, *space)?.into(),
-                    _ => unreachable!("Invalid inner type returned by typifier: {type_inner:?}"),
-                }
-            }
-        };
-        Ok(output)
     }
 }
 
+// todo: unnecessary. just store the types. they know how many values to collect
+// from the block inputs
 #[derive(Clone, Debug)]
 pub struct FunctionArgument {
     pub block_inputs: Range<usize>,
+    pub ty: Type,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,10 +127,16 @@ pub struct LocalVariable<'source> {
 
 #[derive(Clone, Debug)]
 pub struct FunctionDeclaration {
-    pub name: FunctionName,
     pub function_id: FuncId,
     pub signature: ir::Signature,
     pub arguments: Vec<FunctionArgument>,
+    pub return_type: Option<Type>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ImportedFunction<'compiler> {
+    pub function_ref: FuncRef,
+    pub declaration: &'compiler FunctionDeclaration,
 }
 
 #[derive(derive_more::Debug)]
@@ -171,7 +146,9 @@ pub struct FunctionCompiler<'source, 'compiler> {
     #[debug(skip)]
     pub function_builder: FunctionBuilder<'compiler>,
 
-    emitted_expression: SparseCoArena<naga::Expression, Value>,
+    pub emitted_expression: SparseCoArena<naga::Expression, Value>,
+
+    pub source_locations: Vec<naga::Span>,
 }
 
 impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
@@ -181,6 +158,12 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         function: &'source naga::Function,
         declaration: &'compiler FunctionDeclaration,
     ) -> Result<Self, Error> {
+        state.cl_context.clear();
+
+        if compiler_context.config.collect_debug_info {
+            state.cl_context.func.dfg.collect_debug_info();
+        }
+
         let simd_immediates = compiler_context.simd_context.simd_immediates(state);
 
         state.cl_context.func.signature = declaration.signature.clone();
@@ -227,6 +210,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             ),
             function_builder,
             emitted_expression: Default::default(),
+            source_locations: vec![],
         })
     }
 
@@ -246,13 +230,40 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Ok(())
     }
 
+    pub fn import_functions<Output>(&mut self, output: &mut Output) -> Result<(), Error>
+    where
+        Output: Module,
+    {
+        let mut importer = FunctionImporter {
+            function_refs: &mut self.context.imported_functions,
+            compiler_context: self.context.compiler_context,
+            output,
+            caller: &mut self.function_builder.func,
+        };
+        importer.import_functions(&self.context.function.body)
+    }
+
     pub fn finish(mut self) {
         self.function_builder.seal_block(self.context.entry_block);
         self.function_builder.finalize();
     }
 
+    pub fn set_source_span(&mut self, span: naga::Span) {
+        if self.context.compiler_context.config.collect_debug_info {
+            let id = self
+                .source_locations
+                .len()
+                .try_into()
+                .expect("source location id overflow");
+
+            self.source_locations.push(span);
+            self.function_builder.set_srcloc(ir::SourceLoc::new(id));
+        }
+    }
+
     pub fn compile_block(&mut self, naga_block: &naga::ir::Block) -> Result<(), Error> {
-        for statement in naga_block {
+        for (statement, span) in naga_block.span_iter() {
+            self.set_source_span(*span);
             self.compile_statement(statement)?;
         }
         Ok(())
@@ -326,7 +337,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
                 function,
                 arguments,
                 result,
-            } => todo!(),
+            } => self.compile_call(*function, &arguments, *result)?,
             naga::Statement::RayQuery { query, fun } => todo!(),
             naga::Statement::SubgroupBallot { result, predicate } => todo!(),
             naga::Statement::SubgroupGather {
@@ -345,54 +356,21 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Ok(())
     }
 
-    pub fn compile_emit(
-        &mut self,
-        expressions: naga::Range<naga::Expression>,
-    ) -> Result<(), Error> {
-        for expression in expressions {
-            self.compile_expression(expression)?;
-        }
-        Ok(())
-    }
-
-    pub fn compile_return(
-        &mut self,
-        expression: Option<naga::Handle<naga::Expression>>,
-    ) -> Result<(), Error> {
-        let mut return_values = vec![];
-
-        if let Some(expression) = expression {
-            let value = self.compile_expression(expression)?;
-            return_values.extend(value.as_ir_values());
-        }
-
-        self.function_builder.ins().return_(&return_values);
-
-        // fixme: return ControlFlow to stop compiling this block. this is a bit tricky
-        // because we also return Results for now we'll just switch to a new
-        // block for the rest. this block will not be jumped to, but we still do the
-        // work compiling it.
-        let void_block = self.function_builder.create_block();
-        self.function_builder.seal_block(void_block);
-        self.function_builder.switch_to_block(void_block);
-
-        Ok(())
-    }
-
     pub fn compile_expression(
         &mut self,
-        expression: naga::Handle<naga::Expression>,
+        handle: naga::Handle<naga::Expression>,
     ) -> Result<Value, Error> {
         #![allow(unused_variables)]
 
-        let value = if let Some(value) = self.emitted_expression.get(expression) {
+        let value = if let Some(value) = self.emitted_expression.get(handle) {
             value.clone()
         }
         else {
-            let output_type = self.context.expression_type(expression)?;
-            let expression = &self.context.function.expressions[expression];
+            let expression = &self.context.function.expressions[handle];
+            let span = &self.context.function.expressions.get_span(handle);
+            self.set_source_span(*span);
 
-            match expression {
+            let value = match expression {
                 naga::Expression::Literal(literal) => self.compile_literal(*literal)?,
                 naga::Expression::Constant(handle) => todo!(),
                 naga::Expression::Override(handle) => todo!(),
@@ -415,7 +393,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
                     pattern,
                 } => todo!(),
                 naga::Expression::FunctionArgument(function_argument) => {
-                    self.compile_function_argument(*function_argument, output_type)?
+                    self.compile_function_argument(*function_argument)?
                 }
                 naga::Expression::GlobalVariable(handle) => todo!(),
                 naga::Expression::LocalVariable(handle) => self.compile_local_variable(*handle)?,
@@ -471,10 +449,97 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
                 naga::Expression::RayQueryGetIntersection { query, committed } => todo!(),
                 naga::Expression::SubgroupBallotResult => todo!(),
                 naga::Expression::SubgroupOperationResult { ty } => todo!(),
+            };
+
+            if self.context.compiler_context.config.collect_debug_info
+                && self
+                    .context
+                    .function
+                    .named_expressions
+                    .contains_key(&handle)
+            {
+                value.as_ir_values().for_each(|ir_value| {
+                    self.function_builder
+                        .set_val_label(ir_value, ValueLabel::new(handle.index()));
+                });
             }
+
+            value
         };
 
         Ok(value)
+    }
+
+    pub fn compile_emit(
+        &mut self,
+        expressions: naga::Range<naga::Expression>,
+    ) -> Result<(), Error> {
+        for expression in expressions {
+            self.compile_expression(expression)?;
+        }
+        Ok(())
+    }
+
+    pub fn compile_call(
+        &mut self,
+        function: naga::Handle<naga::Function>,
+        arguments: &[naga::Handle<naga::Expression>],
+        result: Option<naga::Handle<naga::Expression>>,
+    ) -> Result<(), Error> {
+        let argument_values = arguments
+            .iter()
+            .map(|argument| self.compile_expression(*argument))
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        // todo: error would be nicer
+        let imported_function = self
+            .context
+            .imported_functions
+            .get(function)
+            .unwrap_or_else(|| panic!("Function not imported: {function:?}"));
+
+        let result_value = self.function_builder.call_(
+            self.context.compiler_context,
+            imported_function.function_ref,
+            argument_values,
+            imported_function.declaration.return_type,
+        );
+
+        if let Some(result) = result {
+            if let Some(result_value) = result_value {
+                self.emitted_expression.insert(result, result_value);
+            }
+            else {
+                panic!("Expected function to return a value");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn compile_return(
+        &mut self,
+        expression: Option<naga::Handle<naga::Expression>>,
+    ) -> Result<(), Error> {
+        let mut return_values = vec![];
+
+        if let Some(expression) = expression {
+            let value = self.compile_expression(expression)?;
+            return_values.extend(value.as_ir_values());
+        }
+
+        self.function_builder.ins().return_(&return_values);
+
+        // fixme: return ControlFlow to stop compiling this block. this is a bit tricky
+        // because we also return Results for now we'll just switch to a new
+        // block for the rest. this block will not be jumped to, but we still do the
+        // work compiling it.
+        let void_block = self.function_builder.create_block();
+        self.function_builder.seal_block(void_block);
+        self.function_builder.switch_to_block(void_block);
+        self.function_builder.set_cold_block(void_block); // very cold lol
+
+        Ok(())
     }
 
     pub fn compile_local_variable(
@@ -489,18 +554,14 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Ok(value.into())
     }
 
-    pub fn compile_function_argument(
-        &mut self,
-        index: u32,
-        output_type: Type,
-    ) -> Result<Value, Error> {
+    pub fn compile_function_argument(&mut self, index: u32) -> Result<Value, Error> {
         let argument = &self.context.declaration.arguments[index as usize];
         let block_params = self.function_builder.block_params(self.context.entry_block);
         let block_params = block_params[argument.block_inputs.clone()].iter().copied();
 
         Ok(Value::from_ir_values_iter(
             &self.context.compiler_context,
-            output_type,
+            argument.ty,
             block_params,
         ))
     }
@@ -647,21 +708,103 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum FunctionName {
-    Anonymous(usize),
-    Named(String),
+/// Helper to call [`Module::declare_func_in_func`] on all functions called from
+/// another function.
+pub struct FunctionImporter<'source, 'compiler, 'function, Output> {
+    pub function_refs: &'function mut SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
+    pub compiler_context: &'compiler Context<'source>,
+    pub output: &'function mut Output,
+    pub caller: &'function mut ir::Function,
 }
 
-impl Display for FunctionName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FunctionName::Anonymous(id) => {
-                write!(f, "__naga_interpreter_anonymous_{id}")
-            }
-            FunctionName::Named(name) => {
-                write!(f, "{name}")
+impl<'source, 'compiler, 'function, Output> FunctionImporter<'source, 'compiler, 'function, Output>
+where
+    Output: Module,
+{
+    pub fn import_functions(&mut self, block: &naga::Block) -> Result<(), Error> {
+        for statement in block {
+            match statement {
+                naga::Statement::Block(block) => self.import_functions(block)?,
+                naga::Statement::If {
+                    condition: _,
+                    accept,
+                    reject,
+                } => {
+                    self.import_functions(accept)?;
+                    self.import_functions(reject)?;
+                }
+                naga::Statement::Switch { selector: _, cases } => {
+                    for case in cases {
+                        self.import_functions(&case.body)?;
+                    }
+                }
+                naga::Statement::Loop {
+                    body,
+                    continuing,
+                    break_if: _,
+                } => {
+                    self.import_functions(body)?;
+                    self.import_functions(continuing)?;
+                }
+                naga::Statement::Call {
+                    function,
+                    arguments: _,
+                    result: _,
+                } => {
+                    if !self.function_refs.contains(*function) {
+                        let declaration = self
+                            .compiler_context
+                            .function_declarations
+                            .get(*function)
+                            .ok_or_else(|| {
+                                let name = self.compiler_context.source.functions[*function]
+                                    .name
+                                    .clone();
+                                Error::UndeclaredFunctionCall {
+                                    name,
+                                    handle: *function,
+                                }
+                            })?;
+
+                        let function_ref = self
+                            .output
+                            .declare_func_in_func(declaration.function_id, self.caller);
+
+                        self.function_refs.insert(
+                            *function,
+                            ImportedFunction {
+                                function_ref,
+                                declaration,
+                            },
+                        );
+                    }
+                }
+                _ => {}
             }
         }
+
+        Ok(())
     }
+}
+
+pub fn compile_function<'source, 'compiler, Output>(
+    context: &'compiler Context<'source>,
+    state: &'compiler mut State,
+    output: &'compiler mut Output,
+    function: &'source naga::Function,
+    declaration: &FunctionDeclaration,
+) -> Result<(), Error>
+where
+    Output: Module,
+{
+    let mut function_compiler = FunctionCompiler::new(context, state, function, declaration)?;
+
+    function_compiler.initialize_local_variables()?;
+    function_compiler.import_functions(output)?;
+    function_compiler.compile_block(&function.body)?;
+    function_compiler.finish();
+
+    output.define_function(declaration.function_id, &mut state.cl_context)?;
+
+    Ok(())
 }
