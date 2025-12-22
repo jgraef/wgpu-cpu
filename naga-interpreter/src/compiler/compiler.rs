@@ -86,6 +86,8 @@ use crate::{
     },
 };
 
+const SHIM_FUNCTION_NAME: &str = "__naga_rt0";
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Config {
     /// Calling convention used for internal function
@@ -129,13 +131,41 @@ pub struct Context<'source> {
 
     /// Maps naga's types to our types
     pub types: CoArena<naga::Type, Type>,
-
-    /// Contains signatures and function IDs of functions declared by the shader
-    /// module
-    pub function_declarations: SparseCoArena<naga::Function, FunctionDeclaration>,
 }
 
 impl<'source> Context<'source> {
+    pub fn new(
+        source: &'source naga::Module,
+        info: &'source naga::valid::ModuleInfo,
+        isa: &dyn isa::TargetIsa,
+        config: Config,
+    ) -> Result<Self, Error> {
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(source.to_ctx())?;
+
+        let target_config = isa.frontend_config();
+        let vector_registers = SimdContext::new(isa);
+        tracing::debug!(?vector_registers);
+
+        let types = CoArena::try_from_unique_arena(&source.types, |handle, _ty| {
+            Type::from_naga(&source, handle)
+        })?;
+
+        //let global_expressions =
+        //    CoArena::try_from_arena(&source.global_expressions, |handle, expression|
+        // todo!())?;
+
+        Ok(Self {
+            source,
+            info,
+            layouter,
+            target_config,
+            simd_context: vector_registers,
+            types,
+            config,
+        })
+    }
+
     pub fn internal_calling_convention(&self) -> isa::CallConv {
         self.config
             .calling_convention
@@ -147,27 +177,6 @@ impl<'source> Context<'source> {
     }
 }
 
-/// Mutable state used during compilation of a shader module.
-#[derive(derive_more::Debug)]
-pub struct State {
-    /// This is used by cranelift to compile functions and can be reused
-    #[debug(skip)]
-    pub(super) fb_context: FunctionBuilderContext,
-
-    /// Contains reusable state that is used by cranelift for compilation
-    #[debug(skip)]
-    pub(super) cl_context: cranelift_codegen::Context,
-}
-
-impl State {
-    pub fn new(cl_context: cranelift_codegen::Context) -> Self {
-        Self {
-            fb_context: FunctionBuilderContext::new(),
-            cl_context,
-        }
-    }
-}
-
 /// Compiler backend
 ///
 /// This compiles [naga IR](naga::ir) to [cranelift IR](ir). The compiler is
@@ -175,7 +184,18 @@ impl State {
 #[derive(derive_more::Debug)]
 pub struct Compiler<'source, Output> {
     context: Context<'source>,
-    state: State,
+
+    /// Contains reusable state that is used by cranelift for compilation
+    #[debug(skip)]
+    cl_context: cranelift_codegen::Context,
+
+    /// This is used by cranelift to compile functions and can be reused
+    #[debug(skip)]
+    fb_context: FunctionBuilderContext,
+
+    /// Contains signatures and function IDs of functions declared by the shader
+    /// module
+    pub function_declarations: SparseCoArena<naga::Function, FunctionDeclaration>,
 
     #[debug(skip)]
     output: Output,
@@ -194,34 +214,16 @@ where
         output: Output,
         config: Config,
     ) -> Result<Self, Error> {
-        let mut layouter = naga::proc::Layouter::default();
-        layouter.update(source.to_ctx())?;
-
-        let cl_context = output.make_context();
-        let target_config = output.target_config();
-
         let isa = output.isa();
         tracing::debug!(target = %isa.triple());
 
-        let vector_registers = SimdContext::new(isa);
-        tracing::debug!(?vector_registers);
-
-        let types = CoArena::try_from_unique_arena(&source.types, |handle, _ty| {
-            Type::from_naga(&source, handle)
-        })?;
+        let context = Context::new(source, info, isa, config)?;
 
         Ok(Self {
-            context: Context {
-                source,
-                info,
-                layouter,
-                target_config,
-                simd_context: vector_registers,
-                types,
-                function_declarations: Default::default(),
-                config,
-            },
-            state: State::new(cl_context),
+            context,
+            cl_context: output.make_context(),
+            fb_context: FunctionBuilderContext::new(),
+            function_declarations: Default::default(),
             output,
         })
     }
@@ -234,9 +236,7 @@ where
     pub fn declare_all_functions(&mut self) -> Result<(), Error> {
         for (handle, function) in self.context.source.functions.iter() {
             let declaration = self.declare_function(function)?;
-            self.context
-                .function_declarations
-                .insert(handle, declaration);
+            self.function_declarations.insert(handle, declaration);
         }
 
         Ok(())
@@ -244,10 +244,12 @@ where
 
     pub fn compile_all_functions(&mut self) -> Result<(), Error> {
         for (handle, function) in self.context.source.functions.iter() {
-            if let Some(declaration) = self.context.function_declarations.get(handle) {
+            if let Some(declaration) = self.function_declarations.get(handle) {
                 compile_function(
                     &self.context,
-                    &mut self.state,
+                    &mut self.cl_context,
+                    &mut self.fb_context,
+                    &self.function_declarations,
                     &mut self.output,
                     function,
                     declaration,
@@ -276,7 +278,9 @@ where
     ) -> Result<(), Error> {
         compile_function(
             &self.context,
-            &mut self.state,
+            &mut self.cl_context,
+            &mut self.fb_context,
+            &self.function_declarations,
             &mut self.output,
             function,
             declaration,
@@ -345,28 +349,26 @@ where
         self.compile_function(&entry_point.function, &entry_point_declaration)?;
 
         // build shim
-        self.output.clear_context(&mut self.state.cl_context);
+        self.output.clear_context(&mut self.cl_context);
 
         let main_function_ref = self.output.declare_func_in_func(
             entry_point_declaration.function_id,
-            &mut self.state.cl_context.func,
+            &mut self.cl_context.func,
         );
 
-        self.state
-            .cl_context
+        self.cl_context
             .func
             .signature
             .params
             .push(AbiParam::new(self.context.pointer_type()));
-        self.state
-            .cl_context
+        self.cl_context
             .func
             .signature
             .params
             .push(AbiParam::new(self.context.pointer_type()));
 
         let mut function_builder =
-            FunctionBuilder::new(&mut self.state.cl_context.func, &mut self.state.fb_context);
+            FunctionBuilder::new(&mut self.cl_context.func, &mut self.fb_context);
 
         let entry_block = function_builder.create_block();
         let panic_block = function_builder.create_block();
@@ -435,13 +437,13 @@ where
         //println!("{:#?}", self.state.cl_context.func);
 
         let shim_function = self.output.declare_function(
-            "__naga_interpreter_shim", // this name is not accuarate anymore, isn't it :D
+            SHIM_FUNCTION_NAME,
             Linkage::Local,
-            &self.state.cl_context.func.signature,
+            &self.cl_context.func.signature,
         )?;
 
         self.output
-            .define_function(shim_function, &mut self.state.cl_context)?;
+            .define_function(shim_function, &mut self.cl_context)?;
 
         Ok(CompiledEntryPoint {
             function_id: shim_function,

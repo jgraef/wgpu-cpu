@@ -167,4 +167,26 @@ fn clif_output() {
     let output = String::from_utf8(output).unwrap();
 
     println!("{output}");
+    assert!(output.contains("function %main(i32) -> f32x4"));
+}
+
+#[test]
+fn constants() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        const foo: i32 = 1234 * 2;
+
+        @vertex
+        fn main() -> Output {
+            var bar: i32 = foo;
+            return Output(vec4f(), bar);
+        }
+        "#,
+    );
+    assert_eq!(output, 25);
 }

@@ -24,38 +24,13 @@ use crate::{
         compiler::{
             Context,
             FuncBuilderExt,
-            State,
         },
         expression::{
-            CompileAdd,
-            CompileAs,
-            CompileBitAnd,
-            CompileBitNot,
-            CompileBitOr,
-            CompileBitXor,
-            CompileCompose,
-            CompileDiv,
-            CompileEq,
-            CompileGe,
-            CompileGt,
-            CompileLe,
-            CompileLiteral,
-            CompileLogAnd,
-            CompileLogNot,
-            CompileLogOr,
-            CompileLt,
-            CompileMod,
-            CompileMul,
-            CompileNeg,
-            CompileNeq,
-            CompileShl,
-            CompileShr,
-            CompileSub,
-            CompileZero,
+            CompileExpression,
+            Expression,
         },
         simd::SimdImmediates,
         types::{
-            CastTo,
             PointerType,
             Type,
         },
@@ -63,7 +38,6 @@ use crate::{
         value::{
             AsIrValue,
             AsIrValues,
-            FromIrValues,
             PointerValue,
             ScalarValue,
             StackLocation,
@@ -77,43 +51,12 @@ use crate::{
     },
 };
 
-#[derive(Debug)]
-pub struct FunctionContext<'source, 'compiler> {
-    pub compiler_context: &'compiler Context<'source>,
-    pub function: &'source naga::Function,
-    pub declaration: &'compiler FunctionDeclaration,
-    pub entry_block: ir::Block,
-    pub local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
-    pub simd_immediates: SimdImmediates,
-    pub imported_functions: SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
-}
-
-impl<'source, 'compiler> FunctionContext<'source, 'compiler> {
-    pub fn new(
-        compiler_context: &'compiler Context<'source>,
-        function: &'source naga::Function,
-        declaration: &'compiler FunctionDeclaration,
-        entry_block: ir::Block,
-        local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
-        simd_immediates: SimdImmediates,
-    ) -> Self {
-        Self {
-            compiler_context,
-            function,
-            declaration,
-            entry_block,
-            local_variables,
-            simd_immediates,
-            imported_functions: Default::default(),
-        }
-    }
-}
-
-// todo: unnecessary. just store the types. they know how many values to collect
-// from the block inputs
 #[derive(Clone, Debug)]
 pub struct FunctionArgument {
+    /// Range of block inputs that this argument corresponds to
     pub block_inputs: Range<usize>,
+
+    /// Type of argument
     pub ty: Type,
 }
 
@@ -141,7 +84,13 @@ pub struct ImportedFunction<'compiler> {
 
 #[derive(derive_more::Debug)]
 pub struct FunctionCompiler<'source, 'compiler> {
-    pub context: FunctionContext<'source, 'compiler>,
+    pub context: &'compiler Context<'source>,
+    pub function: &'source naga::Function,
+    pub declaration: &'compiler FunctionDeclaration,
+    pub entry_block: ir::Block,
+    pub local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
+    pub simd_immediates: SimdImmediates,
+    pub imported_functions: SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
 
     #[debug(skip)]
     pub function_builder: FunctionBuilder<'compiler>,
@@ -154,26 +103,27 @@ pub struct FunctionCompiler<'source, 'compiler> {
 impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
     pub fn new(
         compiler_context: &'compiler Context<'source>,
-        state: &'compiler mut State,
+        cl_context: &'compiler mut cranelift_codegen::Context,
+        fb_context: &'compiler mut cranelift_frontend::FunctionBuilderContext,
         function: &'source naga::Function,
         declaration: &'compiler FunctionDeclaration,
     ) -> Result<Self, Error> {
-        state.cl_context.clear();
+        cl_context.clear();
 
         if compiler_context.config.collect_debug_info {
-            state.cl_context.func.dfg.collect_debug_info();
+            cl_context.func.dfg.collect_debug_info();
         }
 
-        let simd_immediates = compiler_context.simd_context.simd_immediates(state);
+        let simd_immediates = compiler_context.simd_context.simd_immediates();
 
-        state.cl_context.func.signature = declaration.signature.clone();
+        cl_context.func.signature = declaration.signature.clone();
 
-        let mut function_builder =
-            FunctionBuilder::new(&mut state.cl_context.func, &mut state.fb_context);
+        let mut function_builder = FunctionBuilder::new(&mut cl_context.func, fb_context);
 
         let entry_block = function_builder.create_block();
         function_builder.append_block_params_for_function_params(entry_block);
         function_builder.switch_to_block(entry_block);
+        function_builder.seal_block(entry_block);
 
         // local variables
         let local_variables =
@@ -200,27 +150,29 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             })?;
 
         Ok(Self {
-            context: FunctionContext::new(
-                compiler_context,
-                function,
-                declaration,
-                entry_block,
-                local_variables,
-                simd_immediates,
-            ),
+            context: compiler_context,
+            function,
+            declaration,
+            entry_block,
+            local_variables,
+            simd_immediates,
+            imported_functions: Default::default(),
             function_builder,
             emitted_expression: Default::default(),
             source_locations: vec![],
         })
     }
 
+    /// Emits code that initializes all local variables.
+    ///
+    /// This must be called before the function body is compiled.
     pub fn initialize_local_variables(&mut self) -> Result<(), Error> {
-        for (handle, variable) in self.context.function.local_variables.iter() {
+        for (handle, variable) in self.function.local_variables.iter() {
             if let Some(init) = variable.init {
-                let variable = self.context.local_variables[handle];
+                let variable = self.local_variables[handle];
                 let value = self.compile_expression(init)?;
                 value.store(
-                    self.context.compiler_context,
+                    self.context,
                     &mut self.function_builder,
                     StackLocation::from(variable.stack_slot),
                 )?;
@@ -230,26 +182,36 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Ok(())
     }
 
-    pub fn import_functions<Output>(&mut self, output: &mut Output) -> Result<(), Error>
+    /// Imports all functions that are called from this functions.
+    ///
+    /// Do this before compiling the function body. Otherwise compilation of any
+    /// function call will fail.
+    pub fn import_functions<Output>(
+        &mut self,
+        function_declarations: &'compiler SparseCoArena<naga::Function, FunctionDeclaration>,
+        output: &mut Output,
+    ) -> Result<(), Error>
     where
         Output: Module,
     {
         let mut importer = FunctionImporter {
-            function_refs: &mut self.context.imported_functions,
-            compiler_context: self.context.compiler_context,
+            function_refs: &mut self.imported_functions,
+            compiler_context: self.context,
+            function_declarations,
             output,
             caller: &mut self.function_builder.func,
         };
-        importer.import_functions(&self.context.function.body)
+        importer.import_functions(&self.function.body)
     }
 
-    pub fn finish(mut self) {
-        self.function_builder.seal_block(self.context.entry_block);
+    /// Finish compilation of the function
+    pub fn finish(self) {
         self.function_builder.finalize();
     }
 
+    /// Set the current source location
     pub fn set_source_span(&mut self, span: naga::Span) {
-        if self.context.compiler_context.config.collect_debug_info {
+        if self.context.config.collect_debug_info {
             let id = self
                 .source_locations
                 .len()
@@ -261,6 +223,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         }
     }
 
+    /// Compile a [`naga::Block`]
     pub fn compile_block(&mut self, naga_block: &naga::ir::Block) -> Result<(), Error> {
         for (statement, span) in naga_block.span_iter() {
             self.set_source_span(*span);
@@ -269,14 +232,16 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Ok(())
     }
 
+    /// Compile a [`naga::Statement`]
     pub fn compile_statement(&mut self, statement: &naga::Statement) -> Result<(), Error> {
         #![allow(unused_variables)]
+        use naga::Statement::*;
 
         match statement {
-            naga::Statement::Emit(range) => {
+            Emit(range) => {
                 self.compile_emit(range.clone())?;
             }
-            naga::Statement::Block(naga_block) => {
+            Block(naga_block) => {
                 // I don't think we actually have to emit a block in cranelift IR.
                 // We only have to emit blocks, if we want to jump to them from multiple other
                 // blocks, or as an entry point for functions.
@@ -293,59 +258,59 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
 
                 self.compile_block(naga_block)?;
             }
-            naga::Statement::If {
+            If {
                 condition,
                 accept,
                 reject,
             } => self.compile_if(*condition, accept, reject)?,
-            naga::Statement::Switch { selector, cases } => todo!(),
-            naga::Statement::Loop {
+            Switch { selector, cases } => todo!(),
+            Loop {
                 body,
                 continuing,
                 break_if,
             } => todo!(),
-            naga::Statement::Break => todo!(),
-            naga::Statement::Continue => todo!(),
-            naga::Statement::Return { value } => {
+            Break => todo!(),
+            Continue => todo!(),
+            Return { value } => {
                 self.compile_return(*value)?;
             }
-            naga::Statement::Kill => todo!(),
-            naga::Statement::ControlBarrier(barrier) => todo!(),
-            naga::Statement::MemoryBarrier(barrier) => todo!(),
-            naga::Statement::Store { pointer, value } => self.compile_store(*pointer, *value)?,
-            naga::Statement::ImageStore {
+            Kill => todo!(),
+            ControlBarrier(barrier) => todo!(),
+            MemoryBarrier(barrier) => todo!(),
+            Store { pointer, value } => self.compile_store(*pointer, *value)?,
+            ImageStore {
                 image,
                 coordinate,
                 array_index,
                 value,
             } => todo!(),
-            naga::Statement::Atomic {
+            Atomic {
                 pointer,
                 fun,
                 value,
                 result,
             } => todo!(),
-            naga::Statement::ImageAtomic {
+            ImageAtomic {
                 image,
                 coordinate,
                 array_index,
                 fun,
                 value,
             } => todo!(),
-            naga::Statement::WorkGroupUniformLoad { pointer, result } => todo!(),
-            naga::Statement::Call {
+            WorkGroupUniformLoad { pointer, result } => todo!(),
+            Call {
                 function,
                 arguments,
                 result,
             } => self.compile_call(*function, &arguments, *result)?,
-            naga::Statement::RayQuery { query, fun } => todo!(),
-            naga::Statement::SubgroupBallot { result, predicate } => todo!(),
-            naga::Statement::SubgroupGather {
+            RayQuery { query, fun } => todo!(),
+            SubgroupBallot { result, predicate } => todo!(),
+            SubgroupGather {
                 mode,
                 argument,
                 result,
             } => todo!(),
-            naga::Statement::SubgroupCollectiveOperation {
+            SubgroupCollectiveOperation {
                 op,
                 collective_op,
                 argument,
@@ -360,109 +325,29 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         &mut self,
         handle: naga::Handle<naga::Expression>,
     ) -> Result<Value, Error> {
-        #![allow(unused_variables)]
-
         let value = if let Some(value) = self.emitted_expression.get(handle) {
             value.clone()
         }
         else {
-            let expression = &self.context.function.expressions[handle];
-            let span = &self.context.function.expressions.get_span(handle);
+            let expression = &self.function.expressions[handle];
+            // todo: do that here or in the constructor?
+            let expression = Expression::from_naga(&self.context.types, expression);
+
+            let span = &self.function.expressions.get_span(handle);
             self.set_source_span(*span);
 
-            let value = match expression {
-                naga::Expression::Literal(literal) => self.compile_literal(*literal)?,
-                naga::Expression::Constant(handle) => todo!(),
-                naga::Expression::Override(handle) => todo!(),
-                naga::Expression::ZeroValue(handle) => self.compile_zero(*handle)?,
-                naga::Expression::Compose { ty, components } => {
-                    self.compile_compose(*ty, components)?
-                }
-                naga::Expression::Access { base, index } => {
-                    //self.compile_access(*base, *index, output_type)?
-                    todo!();
-                }
-                naga::Expression::AccessIndex { base, index } => {
-                    //self.compile_access_index(*base, *index, output_type)?
-                    todo!();
-                }
-                naga::Expression::Splat { size, value } => todo!(),
-                naga::Expression::Swizzle {
-                    size,
-                    vector,
-                    pattern,
-                } => todo!(),
-                naga::Expression::FunctionArgument(function_argument) => {
-                    self.compile_function_argument(*function_argument)?
-                }
-                naga::Expression::GlobalVariable(handle) => todo!(),
-                naga::Expression::LocalVariable(handle) => self.compile_local_variable(*handle)?,
-                naga::Expression::Load { pointer } => self.compile_load(*pointer)?,
-                naga::Expression::ImageSample {
-                    image,
-                    sampler,
-                    gather,
-                    coordinate,
-                    array_index,
-                    offset,
-                    level,
-                    depth_ref,
-                    clamp_to_edge,
-                } => todo!(),
-                naga::Expression::ImageLoad {
-                    image,
-                    coordinate,
-                    array_index,
-                    sample,
-                    level,
-                } => todo!(),
-                naga::Expression::ImageQuery { image, query } => todo!(),
-                naga::Expression::Unary { op, expr } => self.compile_unary_operator(*op, *expr)?,
-                naga::Expression::Binary { op, left, right } => {
-                    self.compile_binary_operator(*op, *left, *right)?
-                }
-                naga::Expression::Select {
-                    condition,
-                    accept,
-                    reject,
-                } => todo!(),
-                naga::Expression::Derivative { axis, ctrl, expr } => todo!(),
-                naga::Expression::Relational { fun, argument } => todo!(),
-                naga::Expression::Math {
-                    fun,
-                    arg,
-                    arg1,
-                    arg2,
-                    arg3,
-                } => todo!(),
-                naga::Expression::As {
-                    expr,
-                    kind,
-                    convert,
-                } => self.compile_as(*expr, *kind, *convert)?,
-                naga::Expression::CallResult(handle) => todo!(),
-                naga::Expression::AtomicResult { ty, comparison } => todo!(),
-                naga::Expression::WorkGroupUniformLoadResult { ty } => todo!(),
-                naga::Expression::ArrayLength(handle) => todo!(),
-                naga::Expression::RayQueryVertexPositions { query, committed } => todo!(),
-                naga::Expression::RayQueryProceedResult => todo!(),
-                naga::Expression::RayQueryGetIntersection { query, committed } => todo!(),
-                naga::Expression::SubgroupBallotResult => todo!(),
-                naga::Expression::SubgroupOperationResult { ty } => todo!(),
-            };
+            let value = expression.compile_expression(self)?;
 
-            if self.context.compiler_context.config.collect_debug_info
-                && self
-                    .context
-                    .function
-                    .named_expressions
-                    .contains_key(&handle)
+            if self.context.config.collect_debug_info
+                && self.function.named_expressions.contains_key(&handle)
             {
                 value.as_ir_values().for_each(|ir_value| {
                     self.function_builder
                         .set_val_label(ir_value, ValueLabel::new(handle.index()));
                 });
             }
+
+            self.emitted_expression.insert(handle, value.clone());
 
             value
         };
@@ -493,13 +378,12 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
 
         // todo: error would be nicer
         let imported_function = self
-            .context
             .imported_functions
             .get(function)
             .unwrap_or_else(|| panic!("Function not imported: {function:?}"));
 
         let result_value = self.function_builder.call_(
-            self.context.compiler_context,
+            self.context,
             imported_function.function_ref,
             argument_values,
             imported_function.declaration.return_type,
@@ -542,47 +426,6 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         Ok(())
     }
 
-    pub fn compile_local_variable(
-        &mut self,
-        variable: naga::Handle<naga::LocalVariable>,
-    ) -> Result<Value, Error> {
-        let local_variable = self.context.local_variables[variable];
-
-        let value =
-            PointerValue::from_stack_slot(local_variable.pointer_type, local_variable.stack_slot);
-
-        Ok(value.into())
-    }
-
-    pub fn compile_function_argument(&mut self, index: u32) -> Result<Value, Error> {
-        let argument = &self.context.declaration.arguments[index as usize];
-        let block_params = self.function_builder.block_params(self.context.entry_block);
-        let block_params = block_params[argument.block_inputs.clone()].iter().copied();
-
-        Ok(Value::from_ir_values_iter(
-            &self.context.compiler_context,
-            argument.ty,
-            block_params,
-        ))
-    }
-
-    pub fn compile_literal(&mut self, literal: naga::Literal) -> Result<Value, Error> {
-        Value::compile_literal(literal, self)
-    }
-
-    pub fn compile_zero(&mut self, ty: naga::Handle<naga::Type>) -> Result<Value, Error> {
-        let ty = self.context.compiler_context.types[ty];
-        Value::compile_zero(ty, self)
-    }
-
-    pub fn compile_load(
-        &mut self,
-        pointer: naga::Handle<naga::Expression>,
-    ) -> Result<Value, Error> {
-        let pointer: PointerValue = self.compile_expression(pointer)?.try_into()?;
-        pointer.deref_load(self.context.compiler_context, &mut self.function_builder)
-    }
-
     pub fn compile_store(
         &mut self,
         pointer: naga::Handle<naga::Expression>,
@@ -590,87 +433,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
     ) -> Result<(), Error> {
         let pointer: PointerValue = self.compile_expression(pointer)?.try_into()?;
         let value: Value = self.compile_expression(expression)?;
-        pointer.deref_store(
-            self.context.compiler_context,
-            &mut self.function_builder,
-            &value,
-        )
-    }
-
-    pub fn compile_compose(
-        &mut self,
-        ty: naga::Handle<naga::Type>,
-        components: &[naga::Handle<naga::Expression>],
-    ) -> Result<Value, Error> {
-        let ty = self.context.compiler_context.types[ty];
-        let components = components
-            .into_iter()
-            .map(|expression| self.compile_expression(*expression))
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        Value::compile_compose(ty, components, self)
-    }
-
-    pub fn compile_as(
-        &mut self,
-        input_expression: naga::Handle<naga::Expression>,
-        kind: naga::ScalarKind,
-        convert: Option<u8>,
-    ) -> Result<Value, Error> {
-        let cast_to = CastTo::from_naga(kind, convert);
-        let input_value = self.compile_expression(input_expression)?;
-        input_value.compile_as(cast_to, self)
-    }
-
-    pub fn compile_unary_operator(
-        &mut self,
-        operator: naga::UnaryOperator,
-        input_expression: naga::Handle<naga::Expression>,
-    ) -> Result<Value, Error> {
-        use naga::UnaryOperator::*;
-        let input_value = self.compile_expression(input_expression)?;
-
-        let output = match operator {
-            Negate => input_value.compile_neg(self)?.into(),
-            LogicalNot => input_value.compile_log_not(self)?.into(),
-            BitwiseNot => input_value.compile_bit_not(self)?.into(),
-        };
-
-        Ok(output)
-    }
-
-    pub fn compile_binary_operator(
-        &mut self,
-        operator: naga::BinaryOperator,
-        left_expression: naga::Handle<naga::Expression>,
-        right_expression: naga::Handle<naga::Expression>,
-    ) -> Result<Value, Error> {
-        use naga::BinaryOperator::*;
-        let left_value = self.compile_expression(left_expression)?;
-        let right_value = self.compile_expression(right_expression)?;
-
-        let output = match operator {
-            Add => left_value.compile_add(&right_value, self)?.into(),
-            Subtract => left_value.compile_sub(&right_value, self)?.into(),
-            Multiply => left_value.compile_mul(&right_value, self)?.into(),
-            Divide => left_value.compile_div(&right_value, self)?.into(),
-            Modulo => left_value.compile_mod(&right_value, self)?.into(),
-            Equal => left_value.compile_eq(&right_value, self)?.into(),
-            NotEqual => left_value.compile_neq(&right_value, self)?.into(),
-            Less => left_value.compile_lt(&right_value, self)?.into(),
-            LessEqual => left_value.compile_le(&right_value, self)?.into(),
-            Greater => left_value.compile_gt(&right_value, self)?.into(),
-            GreaterEqual => left_value.compile_ge(&right_value, self)?.into(),
-            And => left_value.compile_bit_and(&right_value, self)?.into(),
-            ExclusiveOr => left_value.compile_bit_xor(&right_value, self)?.into(),
-            InclusiveOr => left_value.compile_bit_or(&right_value, self)?.into(),
-            LogicalAnd => left_value.compile_log_and(&right_value, self)?.into(),
-            LogicalOr => left_value.compile_log_or(&right_value, self)?.into(),
-            ShiftLeft => left_value.compile_shl(&right_value, self)?.into(),
-            ShiftRight => left_value.compile_shr(&right_value, self)?.into(),
-        };
-
-        Ok(output)
+        pointer.deref_store(self.context, &mut self.function_builder, &value)
     }
 
     pub fn compile_if(
@@ -713,6 +476,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
 pub struct FunctionImporter<'source, 'compiler, 'function, Output> {
     pub function_refs: &'function mut SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
     pub compiler_context: &'compiler Context<'source>,
+    pub function_declarations: &'compiler SparseCoArena<naga::Function, FunctionDeclaration>,
     pub output: &'function mut Output,
     pub caller: &'function mut ir::Function,
 }
@@ -722,10 +486,12 @@ where
     Output: Module,
 {
     pub fn import_functions(&mut self, block: &naga::Block) -> Result<(), Error> {
+        use naga::Statement::*;
+
         for statement in block {
             match statement {
-                naga::Statement::Block(block) => self.import_functions(block)?,
-                naga::Statement::If {
+                Block(block) => self.import_functions(block)?,
+                If {
                     condition: _,
                     accept,
                     reject,
@@ -733,12 +499,12 @@ where
                     self.import_functions(accept)?;
                     self.import_functions(reject)?;
                 }
-                naga::Statement::Switch { selector: _, cases } => {
+                Switch { selector: _, cases } => {
                     for case in cases {
                         self.import_functions(&case.body)?;
                     }
                 }
-                naga::Statement::Loop {
+                Loop {
                     body,
                     continuing,
                     break_if: _,
@@ -746,17 +512,14 @@ where
                     self.import_functions(body)?;
                     self.import_functions(continuing)?;
                 }
-                naga::Statement::Call {
+                Call {
                     function,
                     arguments: _,
                     result: _,
                 } => {
                     if !self.function_refs.contains(*function) {
-                        let declaration = self
-                            .compiler_context
-                            .function_declarations
-                            .get(*function)
-                            .ok_or_else(|| {
+                        let declaration =
+                            self.function_declarations.get(*function).ok_or_else(|| {
                                 let name = self.compiler_context.source.functions[*function]
                                     .name
                                     .clone();
@@ -789,7 +552,9 @@ where
 
 pub fn compile_function<'source, 'compiler, Output>(
     context: &'compiler Context<'source>,
-    state: &'compiler mut State,
+    cl_context: &'compiler mut cranelift_codegen::Context,
+    fb_context: &'compiler mut cranelift_frontend::FunctionBuilderContext,
+    function_declarations: &SparseCoArena<naga::Function, FunctionDeclaration>,
     output: &'compiler mut Output,
     function: &'source naga::Function,
     declaration: &FunctionDeclaration,
@@ -797,14 +562,15 @@ pub fn compile_function<'source, 'compiler, Output>(
 where
     Output: Module,
 {
-    let mut function_compiler = FunctionCompiler::new(context, state, function, declaration)?;
+    let mut function_compiler =
+        FunctionCompiler::new(context, cl_context, fb_context, function, declaration)?;
 
     function_compiler.initialize_local_variables()?;
-    function_compiler.import_functions(output)?;
+    function_compiler.import_functions(function_declarations, output)?;
     function_compiler.compile_block(&function.body)?;
     function_compiler.finish();
 
-    output.define_function(declaration.function_id, &mut state.cl_context)?;
+    output.define_function(declaration.function_id, cl_context)?;
 
     Ok(())
 }

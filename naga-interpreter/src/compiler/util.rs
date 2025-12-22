@@ -1,8 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::sync::Arc;
 
+use arrayvec::ArrayVec;
 use cranelift_codegen::ir::immediates::Ieee16;
 use half::f16;
 
@@ -33,7 +31,7 @@ pub struct ClifOutput {
     #[debug(skip)]
     pub isa: Arc<dyn cranelift_codegen::isa::TargetIsa>,
     pub declarations: cranelift_module::ModuleDeclarations,
-    pub functions: HashMap<cranelift_module::FuncId, cranelift_codegen::ir::Function>,
+    pub functions: Vec<(cranelift_module::FuncId, cranelift_codegen::ir::Function)>,
 }
 
 impl ClifOutput {
@@ -112,7 +110,7 @@ impl cranelift_module::Module for ClifOutput {
     ) -> cranelift_module::ModuleResult<()> {
         let _ = ctrl_plane;
         let function = std::mem::replace(&mut ctx.func, cranelift_codegen::ir::Function::new());
-        self.functions.insert(func, function);
+        self.functions.push((func, function));
         Ok(())
     }
 
@@ -135,6 +133,26 @@ impl cranelift_module::Module for ClifOutput {
         let _ = (data_id, data);
         Ok(())
     }
+}
+
+pub(super) fn math_args_to_array_vec(
+    arg0: naga::Handle<naga::Expression>,
+    arg1: Option<naga::Handle<naga::Expression>>,
+    arg2: Option<naga::Handle<naga::Expression>>,
+    arg3: Option<naga::Handle<naga::Expression>>,
+) -> ArrayVec<naga::Handle<naga::Expression>, 4> {
+    let mut args = ArrayVec::new();
+
+    args.push(arg0);
+    let mut rest = [arg1, arg2, arg3].into_iter();
+    while let Some(Some(arg)) = rest.next() {
+        args.push(arg);
+    }
+    while let Some(arg) = rest.next() {
+        assert!(arg.is_none());
+    }
+
+    args
 }
 
 /*

@@ -11,7 +11,7 @@ cranelift-frontend = { version = "0.126.1", optional = true }
 cranelift-jit = { version = "0.126.1", optional = true }
 cranelift-module = { version = "0.126.1", optional = true }
 cranelift-native = { version = "0.126.1", optional = true }
-derive_more = { version = "2.1.0", features = ["debug"] }
+derive_more = { version = "2.1.0", features = ["debug", "from", "into"] }
 either = "1.15.0"
 half = { version = "2.7.1", features = ["bytemuck"] }
 memoffset = "0.9.1"

@@ -8,15 +8,12 @@ use cranelift_codegen::{
     isa::TargetIsa,
 };
 
-use crate::compiler::{
-    compiler::State,
-    types::{
-        FloatWidth,
-        IntWidth,
-        MatrixType,
-        ScalarType,
-        VectorType,
-    },
+use crate::compiler::types::{
+    FloatWidth,
+    IntWidth,
+    MatrixType,
+    ScalarType,
+    VectorType,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -54,7 +51,7 @@ impl SimdContext {
         SimdValues { count, ty }
     }
 
-    pub fn simd_immediates(&self, _state: &mut State) -> SimdImmediates {
+    pub fn simd_immediates(&self) -> SimdImmediates {
         /*let vector_reduce_shuffle_masks = SIMD_VECTOR_REDUCE_SHUFFLE_MASKS
             .map(|mask| state.cl_context.func.dfg.immediates.push(mask.into()));
         let matrix_transpose_shuffle_masks = {
