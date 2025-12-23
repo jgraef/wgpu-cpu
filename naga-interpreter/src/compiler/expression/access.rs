@@ -23,8 +23,6 @@ impl CompileExpression for AccessExpression {
 }
 
 impl EvaluateExpression for AccessExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }
@@ -43,8 +41,6 @@ impl CompileExpression for AccessIndexExpression {
 }
 
 impl EvaluateExpression for AccessIndexExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }

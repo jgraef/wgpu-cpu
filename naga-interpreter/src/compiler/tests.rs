@@ -171,7 +171,7 @@ fn clif_output() {
 }
 
 #[test]
-fn constants() {
+fn scalar_constant() {
     let output = helper().exec::<i32>(
         r#"
         struct Output {
@@ -188,5 +188,27 @@ fn constants() {
         }
         "#,
     );
-    assert_eq!(output, 25);
+    assert_eq!(output, 2468);
+}
+
+#[test]
+#[ignore = "wip"]
+fn vector_constant() {
+    let output = helper().exec::<[i32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4i,
+        }
+
+        const foo: vec4i = vec4i(1, 2, 3, 4);
+
+        @vertex
+        fn main() -> Output {
+            var bar: vec4i = foo;
+            return Output(vec4f(), bar);
+        }
+        "#,
+    );
+    assert_eq!(output, [1, 2, 3, 4]);
 }

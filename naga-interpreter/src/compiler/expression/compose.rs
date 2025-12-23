@@ -41,7 +41,7 @@ impl CompileExpression for ComposeExpression {
         let components = self
             .components
             .iter()
-            .map(|expression| compiler.compile_expression(*expression))
+            .map(|expression| expression.compile_expression(compiler))
             .collect::<Result<Vec<_>, Error>>()?;
 
         Value::compile_compose(compiler, ty, components)
@@ -49,10 +49,16 @@ impl CompileExpression for ComposeExpression {
 }
 
 impl EvaluateExpression for ComposeExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
-        todo!()
+        let ty = context.types[self.ty];
+
+        let components = self
+            .components
+            .iter()
+            .map(|handle| handle.evaluate_expression(context))
+            .collect::<Result<Vec<ConstantValue>, Error>>()?;
+
+        ConstantValue::evaluate_compose(context, ty, components)
     }
 }
 
@@ -226,5 +232,45 @@ impl CompileCompose<Value> for Value {
             _ => panic!("Compose is invalid for {ty:?}"),
         };
         Ok(value)
+    }
+}
+
+pub trait EvaluateCompose<Inner>: Sized + TypeOf {
+    type Output;
+
+    fn evaluate_compose(
+        context: &Context,
+        ty: Self::Type,
+        components: Vec<Inner>,
+    ) -> Result<Self, Error>;
+}
+
+impl EvaluateCompose<ConstantValue> for ConstantValue {
+    type Output = ConstantValue;
+
+    fn evaluate_compose(
+        context: &Context,
+        ty: Type,
+        components: Vec<ConstantValue>,
+    ) -> Result<Self, Error> {
+        match ty {
+            Type::Vector(vector_type) => {
+                // todo: try_into components to scalars and put them into vector
+                todo!();
+            }
+            Type::Matrix(matrix_type) => {
+                // like vector but check if inner type is a scalar or vector
+                todo!()
+            }
+            Type::Struct(struct_type) => {
+                // just build struct
+            }
+            Type::Array(array_type) => {
+                // just build array
+            }
+            _ => panic!("Compose is invalid for {ty:?}"),
+        }
+
+        todo!();
     }
 }

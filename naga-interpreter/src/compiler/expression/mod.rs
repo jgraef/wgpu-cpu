@@ -34,6 +34,10 @@ pub use binary::*;
 pub use call_result::*;
 pub use compose::*;
 pub use constant::*;
+use cranelift_codegen::{
+    entity::EntityRef,
+    ir,
+};
 pub use derivative::*;
 pub use function_argument::*;
 pub use image::*;
@@ -59,7 +63,10 @@ use crate::compiler::{
     function::FunctionCompiler,
     types::CastTo,
     util::math_args_to_array_vec,
-    value::Value,
+    value::{
+        AsIrValues,
+        Value,
+    },
 };
 
 macro_rules! define_expression {
@@ -300,6 +307,40 @@ pub trait CompileExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error>;
 }
 
+impl CompileExpression for naga::Handle<naga::Expression> {
+    fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
+        let value = if let Some(value) = compiler.emitted_expression.get(*self) {
+            value.clone()
+        }
+        else {
+            let expression = &compiler.function.expressions[*self];
+            // todo: do that here or in the constructor?
+            let expression: Expression = expression.clone().into();
+
+            let span = &compiler.function.expressions.get_span(*self);
+            compiler.set_source_span(*span);
+
+            let value = expression.compile_expression(compiler)?;
+
+            if compiler.context.config.collect_debug_info
+                && compiler.function.named_expressions.contains_key(&*self)
+            {
+                value.as_ir_values().for_each(|ir_value| {
+                    compiler
+                        .function_builder
+                        .set_val_label(ir_value, ir::ValueLabel::new(self.index()));
+                });
+            }
+
+            compiler.emitted_expression.insert(*self, value.clone());
+
+            value
+        };
+
+        Ok(value)
+    }
+}
+
 macro_rules! define_constant_expression {
     ($($variant:ident($ty:ty),)*) => {
         #[derive(Clone, Debug)]
@@ -308,8 +349,6 @@ macro_rules! define_constant_expression {
         }
 
         impl EvaluateExpression for ConstantExpression {
-            type Output = ConstantValue;
-
             fn evaluate_expression(
                 &self,
                 context: &Context,
@@ -359,7 +398,8 @@ define_constant_expression!(
     As(AsExpression),
 );
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("Expression is not constant: {expression:?}")]
 pub struct ExpressionNotConstant {
     pub expression: naga::Expression,
 }
@@ -449,9 +489,15 @@ impl TryFrom<naga::Expression> for ConstantExpression {
 }
 
 pub trait EvaluateExpression {
-    type Output;
+    fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error>;
+}
 
-    fn evaluate_expression(&self, context: &Context) -> Result<Self::Output, Error>;
+impl EvaluateExpression for naga::Handle<naga::Expression> {
+    fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
+        let expression = &context.source.global_expressions[*self];
+        let expression: ConstantExpression = expression.clone().try_into()?;
+        expression.evaluate_expression(context)
+    }
 }
 
 /*

@@ -24,8 +24,6 @@ impl CompileExpression for SelectExpression {
 }
 
 impl EvaluateExpression for SelectExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }

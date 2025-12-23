@@ -1,7 +1,10 @@
 use crate::compiler::{
     Error,
     compiler::Context,
-    constant::ConstantValue,
+    constant::{
+        CompileConstant,
+        ConstantValue,
+    },
     expression::{
         CompileExpression,
         EvaluateExpression,
@@ -17,14 +20,14 @@ pub struct ConstantUseExpression {
 
 impl CompileExpression for ConstantUseExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        todo!()
+        let value = self.evaluate_expression(&compiler.context)?;
+        value.compile_constant(compiler)
     }
 }
 
 impl EvaluateExpression for ConstantUseExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
-        todo!()
+        let constant = &context.source.constants[self.handle];
+        constant.init.evaluate_expression(context)
     }
 }

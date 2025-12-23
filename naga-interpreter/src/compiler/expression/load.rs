@@ -15,7 +15,7 @@ pub struct LoadExpression {
 
 impl CompileExpression for LoadExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        let pointer: PointerValue = compiler.compile_expression(self.pointer)?.try_into()?;
+        let pointer: PointerValue = self.pointer.compile_expression(compiler)?.try_into()?;
         pointer.deref_load(compiler.context, &mut compiler.function_builder)
     }
 }

@@ -2,6 +2,7 @@ use cranelift_codegen::ir::InstBuilder;
 
 use crate::compiler::{
     Error,
+    expression::CompileExpression,
     function::FunctionCompiler,
     statement::CompileStatement,
     value::{
@@ -20,7 +21,7 @@ pub struct IfStatement {
 impl CompileStatement for IfStatement {
     fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
         let condition_value: ScalarValue =
-            compiler.compile_expression(self.condition)?.try_into()?;
+            self.condition.compile_expression(compiler)?.try_into()?;
         let condition_value = condition_value.as_ir_value();
 
         let accept_block = compiler.function_builder.create_block();

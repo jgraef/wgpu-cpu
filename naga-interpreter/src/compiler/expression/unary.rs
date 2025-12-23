@@ -34,7 +34,7 @@ pub struct UnaryExpression {
 impl CompileExpression for UnaryExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         use naga::UnaryOperator::*;
-        let input_value = compiler.compile_expression(self.operand)?;
+        let input_value = self.operand.compile_expression(compiler)?;
 
         let output = match self.operator {
             Negate => input_value.compile_neg(compiler)?.into(),
@@ -47,8 +47,6 @@ impl CompileExpression for UnaryExpression {
 }
 
 impl EvaluateExpression for UnaryExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }

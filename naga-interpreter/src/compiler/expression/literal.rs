@@ -6,7 +6,10 @@ use cranelift_codegen::ir::{
 use crate::compiler::{
     Error,
     compiler::Context,
-    constant::ConstantScalar,
+    constant::{
+        ConstantScalar,
+        ConstantValue,
+    },
     expression::{
         CompileExpression,
         EvaluateExpression,
@@ -37,10 +40,19 @@ impl CompileExpression for LiteralExpression {
 }
 
 impl EvaluateExpression for LiteralExpression {
-    type Output = ConstantScalar;
+    fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
+        use naga::Literal::*;
 
-    fn evaluate_expression(&self, context: &Context) -> Result<ConstantScalar, Error> {
-        todo!()
+        let value = match self.literal {
+            F32(value) => ConstantScalar::F32(value),
+            F16(value) => ConstantScalar::F16(value),
+            U32(value) => ConstantScalar::U32(value),
+            I32(value) => ConstantScalar::I32(value),
+            Bool(value) => ConstantScalar::Bool(value),
+            _ => panic!("invalid constant literal: {:?}", self.literal),
+        };
+
+        Ok(value.into())
     }
 }
 

@@ -2,6 +2,7 @@ use cranelift_codegen::ir::InstBuilder;
 
 use crate::compiler::{
     Error,
+    expression::CompileExpression,
     function::FunctionCompiler,
     statement::CompileStatement,
     value::AsIrValues,
@@ -17,7 +18,7 @@ impl CompileStatement for ReturnStatement {
         let mut return_values = vec![];
 
         if let Some(expression) = self.value {
-            let value = compiler.compile_expression(expression)?;
+            let value = expression.compile_expression(compiler)?;
             return_values.extend(value.as_ir_values());
         }
 

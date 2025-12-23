@@ -24,8 +24,6 @@ impl CompileExpression for SwizzleExpression {
 }
 
 impl EvaluateExpression for SwizzleExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }

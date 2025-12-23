@@ -1,7 +1,10 @@
 use crate::compiler::{
     Error,
     function::FunctionCompiler,
-    statement::CompileStatement,
+    statement::{
+        CompileStatement,
+        Statement,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -17,7 +20,8 @@ impl CompileStatement for naga::Block {
 
         for (statement, span) in self.span_iter() {
             compiler.set_source_span(*span);
-            compiler.compile_statement(statement)?;
+            let statement: Statement = statement.clone().into();
+            statement.compile_statement(compiler)?;
         }
         Ok(())
     }

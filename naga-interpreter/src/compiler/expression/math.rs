@@ -25,8 +25,6 @@ impl CompileExpression for MathExpression {
 }
 
 impl EvaluateExpression for MathExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }

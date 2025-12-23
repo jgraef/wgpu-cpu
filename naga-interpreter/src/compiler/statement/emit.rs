@@ -1,5 +1,6 @@
 use crate::compiler::{
     Error,
+    expression::CompileExpression,
     function::FunctionCompiler,
     statement::CompileStatement,
 };
@@ -13,7 +14,7 @@ impl CompileStatement for EmitStatement {
     fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
         for expression in self.expressions.clone() {
             // all compiled expressions are automatically stored as emitted.
-            compiler.compile_expression(expression)?;
+            expression.compile_expression(compiler)?;
         }
         Ok(())
     }

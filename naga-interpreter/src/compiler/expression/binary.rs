@@ -36,8 +36,8 @@ pub struct BinaryExpression {
 impl CompileExpression for BinaryExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         use naga::BinaryOperator::*;
-        let left_value = compiler.compile_expression(self.left_operand)?;
-        let right_value = compiler.compile_expression(self.right_operand)?;
+        let left_value = self.left_operand.compile_expression(compiler)?;
+        let right_value = self.right_operand.compile_expression(compiler)?;
 
         let output = match self.operator {
             Add => left_value.compile_add(compiler, &right_value)?.into(),
@@ -65,8 +65,6 @@ impl CompileExpression for BinaryExpression {
 }
 
 impl EvaluateExpression for BinaryExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }

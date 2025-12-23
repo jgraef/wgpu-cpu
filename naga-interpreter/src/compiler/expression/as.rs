@@ -36,14 +36,12 @@ pub struct AsExpression {
 
 impl CompileExpression for AsExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        let input_value = compiler.compile_expression(self.expression)?;
+        let input_value = self.expression.compile_expression(compiler)?;
         input_value.compile_as(compiler, self.target)
     }
 }
 
 impl EvaluateExpression for AsExpression {
-    type Output = ConstantValue;
-
     fn evaluate_expression(&self, context: &Context) -> Result<ConstantValue, Error> {
         todo!()
     }

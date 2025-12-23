@@ -3,13 +3,8 @@ use std::{
     ops::Range,
 };
 
-use cranelift_codegen::{
-    entity::EntityRef,
-    ir::{
-        self,
-        FuncRef,
-        ValueLabel,
-    },
+use cranelift_codegen::ir::{
+    self,
 };
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{
@@ -21,22 +16,15 @@ use crate::{
     compiler::{
         Error,
         compiler::Context,
-        expression::{
-            CompileExpression,
-            Expression,
-        },
+        expression::CompileExpression,
         simd::SimdImmediates,
-        statement::{
-            CompileStatement,
-            Statement,
-        },
+        statement::CompileStatement,
         types::{
             PointerType,
             Type,
         },
         util::alignment_log2,
         value::{
-            AsIrValues,
             StackLocation,
             Store,
             Value,
@@ -75,7 +63,7 @@ pub struct FunctionDeclaration {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ImportedFunction<'compiler> {
-    pub function_ref: FuncRef,
+    pub function_ref: ir::FuncRef,
     pub declaration: &'compiler FunctionDeclaration,
 }
 
@@ -167,7 +155,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         for (handle, variable) in self.function.local_variables.iter() {
             if let Some(init) = variable.init {
                 let variable = self.local_variables[handle];
-                let value = self.compile_expression(init)?;
+                let value = init.compile_expression(self)?;
                 value.store(
                     self.context,
                     &mut self.function_builder,
@@ -218,46 +206,6 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             self.source_locations.push(span);
             self.function_builder.set_srcloc(ir::SourceLoc::new(id));
         }
-    }
-
-    /// Compile a [`naga::Statement`]
-    pub fn compile_statement(&mut self, statement: &naga::Statement) -> Result<(), Error> {
-        let statement: Statement = statement.clone().into();
-        statement.compile_statement(self)
-    }
-
-    pub fn compile_expression(
-        &mut self,
-        handle: naga::Handle<naga::Expression>,
-    ) -> Result<Value, Error> {
-        let value = if let Some(value) = self.emitted_expression.get(handle) {
-            value.clone()
-        }
-        else {
-            let expression = &self.function.expressions[handle];
-            // todo: do that here or in the constructor?
-            let expression: Expression = expression.clone().into();
-
-            let span = &self.function.expressions.get_span(handle);
-            self.set_source_span(*span);
-
-            let value = expression.compile_expression(self)?;
-
-            if self.context.config.collect_debug_info
-                && self.function.named_expressions.contains_key(&handle)
-            {
-                value.as_ir_values().for_each(|ir_value| {
-                    self.function_builder
-                        .set_val_label(ir_value, ValueLabel::new(handle.index()));
-                });
-            }
-
-            self.emitted_expression.insert(handle, value.clone());
-
-            value
-        };
-
-        Ok(value)
     }
 }
 

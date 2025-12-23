@@ -1,6 +1,7 @@
 use crate::compiler::{
     Error,
     compiler::FuncBuilderExt,
+    expression::CompileExpression,
     function::FunctionCompiler,
     statement::CompileStatement,
 };
@@ -17,7 +18,7 @@ impl CompileStatement for CallStatement {
         let argument_values = self
             .arguments
             .iter()
-            .map(|argument| compiler.compile_expression(*argument))
+            .map(|argument| argument.compile_expression(compiler))
             .collect::<Result<Vec<_>, Error>>()?;
 
         // todo: error would be nicer

@@ -31,6 +31,7 @@ use crate::{
             Compiler,
             Config,
         },
+        expression::ExpressionNotConstant,
         types::InvalidType,
         util::ClifOutput,
         value::UnexpectedType,
@@ -42,6 +43,8 @@ use crate::{
     },
 };
 
+// todo: check which of these should panic instead (because we assume the source
+// module to be correct).
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Unsupported type: {ty:?}")]
@@ -73,6 +76,10 @@ pub enum Error {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    // this should probaly panic
+    #[error("transparent")]
+    ExpressionNotConstant(#[from] ExpressionNotConstant),
 }
 
 /// JIT-compile a [`naga::Module`] for execution on the CPU.
