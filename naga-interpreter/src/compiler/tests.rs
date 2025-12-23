@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use approx::assert_abs_diff_eq;
 use naga::BuiltIn;
 
@@ -11,7 +13,9 @@ use crate::{
         CompilerBackend,
         compile_clif,
         compile_clif_to_string,
+        compile_jit,
         compiler::Config,
+        runtime::Runtime,
     },
     entry_point::EntryPointIndex,
     make_tests,
@@ -168,7 +172,7 @@ fn clif_output() {
     let output = String::from_utf8(output).unwrap();
 
     println!("{output}");
-    assert!(output.contains("function %main(i32) -> f32x4"));
+    assert!(output.contains("function %main(i64, i32) -> f32x4"));
 }
 
 #[test]
@@ -385,7 +389,6 @@ fn switch_break() {
 }
 
 #[test]
-#[ignore = "wip"]
 fn global_variable() {
     let output = helper().exec::<[i32; 4]>(
         r#"
@@ -524,4 +527,68 @@ fn insert_lane_into_i32x2_bug() {
 
     let output = helper().exec::<[i32; 2]>(source);
     assert_eq!(output, [1, 2]);
+}
+
+#[test]
+#[ignore = "traps"]
+fn trap_divide_by_zero() {
+    let source = r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var a = 123;
+            var b = 0;
+            var c = a / b;
+            return Output(vec4f(), c);
+        }
+        "#;
+
+    let _output = helper().exec::<i32>(source);
+}
+
+#[test]
+#[ignore = "traps"]
+fn trap_runtime_panic() {
+    let source = r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            return Output(vec4f(), 0);
+        }
+        "#;
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+
+    pub struct PanicInTheRuntime;
+    impl Runtime for PanicInTheRuntime {
+        type Error = Infallible;
+
+        fn copy_inputs_to(&mut self, _target: &mut [u8]) -> Result<(), Self::Error> {
+            panic!("copy_inputs_to")
+        }
+
+        fn copy_outputs_from(&mut self, _source: &[u8]) -> Result<(), Self::Error> {
+            panic!("copy_outputs_from")
+        }
+
+        fn initialize_global_variables(
+            &mut self,
+            _private_data: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            panic!("initialize_global_variables")
+        }
+    }
+
+    let module = compile_jit(&module, &info).unwrap();
+    let entry_point = module.entry_point(EntryPointIndex::from(0));
+    entry_point.run_with_runtime(PanicInTheRuntime).unwrap();
 }

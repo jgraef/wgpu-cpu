@@ -21,15 +21,28 @@ impl CompileStatement for CallStatement {
             .map(|argument| argument.compile_expression(compiler))
             .collect::<Result<Vec<_>, Error>>()?;
 
+        /*
+        compiler.compile_call()
+        let type_layout = context.layouter[variable.ty];
+                        let stack_slot_key = ir::StackSlotKey::new(handle.index().try_into().unwrap());
+
+                        let stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
+                            kind: ir::StackSlotKind::ExplicitSlot,
+                            size: type_layout.size,
+                            align_shift: alignment_log2(type_layout.alignment),
+                            key: Some(stack_slot_key),
+                        });*/
+
         // todo: error would be nicer
         let imported_function = compiler
             .imported_functions
             .get(self.function)
             .unwrap_or_else(|| panic!("Function not imported: {:?}", self.function));
 
-        let result_value = compiler.function_builder.call_(
+        let result_value = compiler.function_builder.call_shader_function(
             compiler.context,
             imported_function.function_ref,
+            &compiler.runtime_context,
             argument_values,
             imported_function.declaration.return_type,
         );

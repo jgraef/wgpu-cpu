@@ -3,9 +3,7 @@ use std::{
     ops::Range,
 };
 
-use cranelift_codegen::ir::{
-    self,
-};
+use cranelift_codegen::ir;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{
     FuncId,
@@ -17,7 +15,7 @@ use crate::{
         Error,
         compiler::Context,
         expression::CompileExpression,
-        simd::SimdImmediates,
+        runtime::RuntimeContextValue,
         statement::{
             BlockStatement,
             CompileStatement,
@@ -77,18 +75,19 @@ pub struct FunctionCompiler<'source, 'compiler> {
     pub declaration: &'compiler FunctionDeclaration,
     pub entry_block: ir::Block,
     pub local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
-    pub simd_immediates: SimdImmediates,
+    //pub simd_immediates: SimdImmediates,
     pub imported_functions: SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
     #[debug(skip)]
     pub function_builder: FunctionBuilder<'compiler>,
     pub emitted_expression: SparseCoArena<naga::Expression, Value>,
     pub source_locations: Vec<naga::Span>,
     pub loop_switch_stack: LoopSwitchStack,
+    pub runtime_context: RuntimeContextValue,
 }
 
 impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
     pub fn new(
-        compiler_context: &'compiler Context<'source>,
+        context: &'compiler Context<'source>,
         cl_context: &'compiler mut cranelift_codegen::Context,
         fb_context: &'compiler mut cranelift_frontend::FunctionBuilderContext,
         function: &'source naga::Function,
@@ -96,25 +95,31 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
     ) -> Result<Self, Error> {
         cl_context.clear();
 
-        if compiler_context.config.collect_debug_info {
+        if context.config.collect_debug_info {
             cl_context.func.dfg.collect_debug_info();
         }
 
-        let simd_immediates = compiler_context.simd_context.simd_immediates();
-
+        //let simd_immediates = context.simd_context.simd_immediates();
         cl_context.func.signature = declaration.signature.clone();
 
         let mut function_builder = FunctionBuilder::new(&mut cl_context.func, fb_context);
 
         let entry_block = function_builder.create_block();
         function_builder.append_block_params_for_function_params(entry_block);
-        function_builder.switch_to_block(entry_block);
         function_builder.seal_block(entry_block);
+        function_builder.switch_to_block(entry_block);
+
+        // implicit first argument is the runtime context pointer
+        let runtime_context = {
+            let block_params = function_builder.block_params(entry_block);
+            let runtime_pointer = block_params[0];
+            RuntimeContextValue::new(context, &mut function_builder, runtime_pointer)
+        };
 
         // local variables
         let local_variables =
             CoArena::try_from_arena(&function.local_variables, |handle, variable| {
-                let type_layout = compiler_context.layouter[variable.ty];
+                let type_layout = context.layouter[variable.ty];
                 let stack_slot_key = ir::StackSlotKey::new(handle.index().try_into().unwrap());
 
                 let stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
@@ -129,24 +134,25 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
 
                 Ok::<_, Error>(LocalVariable {
                     name: variable.name.as_deref(),
-                    ty: compiler_context.types[variable.ty],
+                    ty: context.types[variable.ty],
                     pointer_type,
                     stack_slot,
                 })
             })?;
 
         Ok(Self {
-            context: compiler_context,
+            context,
             function,
             declaration,
             entry_block,
             local_variables,
-            simd_immediates,
+            //simd_immediates,
             imported_functions: Default::default(),
             function_builder,
             emitted_expression: Default::default(),
             source_locations: vec![],
             loop_switch_stack: Default::default(),
+            runtime_context,
         })
     }
 

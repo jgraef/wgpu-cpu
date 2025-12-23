@@ -25,6 +25,8 @@ pub struct SwitchStatement {
 
 impl CompileStatement for SwitchStatement {
     fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+        // todo: could use br_table
+
         let selector_value: ScalarValue = self.selector.compile_expression(compiler)?.try_into()?;
         let selector_value = selector_value.as_ir_value();
 

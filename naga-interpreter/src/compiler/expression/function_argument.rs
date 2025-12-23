@@ -21,8 +21,7 @@ impl CompileExpression for FunctionArgumentExpression {
             .expect("function argument index overflow");
         let argument = &compiler.declaration.arguments[index];
         let block_params = compiler.function_builder.block_params(compiler.entry_block);
-        let block_params: std::iter::Copied<std::slice::Iter<'_, cranelift_codegen::ir::Value>> =
-            block_params[argument.block_inputs.clone()].iter().copied();
+        let block_params = block_params[argument.block_inputs.clone()].iter().copied();
 
         Ok(Value::from_ir_values_iter(
             &compiler.context,

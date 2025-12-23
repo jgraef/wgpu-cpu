@@ -13,7 +13,7 @@ use crate::{
         DefaultRuntime,
         Runtime,
         RuntimeContext,
-        RuntimeContextData,
+        RuntimeData,
     },
     entry_point::{
         EntryPointIndex,
@@ -141,7 +141,7 @@ impl<'a> EntryPoint<'a> {
         R: Runtime,
     {
         |runtime: R| {
-            let mut runtime_context_data = RuntimeContextData::new(runtime);
+            let mut runtime_context_data = RuntimeData::new(runtime);
             let mut runtime_context = RuntimeContext::new(&mut runtime_context_data);
 
             unsafe {
@@ -166,6 +166,13 @@ impl<'a> EntryPoint<'a> {
         }
     }
 
+    pub fn run_with_runtime<R>(&self, runtime: R) -> Result<(), R::Error>
+    where
+        R: Runtime,
+    {
+        self.function()(runtime)
+    }
+
     pub fn run<I, O>(&self, input: I, output: O)
     where
         I: ShaderInput,
@@ -178,7 +185,7 @@ impl<'a> EntryPoint<'a> {
             output_layout: &self.inner.data.output_layout,
         };
 
-        self.function()(runtime).expect("runtime error");
+        self.run_with_runtime(runtime).expect("runtime error");
     }
 }
 

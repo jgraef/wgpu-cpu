@@ -94,7 +94,8 @@ pub fn compile_jit(
 
     // since we're compiling for JIT we can use any calling convention internally.
     let config = Config {
-        calling_convention: Some(isa::CallConv::Fast),
+        // fixme: doesn't support exceptions
+        //calling_convention: Some(isa::CallConv::Fast),
         ..Default::default()
     };
 

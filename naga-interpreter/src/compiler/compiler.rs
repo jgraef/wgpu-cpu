@@ -41,8 +41,7 @@
 use cranelift_codegen::{
     ir::{
         self,
-        AbiParam,
-        InstBuilder,
+        InstBuilder as _,
     },
     isa,
 };
@@ -317,17 +316,23 @@ where
         &mut self,
         function: &'source naga::Function,
     ) -> Result<FunctionDeclaration, Error> {
-        //let mut signature = self.output.make_signature();
         let mut signature = ir::Signature::new(self.context.internal_calling_convention());
 
         // return values
         let return_type = function.result.as_ref().map(|result| {
             let return_type = self.context.types[result.ty];
-            signature
-                .returns
-                .extend(return_type.as_ir_types(&self.context).map(AbiParam::new));
+            signature.returns.extend(
+                return_type
+                    .as_ir_types(&self.context)
+                    .map(ir::AbiParam::new),
+            );
             return_type
         });
+
+        // implicit first argument is the runtime context pointer
+        signature
+            .params
+            .push(ir::AbiParam::new(self.context.pointer_type()));
 
         // arguments
         let mut arguments = Vec::with_capacity(function.arguments.len());
@@ -336,7 +341,7 @@ where
             signature.params.extend(
                 self.context.types[argument.ty]
                     .as_ir_types(&self.context)
-                    .map(AbiParam::new),
+                    .map(ir::AbiParam::new),
             );
             let end = signature.params.len();
 
@@ -386,18 +391,16 @@ where
             .func
             .signature
             .params
-            .push(AbiParam::new(self.context.pointer_type()));
+            .push(ir::AbiParam::new(self.context.pointer_type()));
 
         let mut function_builder =
             FunctionBuilder::new(&mut self.cl_context.func, &mut self.fb_context);
 
         let entry_block = function_builder.create_block();
-        let panic_block = function_builder.create_block();
-
         function_builder.append_block_params_for_function_params(entry_block);
         function_builder.switch_to_block(entry_block);
 
-        let runtime = {
+        let runtime_context = {
             let block_params = function_builder.block_params(entry_block);
             // note: the order of these arguments must be synchronized with the call to the
             // compiled code in
@@ -409,7 +412,7 @@ where
         function_builder.seal_block(entry_block);
 
         let mut shim_builder =
-            RuntimeEntryPointBuilder::new(&self.context, function_builder, runtime, panic_block);
+            RuntimeEntryPointBuilder::new(&self.context, function_builder, runtime_context);
 
         let (arguments, input_layout) =
             shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
@@ -421,9 +424,10 @@ where
             .map(|function_result| Type::from_naga(&self.context.source, function_result.ty))
             .transpose()?;
 
-        let return_value = shim_builder.function_builder.call_(
+        let return_value = shim_builder.function_builder.call_shader_function(
             &self.context,
             main_function_ref,
+            &runtime_context,
             arguments,
             return_type,
         );
@@ -438,19 +442,8 @@ where
 
         let mut function_builder = shim_builder.function_builder;
 
-        // return from the block we're in
+        // return from function
         function_builder.ins().return_(&[]);
-
-        // the panic block will just return
-        // we don't need to return any error code since errors are written into a field
-        // in the runtime data.
-        function_builder.switch_to_block(panic_block);
-        function_builder.ins().return_(&[]);
-        function_builder.seal_block(panic_block);
-
-        function_builder.finalize();
-
-        //println!("{:#?}", self.state.cl_context.func);
 
         let shim_function = self.output.declare_function(
             SHIM_FUNCTION_NAME,
@@ -478,10 +471,11 @@ pub struct PrivateMemory {
 }
 
 pub trait FuncBuilderExt {
-    fn call_(
+    fn call_shader_function(
         &mut self,
         context: &Context,
         func_ref: ir::FuncRef,
+        runtime_context: &RuntimeContextValue,
         arguments: impl IntoIterator<Item = Value>,
         return_type: Option<Type>,
     ) -> Option<Value>;
@@ -490,27 +484,26 @@ pub trait FuncBuilderExt {
 }
 
 impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
-    fn call_(
+    fn call_shader_function(
         &mut self,
         context: &Context,
         func_ref: ir::FuncRef,
+        runtime_context: &RuntimeContextValue,
         arguments: impl IntoIterator<Item = Value>,
         return_type: Option<Type>,
     ) -> Option<Value> {
-        let mut values = vec![];
+        let mut values = vec![runtime_context.pointer];
         for argument in arguments {
             values.extend(argument.as_ir_values());
         }
 
         let inst = self.ins().call(func_ref, &values);
+        let results = self.inst_results(inst).iter().copied();
 
-        return_type.map(|return_type| {
-            Value::from_ir_values_iter(
-                context,
-                return_type,
-                self.inst_results(inst).iter().copied(),
-            )
-        })
+        let return_value = return_type
+            .map(|return_type| Value::from_ir_values_iter(context, return_type, results));
+
+        return_value
     }
 
     fn switch_to_void_block(&mut self) {
@@ -521,3 +514,6 @@ impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
         self.switch_to_block(void_block);
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct FunctionCallResult(pub ir::Value);

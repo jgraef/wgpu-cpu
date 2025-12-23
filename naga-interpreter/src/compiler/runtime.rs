@@ -38,6 +38,7 @@ pub trait Runtime: Sized {
 
     fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), Self::Error>;
     fn copy_outputs_from(&mut self, source: &[u8]) -> Result<(), Self::Error>;
+    fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error>;
 }
 
 impl<R> Runtime for &mut R
@@ -53,13 +54,19 @@ where
     fn copy_outputs_from(&mut self, source: &[u8]) -> Result<(), Self::Error> {
         R::copy_outputs_from(self, source)
     }
+
+    fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error> {
+        R::initialize_global_variables(self, private_data)
+    }
 }
 
+// note: this must be synchronized with the code generated in
+// RuntimeMethod::call
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-pub enum RuntimeStatusCode {
-    Abort = 0,
-    Ok = 1,
+#[repr(i8)]
+pub enum RuntimeResult {
+    Abort = 1,
+    Ok = 0,
 }
 
 #[derive(derive_more::Debug)]
@@ -69,7 +76,7 @@ pub enum AbortPayload<E> {
 }
 
 #[derive(Debug)]
-pub struct RuntimeContextData<R>
+pub struct RuntimeData<R>
 where
     R: Runtime,
 {
@@ -77,7 +84,7 @@ where
     pub abort_payload: Option<AbortPayload<R::Error>>,
 }
 
-impl<R> RuntimeContextData<R>
+impl<R> RuntimeData<R>
 where
     R: Runtime,
 {
@@ -104,31 +111,34 @@ where
 
     /// # Safety
     ///
-    /// The provided `*mut DynRuntimeContextData` must correspond to a valid
-    /// `&mut Self`.
-    pub unsafe fn from_pointer_mut<'a>(pointer: *mut DynRuntimeContextData) -> &'a mut Self {
+    /// The provided `*mut DynRuntimeData` must correspond to a valid `&mut
+    /// Self`.
+    pub unsafe fn from_pointer_mut<'a>(pointer: *mut DynRuntimeData) -> &'a mut Self {
         unsafe { &mut *(pointer as *mut Self) }
     }
 
-    pub fn as_pointer_mut(&mut self) -> *mut DynRuntimeContextData {
-        self as *mut Self as *mut DynRuntimeContextData
+    pub fn as_pointer_mut(&mut self) -> *mut DynRuntimeData {
+        self as *mut Self as *mut DynRuntimeData
     }
 
     pub fn with_runtime(
         &mut self,
         mut f: impl FnMut(&mut R) -> Result<(), R::Error>,
-    ) -> RuntimeStatusCode {
-        // any panics in the bindings implementations will be catched here and
-        // propagated manually to where the entry point was called
+    ) -> RuntimeResult {
+        // rust can't unwind when called from external code, so we have to handle this
+        // ourselves. any panics and errors in the runtime implementation will
+        // be catched here and stored in the RuntimeData. then a RuntimeResult is
+        // returned to indicate to the caller (RuntimeMethod::call) to abort the shader
+        // program.
         match std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut self.runtime))) {
-            Ok(Ok(())) => RuntimeStatusCode::Ok,
+            Ok(Ok(())) => RuntimeResult::Ok,
             Ok(Err(runtime_error)) => {
                 self.abort_payload = Some(AbortPayload::RuntimeError(runtime_error));
-                RuntimeStatusCode::Abort
+                RuntimeResult::Abort
             }
             Err(panic) => {
                 self.abort_payload = Some(AbortPayload::Panic(panic));
-                RuntimeStatusCode::Abort
+                RuntimeResult::Abort
             }
         }
     }
@@ -138,37 +148,34 @@ where
 ///
 /// https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs
 #[repr(C)]
-pub struct DynRuntimeContextData {
+pub struct DynRuntimeData {
     _data: (),
-    _marker: PhantomData<(*mut u8, core::marker::PhantomPinned)>,
-}
-
-impl Debug for DynRuntimeContextData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("DynRuntimeContextData")
-            .field(&(self as *const _ as *const u8))
-            .finish()
-    }
+    _marker: PhantomData<(*mut u8, std::marker::PhantomPinned)>,
 }
 
 #[derive(Debug)]
 #[repr(C)]
 pub struct RuntimeContext {
     /// Pointer to the underlying runtime context struct.
-    pub data: *mut DynRuntimeContextData,
+    pub runtime: *mut DynRuntimeData,
 
     /// Contains function pointers for the runtime API
     pub vtable: RuntimeVtable,
+
+    /// The compiled shader will store a reference to its stack allocated
+    /// private data here
+    pub private_data: *mut u8,
 }
 
 impl RuntimeContext {
-    pub fn new<R>(data: &mut RuntimeContextData<R>) -> Self
+    pub fn new<R>(data: &mut RuntimeData<R>) -> Self
     where
         R: Runtime,
     {
         Self {
-            data: data.as_pointer_mut(),
+            runtime: data.as_pointer_mut(),
             vtable: RuntimeVtable::new::<R>(),
+            private_data: std::ptr::null_mut(),
         }
     }
 }
@@ -193,8 +200,7 @@ pub struct RuntimeVtable {
     ///
     /// The [`Runtime`] implementation is responsible for knowing the correct
     /// layout of the arguments on the stack. (see [`BindingStackLayout`]).
-    pub copy_inputs_to:
-        unsafe extern "C" fn(*mut DynRuntimeContextData, *mut u8, usize) -> RuntimeStatusCode,
+    pub copy_inputs_to: unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> RuntimeResult,
 
     /// Copy shader return value from stack
     ///
@@ -209,7 +215,7 @@ pub struct RuntimeVtable {
     /// The [`Runtime`] implementation is responsible for kowing the correct
     /// layout of the return value on the stack. (see [`BindingStackLayout`]).
     pub copy_outputs_from:
-        unsafe extern "C" fn(*mut DynRuntimeContextData, *const u8, usize) -> RuntimeStatusCode,
+        unsafe extern "C" fn(*mut DynRuntimeData, *const u8, usize) -> RuntimeResult,
 }
 
 impl RuntimeVtable {
@@ -218,17 +224,17 @@ impl RuntimeVtable {
         R: Runtime,
     {
         unsafe extern "C" fn copy_inputs_to<R>(
-            data: *mut DynRuntimeContextData,
+            data: *mut DynRuntimeData,
             target: *mut u8,
             len: usize,
-        ) -> RuntimeStatusCode
+        ) -> RuntimeResult
         where
             R: Runtime,
         {
             let data = unsafe {
                 // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
-                // that corresponds to a valid `&mut R`
-                RuntimeContextData::<R>::from_pointer_mut(data)
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
             };
 
             let target = std::ptr::slice_from_raw_parts_mut(target, len);
@@ -242,17 +248,17 @@ impl RuntimeVtable {
         }
 
         unsafe extern "C" fn copy_outputs_from<R>(
-            data: *mut DynRuntimeContextData,
+            data: *mut DynRuntimeData,
             source: *const u8,
             len: usize,
-        ) -> RuntimeStatusCode
+        ) -> RuntimeResult
         where
             R: Runtime,
         {
             let data = unsafe {
                 // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
-                // that corresponds to a valid `&mut R`
-                RuntimeContextData::<R>::from_pointer_mut(data)
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
             };
 
             let source = std::ptr::slice_from_raw_parts(source, len);
@@ -311,8 +317,8 @@ impl RuntimeMethodSignatures {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeContextValue {
-    pub runtime_pointer: ir::Value,
-    pub method_signatures: RuntimeMethodSignatures,
+    pub pointer: ir::Value,
+    pub signatures: RuntimeMethodSignatures,
 }
 
 impl RuntimeContextValue {
@@ -321,10 +327,9 @@ impl RuntimeContextValue {
         function_builder: &mut FunctionBuilder,
         runtime_pointer: ir::Value,
     ) -> Self {
-        let method_signatures = RuntimeMethodSignatures::new(function_builder, context);
         Self {
-            runtime_pointer,
-            method_signatures,
+            pointer: runtime_pointer,
+            signatures: RuntimeMethodSignatures::new(function_builder, context),
         }
     }
 }
@@ -352,8 +357,8 @@ impl<'a> RuntimeMethod<'a> {
         context: &Context,
         function_builder: &mut FunctionBuilder,
         arguments: impl IntoIterator<Item = ir::Value>,
-    ) -> ir::Value {
-        let data_pointer_offset: i32 = memoffset::offset_of!(RuntimeContext, data)
+    ) {
+        let data_pointer_offset: i32 = memoffset::offset_of!(RuntimeContext, runtime)
             .try_into()
             .expect("pointer offset overflow");
         let vtable_offset: i32 = memoffset::offset_of!(RuntimeContext, vtable)
@@ -366,14 +371,14 @@ impl<'a> RuntimeMethod<'a> {
         let data_pointer = function_builder.ins().load(
             context.pointer_type(),
             memory_flags,
-            self.runtime_value.runtime_pointer,
+            self.runtime_value.pointer,
             data_pointer_offset,
         );
 
         let function_pointer = function_builder.ins().load(
             context.pointer_type(),
             memory_flags,
-            self.runtime_value.runtime_pointer,
+            self.runtime_value.pointer,
             self.vtable_offset + vtable_offset,
         );
 
@@ -387,7 +392,15 @@ impl<'a> RuntimeMethod<'a> {
                 .call_indirect(self.signature, function_pointer, &arguments);
         let results = function_builder.inst_results(inst);
         assert_eq!(results.len(), 1);
-        results[0]
+        let abort_flag = results[0];
+
+        // check abort flag
+        // todo: propagate error through call stack to entry point and return from
+        // shader
+        const RUNTIME_ERROR_TRAP_CODE: ir::TrapCode = const { ir::TrapCode::user(1).unwrap() };
+        function_builder
+            .ins()
+            .trapnz(abort_flag, RUNTIME_ERROR_TRAP_CODE);
     }
 }
 
@@ -400,7 +413,7 @@ macro_rules! runtime_method {
     ($runtime:expr, $func:ident) => {{
         let vtable_offset = memoffset::offset_of!(RuntimeVtable, $func);
         let vtable_offset = i32::try_from(vtable_offset).expect("runtime vtable offset overflow");
-        let signature = $runtime.method_signatures.$func;
+        let signature = $runtime.signatures.$func;
         RuntimeMethod {
             runtime_value: &$runtime,
             vtable_offset,
@@ -413,7 +426,6 @@ pub struct RuntimeEntryPointBuilder<'source, 'compiler> {
     pub context: &'compiler Context<'source>,
     pub function_builder: FunctionBuilder<'compiler>,
     pub runtime: RuntimeContextValue,
-    pub panic_block: ir::Block,
 }
 
 impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
@@ -421,13 +433,11 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
         context: &'compiler Context<'source>,
         function_builder: FunctionBuilder<'compiler>,
         runtime: RuntimeContextValue,
-        panic_block: ir::Block,
     ) -> Self {
         Self {
             context,
             function_builder,
             runtime,
-            panic_block,
         }
     }
 
@@ -493,20 +503,11 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
                 .ins()
                 .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
-        let result = runtime_method!(self.runtime, copy_inputs_to).call(
+        runtime_method!(self.runtime, copy_inputs_to).call(
             self.context,
             &mut self.function_builder,
             [stack_slot_pointer, len],
         );
-
-        // check result (error?)
-        // 1=ok, 0=panic
-        let continue_block = self.function_builder.create_block();
-        self.function_builder
-            .ins()
-            .brif(result, continue_block, [], self.panic_block, []);
-        self.function_builder.switch_to_block(continue_block);
-        self.function_builder.seal_block(continue_block);
 
         let argument_values = argument_values
             .into_iter()
@@ -566,22 +567,17 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
                 .ins()
                 .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
-        let result = runtime_method!(self.runtime, copy_outputs_from).call(
+        runtime_method!(self.runtime, copy_outputs_from).call(
             self.context,
             &mut self.function_builder,
             [stack_slot_pointer, len],
         );
 
-        // check result (error?)
-        // 1=ok, 0=panic
-        let continue_block = self.function_builder.create_block();
-        self.function_builder
-            .ins()
-            .brif(result, continue_block, [], self.panic_block, []);
-        self.function_builder.switch_to_block(continue_block);
-        self.function_builder.seal_block(continue_block);
-
         Ok(collect_binding_stack_layouts.layouts)
+    }
+
+    pub fn compile_private_data_initialization(&mut self) -> Result<(), Error> {
+        todo!();
     }
 }
 
@@ -627,6 +623,10 @@ where
         }
 
         Ok(())
+    }
+
+    fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error> {
+        todo!("initialize global variables: {private_data:p}");
     }
 }
 
