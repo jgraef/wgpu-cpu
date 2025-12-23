@@ -188,6 +188,17 @@ where
     Ok(())
 }
 
+pub fn compile_clif_to_string(
+    module: &naga::Module,
+    info: &naga::valid::ModuleInfo,
+    config: Config,
+    isa: Option<Arc<dyn isa::TargetIsa>>,
+) -> Result<String, Error> {
+    let mut buf = vec![];
+    compile_clif(module, info, config, isa, &mut buf)?;
+    Ok(String::from_utf8(buf).unwrap())
+}
+
 pub fn system_isa() -> Result<Arc<dyn isa::TargetIsa>, Error> {
     let mut flag_builder = cranelift_codegen::settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();

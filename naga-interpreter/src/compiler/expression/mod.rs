@@ -77,8 +77,6 @@ macro_rules! define_expression {
         }
 
         impl CompileExpression for Expression {
-
-
             fn compile_expression(
                 &self,
                 compiler: &mut FunctionCompiler,

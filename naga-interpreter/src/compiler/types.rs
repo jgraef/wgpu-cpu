@@ -222,6 +222,18 @@ impl ScalarType {
             }
         }
     }
+
+    pub fn is_bool(&self) -> bool {
+        matches!(self, ScalarType::Bool)
+    }
+
+    pub fn is_integer(&self) -> bool {
+        matches!(self, ScalarType::Int(_signedness, _int_width))
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, ScalarType::Float(_float_width))
+    }
 }
 
 impl TryFrom<naga::Scalar> for ScalarType {
@@ -257,56 +269,55 @@ impl AsIrTypes for ScalarType {
 // note: we can't store the base_type as [`Type`] directly because that would
 // make the type recursive, requiring a Box, making the type not Copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PointerType {
-    Pointer {
-        base: naga::Handle<naga::Type>,
-        space: naga::AddressSpace,
-    },
-    ScalarPointer {
-        base: ScalarType,
-        space: naga::AddressSpace,
-    },
-    VectorPointer {
-        base: VectorType,
-        space: naga::AddressSpace,
-    },
+pub struct PointerType {
+    pub base_type: PointerTypeBase,
+    pub address_space: naga::AddressSpace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerTypeBase {
+    Pointer(naga::Handle<naga::Type>),
+    ScalarPointer(ScalarType),
+    VectorPointer(VectorType),
 }
 
 impl PointerType {
     pub fn from_naga(
-        base: naga::Handle<naga::Type>,
-        space: naga::AddressSpace,
+        base_type: naga::Handle<naga::Type>,
+        address_space: naga::AddressSpace,
     ) -> Result<Self, InvalidType> {
-        Ok(Self::Pointer { base, space })
+        Ok(Self {
+            base_type: PointerTypeBase::Pointer(base_type),
+            address_space,
+        })
     }
 
     pub fn from_naga_value(
         scalar: naga::Scalar,
         size: Option<naga::VectorSize>,
-        space: naga::AddressSpace,
+        address_space: naga::AddressSpace,
     ) -> Result<Self, InvalidType> {
-        if let Some(size) = size {
-            Ok(Self::VectorPointer {
-                base: VectorType {
-                    size,
-                    scalar: ScalarType::from_naga(scalar)?,
-                },
-                space,
+        let base_type = if let Some(size) = size {
+            PointerTypeBase::VectorPointer(VectorType {
+                size,
+                scalar: ScalarType::from_naga(scalar)?,
             })
         }
         else {
-            Ok(Self::ScalarPointer {
-                base: ScalarType::from_naga(scalar)?,
-                space,
-            })
-        }
+            PointerTypeBase::ScalarPointer(ScalarType::from_naga(scalar)?)
+        };
+
+        Ok(Self {
+            base_type,
+            address_space,
+        })
     }
 
     pub fn base_type(&self, context: &Context) -> Type {
-        match self {
-            PointerType::Pointer { base, space: _ } => context.types[*base],
-            PointerType::ScalarPointer { base, space: _ } => (*base).into(),
-            PointerType::VectorPointer { base, space: _ } => (*base).into(),
+        match self.base_type {
+            PointerTypeBase::Pointer(base) => context.types[base],
+            PointerTypeBase::ScalarPointer(base) => base.into(),
+            PointerTypeBase::VectorPointer(base) => base.into(),
         }
     }
 }
@@ -399,7 +410,7 @@ impl MatrixType {
         u8::from(self.columns) * u8::from(self.rows)
     }
 
-    pub fn with_scalar(self, scalar: ScalarType) -> Self {
+    pub fn with_scalar(&self, scalar: ScalarType) -> Self {
         Self {
             columns: self.columns,
             rows: self.rows,
@@ -407,18 +418,22 @@ impl MatrixType {
         }
     }
 
-    pub fn column_vector(self) -> VectorType {
+    pub fn column_vector(&self) -> VectorType {
         VectorType {
             size: self.rows,
             scalar: self.scalar,
         }
     }
 
-    pub fn row_vector(self) -> VectorType {
+    pub fn row_vector(&self) -> VectorType {
         VectorType {
             size: self.columns,
             scalar: self.scalar,
         }
+    }
+
+    pub fn column_stride(&self) -> u8 {
+        u8::from(self.rows).next_power_of_two()
     }
 }
 

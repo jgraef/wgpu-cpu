@@ -35,20 +35,48 @@ impl SimdContext {
     }
 
     pub fn vector(&self, vector_type: VectorType) -> SimdValues {
-        let (count, ty) = match self[vector_type] {
-            VectorIrType::Plain { ty } => (u8::from(vector_type.size).into(), ty),
-            VectorIrType::Vector { ty } => (1, ty),
-        };
-        SimdValues { count, ty }
+        match self[vector_type] {
+            VectorIrType::Plain { ty } => {
+                SimdValues {
+                    count: u8::from(vector_type.size),
+                    ty,
+                    lanes: 1,
+                }
+            }
+            VectorIrType::Vector { ty } => {
+                SimdValues {
+                    count: 1,
+                    ty,
+                    lanes: u8::from(vector_type.size),
+                }
+            }
+        }
     }
 
     pub fn matrix(&self, matrix_type: MatrixType) -> SimdValues {
-        let (count, ty) = match self[matrix_type] {
-            MatrixIrType::Plain { ty } => (matrix_type.num_elements(), ty),
-            MatrixIrType::ColumnVector { ty } => (matrix_type.rows.into(), ty),
-            MatrixIrType::FullVector { ty } => (1, ty),
-        };
-        SimdValues { count, ty }
+        match self[matrix_type] {
+            MatrixIrType::Plain { ty } => {
+                SimdValues {
+                    count: matrix_type.num_elements(),
+                    ty,
+                    lanes: 1,
+                }
+            }
+            MatrixIrType::ColumnVector { ty } => {
+                SimdValues {
+                    count: matrix_type.rows.into(),
+                    ty,
+                    lanes: matrix_type.columns.into(),
+                }
+            }
+            MatrixIrType::FullVector { ty } => {
+                SimdValues {
+                    count: 1,
+                    ty,
+                    lanes: matrix_type.num_elements(),
+                }
+            }
+        }
     }
 
     pub fn simd_immediates(&self) -> SimdImmediates {
@@ -75,6 +103,7 @@ impl SimdContext {
 pub struct SimdValues {
     pub count: u8,
     pub ty: ir::Type,
+    pub lanes: u8,
 }
 
 impl SimdValues {

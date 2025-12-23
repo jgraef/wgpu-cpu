@@ -10,6 +10,7 @@ use crate::{
         CompiledModule,
         CompilerBackend,
         compile_clif,
+        compile_clif_to_string,
         compiler::Config,
     },
     entry_point::EntryPointIndex,
@@ -381,4 +382,146 @@ fn switch_break() {
         "#,
     );
     assert_eq!(output, 3);
+}
+
+#[test]
+#[ignore = "wip"]
+fn global_variable() {
+    let output = helper().exec::<[i32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4i,
+        }
+
+        var<private> foo: vec4i = vec4i(1, 2, 3, 4);
+
+        @vertex
+        fn main() -> Output {
+            foo.y = 123;
+            return Output(vec4f(), foo);
+        }
+        "#,
+    );
+    assert_eq!(output, [1, 123, 3, 4]);
+}
+
+#[test]
+fn access_index_vector_variable_read() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var foo = vec4i(1, 2, 3, 4);
+            return Output(vec4f(), foo.y);
+        }
+        "#,
+    );
+    assert_eq!(output, 2);
+}
+
+#[test]
+fn access_index_vector_variable_assign() {
+    let output = helper().exec::<[i32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4i,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var foo: vec4i = vec4i(1, 2, 3, 4);
+            foo.y = 123;
+            return Output(vec4f(), foo);
+        }
+        "#,
+    );
+    assert_eq!(output, [1, 123, 3, 4]);
+}
+
+#[test]
+fn access_index_struct_variable_read() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        struct Foo {
+            a: i32,
+            b: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var foo = Foo(1, 2);
+            return Output(vec4f(), foo.b);
+        }
+        "#,
+    );
+    assert_eq!(output, 2);
+}
+
+#[test]
+fn access_index_struct_variable_assign() {
+    let output = helper().exec::<[i32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4i,
+        }
+
+        struct Foo {
+            a: i32,
+            b: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var foo = Foo(1, 2);
+            foo.b = 123;
+            // vec2i composition triggers a bug in cranelift
+            return Output(vec4f(), vec4i(foo.a, foo.b, 0, 0));
+        }
+        "#,
+    );
+    assert_eq!(output, [1, 123, 0, 0]);
+}
+
+#[test]
+#[ignore = "https://github.com/bytecodealliance/wasmtime/issues/12197"]
+fn insert_lane_into_i32x2_bug() {
+    // https://github.com/bytecodealliance/wasmtime/issues/12197
+
+    let source = r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec2i,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var a = 1;
+            var b = 2;
+            return Output(vec4f(), vec2i(a, b));
+        }
+        "#;
+
+    let clif = {
+        let module = naga::front::wgsl::parse_str(&source).unwrap();
+        let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+        let info = validator.validate(&module).unwrap();
+        compile_clif_to_string(&module, &info, Default::default(), None).unwrap()
+    };
+    println!("{clif}");
+
+    let output = helper().exec::<[i32; 2]>(source);
+    assert_eq!(output, [1, 2]);
 }

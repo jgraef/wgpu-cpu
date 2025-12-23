@@ -27,7 +27,7 @@ use crate::{
         util::alignment_log2,
         value::{
             Load,
-            Location,
+            PointerOffset,
             StackLocation,
             Store,
             Value,

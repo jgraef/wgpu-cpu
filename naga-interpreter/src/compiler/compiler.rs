@@ -58,6 +58,7 @@ use cranelift_module::{
 use crate::{
     compiler::{
         Error,
+        expression::EvaluateExpression,
         function::{
             FunctionArgument,
             FunctionDeclaration,
@@ -144,8 +145,8 @@ impl<'source> Context<'source> {
         layouter.update(source.to_ctx())?;
 
         let target_config = isa.frontend_config();
-        let vector_registers = SimdContext::new(isa);
-        tracing::debug!(?vector_registers);
+        let simd_context = SimdContext::new(isa);
+        tracing::debug!(?simd_context);
 
         let types = CoArena::try_from_unique_arena(&source.types, |handle, _ty| {
             Type::from_naga(&source, handle)
@@ -160,7 +161,7 @@ impl<'source> Context<'source> {
             info,
             layouter,
             target_config,
-            simd_context: vector_registers,
+            simd_context,
             types,
             config,
         })
@@ -451,6 +452,58 @@ where
             output_layout,
         })
     }
+
+    // wip
+    #[allow(unused)]
+    fn compile_global_variables(&mut self) -> Result<(), Error> {
+        //let mut global_data = vec![];
+        let mut offset = 0;
+
+        let global_variables = CoArena::try_from_arena(
+            &self.context.source.global_variables,
+            |handle, global_variable| {
+                let ty = self.context.types[global_variable.ty];
+
+                if let Some(init) = global_variable.init {
+                    assert!(global_variable.binding.is_none());
+                    let init = init.evaluate_expression(&self.context)?;
+                    let type_layout = self.context.layouter[global_variable.ty];
+
+                    dbg!(init);
+                    dbg!(type_layout);
+                    todo!("write constant value into global data");
+                }
+
+                if let Some(binding) = global_variable.binding {
+                    assert!(global_variable.init.is_none());
+                }
+
+                Ok::<_, Error>(GlobalVariable {
+                    offset,
+                    ty,
+                    address_space: global_variable.space,
+                })
+            },
+        )?;
+
+        // todo: store coarena for function compiler
+        todo!("return struct containing global data and layout");
+    }
+}
+
+// better name?
+// todo
+#[allow(unused)]
+#[derive(Clone, Debug)]
+pub struct PrivateMemory {
+    data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlobalVariable {
+    pub address_space: naga::AddressSpace,
+    pub offset: i32,
+    pub ty: Type,
 }
 
 pub trait FuncBuilderExt {

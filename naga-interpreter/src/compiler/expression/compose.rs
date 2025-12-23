@@ -86,26 +86,41 @@ impl CompileCompose<ScalarValue> for VectorValue {
                     .collect()
             }
             VectorIrType::Vector { ty: ir_ty } => {
-                let mut components = components.into_iter();
-                let first = components.next().unwrap();
+                // fixme: this triggers a bug in cranelift when inserting into a vector type
+                // that fits into a single lane. e.g. by composing a vec2i(1, 2)
+                //
+                // https://github.com/bytecodealliance/wasmtime/issues/12165
+                // https://github.com/bytecodealliance/wasmtime/issues/12197
 
-                let mut vector = function_compiler
-                    .function_builder
-                    .ins()
-                    .splat(ir_ty, first.value);
-                let mut lane = 1;
-
-                for component in components {
-                    vector = function_compiler.function_builder.ins().insertlane(
-                        vector,
-                        component.value,
-                        lane as u8,
-                    );
-
-                    lane += 1;
+                const CRANELIFT_LOWERING_WORKAROUND: bool = false;
+                let value = if components.len() == 2 && CRANELIFT_LOWERING_WORKAROUND {
+                    //function_compiler.function_builder.ins().uunarrow(x, y)
+                    todo!("workaround");
                 }
+                else {
+                    let mut components = components.into_iter();
+                    let first = components.next().unwrap();
 
-                std::iter::once(vector).collect()
+                    let mut vector = function_compiler
+                        .function_builder
+                        .ins()
+                        .splat(ir_ty, first.value);
+                    let mut lane = 1;
+
+                    for component in components {
+                        vector = function_compiler.function_builder.ins().insertlane(
+                            vector,
+                            component.value,
+                            lane as u8,
+                        );
+
+                        lane += 1;
+                    }
+
+                    vector
+                };
+
+                std::iter::once(value).collect()
             }
         };
 

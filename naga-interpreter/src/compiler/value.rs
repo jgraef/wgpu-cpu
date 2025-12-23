@@ -103,7 +103,7 @@ impl From<ir::StackSlot> for StackLocation {
     }
 }
 
-pub trait Location: Copy {
+pub trait PointerOffset: Copy {
     fn with_offset(self, offset: i32) -> Self;
 
     fn add_offset(&mut self, offset: i32) {
@@ -111,14 +111,14 @@ pub trait Location: Copy {
     }
 }
 
-impl Location for Pointer {
+impl PointerOffset for Pointer {
     fn with_offset(mut self, offset: i32) -> Self {
         self.offset = offset;
         self
     }
 }
 
-impl Location for StackLocation {
+impl PointerOffset for StackLocation {
     fn with_offset(mut self, offset: i32) -> Self {
         self.offset = offset;
         self
@@ -314,12 +314,6 @@ pub struct PointerValue {
     pub inner: PointerValueInner,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum PointerValueInner {
-    Pointer(Pointer),
-    StackLocation(StackLocation),
-}
-
 impl PointerValue {
     pub fn deref_load(
         &self,
@@ -451,6 +445,32 @@ where
     }
 }
 
+impl PointerOffset for PointerValue {
+    fn with_offset(self, offset: i32) -> Self {
+        Self {
+            ty: self.ty,
+            inner: self.inner.with_offset(offset),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PointerValueInner {
+    Pointer(Pointer),
+    StackLocation(StackLocation),
+}
+
+impl PointerOffset for PointerValueInner {
+    fn with_offset(self, offset: i32) -> Self {
+        match self {
+            Self::Pointer(pointer) => Self::Pointer(pointer.with_offset(offset)),
+            Self::StackLocation(stack_location) => {
+                Self::StackLocation(stack_location.with_offset(offset))
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VectorValue {
     pub ty: VectorType,
@@ -527,7 +547,7 @@ impl TypeOf for VectorValue {
 impl<P> Load<P, VectorType> for VectorValue
 where
     ir::Value: Load<P, ir::Type>,
-    P: Location,
+    P: PointerOffset,
 {
     fn load(
         context: &Context,
@@ -553,7 +573,7 @@ where
 impl<P> Store<P> for VectorValue
 where
     ir::Value: Store<P>,
-    P: Location,
+    P: PointerOffset,
 {
     fn store(
         &self,
@@ -649,7 +669,7 @@ impl TypeOf for MatrixValue {
 impl<P> Load<P, MatrixType> for MatrixValue
 where
     ir::Value: Load<P, ir::Type>,
-    P: Location,
+    P: PointerOffset,
 {
     fn load(
         context: &Context,
@@ -675,7 +695,7 @@ where
 impl<P> Store<P> for MatrixValue
 where
     ir::Value: Store<P>,
-    P: Location,
+    P: PointerOffset,
 {
     fn store(
         &self,
@@ -743,7 +763,7 @@ impl TypeOf for StructValue {
 impl<P> Load<P, StructType> for StructValue
 where
     Value: Load<P, Type>,
-    P: Location,
+    P: PointerOffset,
 {
     fn load(
         context: &Context,
@@ -774,7 +794,7 @@ where
 impl<P> Store<P> for StructValue
 where
     Value: Store<P>,
-    P: Location,
+    P: PointerOffset,
 {
     fn store(
         &self,
@@ -834,7 +854,7 @@ impl FromIrValues for ArrayValue {
 impl<P> Load<P, ArrayType> for ArrayValue
 where
     Value: Load<P, Type>,
-    P: Location,
+    P: PointerOffset,
 {
     fn load(
         context: &Context,
@@ -861,7 +881,7 @@ where
 impl<P> Store<P> for ArrayValue
 where
     Value: Store<P>,
-    P: Location,
+    P: PointerOffset,
 {
     fn store(
         &self,

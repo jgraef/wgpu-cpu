@@ -1,3 +1,6 @@
+use arrayvec::ArrayVec;
+use cranelift_codegen::ir::InstBuilder;
+
 use crate::compiler::{
     Error,
     compiler::Context,
@@ -7,7 +10,23 @@ use crate::compiler::{
         EvaluateExpression,
     },
     function::FunctionCompiler,
-    value::Value,
+    simd::MatrixIrType,
+    types::{
+        PointerType,
+        PointerTypeBase,
+        Type,
+    },
+    value::{
+        ArrayValue,
+        MatrixValue,
+        PointerOffset,
+        PointerValue,
+        ScalarValue,
+        StructValue,
+        TypeOf,
+        Value,
+        VectorValue,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -18,7 +37,14 @@ pub struct AccessExpression {
 
 impl CompileExpression for AccessExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        todo!()
+        let value = self.base.compile_expression(compiler)?;
+        let index: ScalarValue = self.index.compile_expression(compiler)?.try_into()?;
+        assert!(
+            index.ty.is_integer(),
+            "index value is not an integer: {:?}",
+            index.ty
+        );
+        value.compile_access(compiler, &index)
     }
 }
 
@@ -36,7 +62,8 @@ pub struct AccessIndexExpression {
 
 impl CompileExpression for AccessIndexExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        todo!()
+        let value = self.base.compile_expression(compiler)?;
+        value.compile_access(compiler, &self.index)
     }
 }
 
@@ -45,3 +72,255 @@ impl EvaluateExpression for AccessIndexExpression {
         todo!()
     }
 }
+
+pub trait CompileAccess<Index> {
+    type Output;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &Index,
+    ) -> Result<Self::Output, Error>;
+}
+
+impl CompileAccess<u32> for VectorValue {
+    type Output = ScalarValue;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &u32,
+    ) -> Result<Self::Output, Error> {
+        assert!(
+            *index < u32::from(self.ty.size),
+            "vector index out of bounds"
+        );
+
+        let vectorization = compiler.context.simd_context.vector(self.ty);
+
+        let index = u8::try_from(*index).expect("vector index overflow");
+        let value_index = index / vectorization.lanes;
+        let lane_index = index / vectorization.lanes;
+        let mut value = self.values[usize::from(value_index)];
+
+        if vectorization.ty.is_vector() {
+            value = compiler
+                .function_builder
+                .ins()
+                .extractlane(value, lane_index);
+        }
+        else {
+            assert_eq!(lane_index, 0);
+        }
+
+        Ok(ScalarValue {
+            ty: self.ty.scalar,
+            value,
+        })
+    }
+}
+
+impl CompileAccess<ScalarValue> for VectorValue {
+    type Output = ScalarValue;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &ScalarValue,
+    ) -> Result<ScalarValue, Error> {
+        todo!("dynamic vector access")
+    }
+}
+
+impl CompileAccess<u32> for MatrixValue {
+    type Output = VectorValue;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &u32,
+    ) -> Result<Self::Output, Error> {
+        assert!(
+            *index < u32::from(self.ty.num_elements()),
+            "matrix index out of bounds"
+        );
+        let index = u8::try_from(*index).expect("vector index overflow");
+        let mut values = ArrayVec::new();
+
+        match compiler.context.simd_context[self.ty] {
+            MatrixIrType::Plain { ty } => {
+                let index = u8::from(self.ty.rows) * index;
+                values.extend(
+                    self.values[usize::from(index)..][..usize::from(u8::from(self.ty.rows))]
+                        .iter()
+                        .copied(),
+                );
+            }
+            MatrixIrType::ColumnVector { ty } => {
+                values.push(self.values[usize::from(index)]);
+            }
+            MatrixIrType::FullVector { ty } => {
+                let matrix_value = self.values[0];
+                let index = u8::from(self.ty.rows) * index;
+                for lane in 0..u8::from(self.ty.rows) {
+                    let value = compiler
+                        .function_builder
+                        .ins()
+                        .extractlane(matrix_value, index + lane);
+                    values.push(value);
+                }
+            }
+        }
+
+        Ok(VectorValue {
+            ty: self.ty.column_vector(),
+            values,
+        })
+    }
+}
+
+impl CompileAccess<ScalarValue> for MatrixValue {
+    type Output = VectorValue;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &ScalarValue,
+    ) -> Result<VectorValue, Error> {
+        todo!("dynamic matrix access")
+    }
+}
+
+impl CompileAccess<u32> for StructValue {
+    type Output = Value;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &u32,
+    ) -> Result<Self::Output, Error> {
+        let index = usize::try_from(*index).expect("struct member overflow");
+        Ok(self.members[index].clone())
+    }
+}
+
+impl CompileAccess<u32> for ArrayValue {
+    type Output = Value;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &u32,
+    ) -> Result<Self::Output, Error> {
+        let index = usize::try_from(*index).expect("array index overflow");
+        Ok(self.values[index].clone())
+    }
+}
+
+impl CompileAccess<ScalarValue> for ArrayValue {
+    type Output = Value;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &ScalarValue,
+    ) -> Result<Value, Error> {
+        todo!("dynamic array access")
+    }
+}
+
+impl CompileAccess<u32> for PointerValue {
+    type Output = PointerValue;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &u32,
+    ) -> Result<PointerValue, Error> {
+        let base_type = self.ty.base_type(compiler.context);
+
+        let (base_type, offset) = match base_type {
+            Type::Vector(vector_type) => {
+                let index = i32::try_from(*index).expect("pointer index overflow");
+                let offset = i32::from(vector_type.scalar.byte_width()) * index;
+                let base_type = PointerTypeBase::ScalarPointer(vector_type.scalar);
+                (base_type, offset)
+            }
+            Type::Matrix(matrix_type) => {
+                let index = i32::try_from(*index).expect("pointer index overflow");
+                let offset = i32::from(matrix_type.column_stride()) * index;
+                let base_type = PointerTypeBase::VectorPointer(matrix_type.column_vector());
+                (base_type, offset)
+            }
+            Type::Struct(struct_type) => {
+                let index = usize::try_from(*index).expect("pointer index overflow");
+                let member = &struct_type.members(compiler.context.source)[index];
+                let offset = i32::try_from(member.offset).expect("struct member offset overflow");
+                let base_type = PointerTypeBase::Pointer(member.ty);
+                (base_type, offset)
+            }
+            Type::Array(array_type) => {
+                let offset = i32::try_from(array_type.stride).expect("array stride overflow");
+                let base_type = PointerTypeBase::Pointer(array_type.base_type);
+                (base_type, offset)
+            }
+            _ => panic!("Invalid to access into {base_type:?}"),
+        };
+
+        Ok(PointerValue {
+            ty: PointerType {
+                base_type,
+                address_space: self.ty.address_space,
+            },
+            inner: self.inner.with_offset(offset),
+        })
+    }
+}
+
+impl CompileAccess<ScalarValue> for PointerValue {
+    type Output = Value;
+
+    fn compile_access(
+        &self,
+        compiler: &mut FunctionCompiler,
+        index: &ScalarValue,
+    ) -> Result<Value, Error> {
+        todo!("dynamic pointer access")
+    }
+}
+
+macro_rules! impl_compile_access_for_value {
+    ($index:ty {$($variant:ident,)*}) => {
+
+        impl CompileAccess<$index> for Value {
+            type Output = Value;
+
+            fn compile_access(
+                &self,
+                compiler: &mut FunctionCompiler,
+                index: &$index,
+            ) -> Result<Value, Error> {
+                let value = match self {
+                    $(Value::$variant(value) => CompileAccess::compile_access(value, compiler, index)?.into(),)*
+                    _ => panic!("Invalid to access {:?} with {index:?}", self.type_of()),
+                };
+                Ok(value)
+            }
+        }
+    };
+}
+
+impl_compile_access_for_value!(u32 {
+    Vector,
+    Matrix,
+    Struct,
+    Array,
+    Pointer,
+});
+
+impl_compile_access_for_value!(ScalarValue {
+    Vector,
+    Matrix,
+    Array,
+    Pointer,
+});
