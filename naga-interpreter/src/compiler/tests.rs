@@ -236,3 +236,149 @@ fn loops() {
     );
     assert_eq!(output, 720);
 }
+
+#[test]
+fn switch_case_single() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var a: i32 = 4;
+            var b: i32;
+
+            switch a {
+                case 1: {
+                    b = 2;
+                }
+                case 2, 3: {
+                    b = 3;
+                }
+                case 4: {
+                    b = 4;
+                }
+                default: {
+                    b = -1;
+                }
+            }
+
+            return Output(vec4f(), b);
+        }
+        "#,
+    );
+    assert_eq!(output, 4);
+}
+
+#[test]
+fn switch_case_multiple() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var a: i32 = 5;
+            var b: i32;
+
+            switch a {
+                case 1: {
+                    b = 2;
+                }
+                case 2, 3: {
+                    b = 3;
+                }
+                case 4, 5, 6: {
+                    b = 4;
+                }
+                default: {
+                    b = 3;
+                }
+            }
+
+            return Output(vec4f(), b);
+        }
+        "#,
+    );
+    assert_eq!(output, 4);
+}
+
+#[test]
+fn switch_default() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var a: i32 = 42;
+            var b: i32;
+
+            switch a {
+                case 1: {
+                    b = 2;
+                }
+                case 2, 3: {
+                    b = 3;
+                }
+                case 4, 5, 6: {
+                    b = 4;
+                }
+                default: {
+                    b = 3;
+                }
+            }
+
+            return Output(vec4f(), b);
+        }
+        "#,
+    );
+    assert_eq!(output, 3);
+}
+
+#[test]
+fn switch_break() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var a: i32 = 3;
+            var b: i32;
+
+            switch a {
+                case 1: {
+                    b = 2;
+                }
+                case 2, 3: {
+                    b = 3;
+                    break;
+                    b = 123;
+                }
+                case 4, 5, 6: {
+                    b = 4;
+                }
+                default: {
+                    b = 12;
+                }
+            }
+
+            return Output(vec4f(), b);
+        }
+        "#,
+    );
+    assert_eq!(output, 3);
+}

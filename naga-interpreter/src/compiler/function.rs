@@ -21,7 +21,6 @@ use crate::{
         statement::{
             BlockStatement,
             CompileStatement,
-            LoopStack,
         },
         types::{
             PointerType,
@@ -84,7 +83,7 @@ pub struct FunctionCompiler<'source, 'compiler> {
     pub function_builder: FunctionBuilder<'compiler>,
     pub emitted_expression: SparseCoArena<naga::Expression, Value>,
     pub source_locations: Vec<naga::Span>,
-    pub loop_stack: LoopStack,
+    pub loop_switch_stack: LoopSwitchStack,
 }
 
 impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
@@ -147,7 +146,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             function_builder,
             emitted_expression: Default::default(),
             source_locations: vec![],
-            loop_stack: Default::default(),
+            loop_switch_stack: Default::default(),
         })
     }
 
@@ -194,7 +193,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
 
     /// Finish compilation of the function
     pub fn finish(self) {
-        assert!(self.loop_stack.is_empty());
+        assert!(self.loop_switch_stack.is_empty());
         self.function_builder.finalize();
     }
 
@@ -316,4 +315,104 @@ where
     output.define_function(declaration.function_id, cl_context)?;
 
     Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LoopSwitchStack {
+    pub stack: Vec<LoopSwitchState>,
+}
+
+impl LoopSwitchStack {
+    pub fn push_loop(&mut self, continuing_block: ir::Block, exit_block: ir::Block) {
+        self.stack.push(LoopSwitchState::LoopBody {
+            continuing_block,
+            exit_block,
+        });
+    }
+
+    pub fn pop_loop(
+        &mut self,
+        expected_continuing_block: ir::Block,
+        expected_exit_block: ir::Block,
+    ) {
+        match self.pop() {
+            LoopSwitchState::LoopBody {
+                continuing_block,
+                exit_block,
+            } => {
+                assert_eq!(continuing_block, expected_continuing_block);
+                assert_eq!(exit_block, expected_exit_block);
+            }
+            state => panic!("unexpected loop switch state: {state:?}"),
+        }
+    }
+
+    pub fn push_continuing(&mut self) {
+        self.stack.push(LoopSwitchState::LoopContinuing);
+    }
+
+    pub fn pop_continuing(&mut self) {
+        match self.pop() {
+            LoopSwitchState::LoopContinuing => {}
+            state => panic!("unexpected loop switch state: {state:?}"),
+        }
+    }
+
+    pub fn push_switch(&mut self, exit_block: ir::Block) {
+        self.stack.push(LoopSwitchState::SwitchBody { exit_block });
+    }
+
+    pub fn pop_switch(&mut self, expected_exit_block: ir::Block) {
+        match self.pop() {
+            LoopSwitchState::SwitchBody { exit_block } => {
+                assert_eq!(exit_block, expected_exit_block);
+            }
+            state => panic!("unexpected loop switch state: {state:?}"),
+        }
+    }
+
+    pub fn pop(&mut self) -> LoopSwitchState {
+        self.stack.pop().expect("not in loop")
+    }
+
+    pub fn top(&self) -> LoopSwitchState {
+        *self.stack.last().expect("not in loop")
+    }
+
+    pub fn get_break_block(&self) -> ir::Block {
+        match self.top() {
+            LoopSwitchState::LoopBody {
+                continuing_block: _,
+                exit_block,
+            }
+            | LoopSwitchState::SwitchBody { exit_block } => exit_block,
+            state => panic!("unexpected loop switch state: {state:?}"),
+        }
+    }
+
+    pub fn get_continuing_block(&self) -> ir::Block {
+        match self.top() {
+            LoopSwitchState::LoopBody {
+                continuing_block,
+                exit_block: _,
+            } => continuing_block,
+            state => panic!("unexpected loop switch state: {state:?}"),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stack.is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum LoopSwitchState {
+    LoopBody {
+        continuing_block: ir::Block,
+        exit_block: ir::Block,
+    },
+    LoopContinuing,
+    SwitchBody {
+        exit_block: ir::Block,
+    },
 }

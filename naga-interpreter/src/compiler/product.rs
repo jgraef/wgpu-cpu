@@ -139,7 +139,7 @@ impl<'a> EntryPoint<'a> {
         I: ShaderInput,
         O: ShaderOutput,
     {
-        move |input: I, output: O| {
+        |input: I, output: O| {
             let mut runtime_data = RuntimeData {
                 input,
                 input_layout: &self.inner.data.input_layout,
@@ -159,7 +159,7 @@ impl<'a> EntryPoint<'a> {
 
                 let function = std::mem::transmute::<
                     _,
-                    unsafe fn(*const RuntimeVtable, *mut RuntimeData<I, O>),
+                    unsafe extern "C" fn(*const RuntimeVtable, *mut RuntimeData<I, O>),
                 >(self.function_pointer);
 
                 // note: the order of these arguments must be synchronized with the compiled
