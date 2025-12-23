@@ -8,7 +8,6 @@ use cranelift_codegen::{
     ir::{
         self,
         FuncRef,
-        InstBuilder as _,
         ValueLabel,
     },
 };
@@ -21,25 +20,23 @@ use cranelift_module::{
 use crate::{
     compiler::{
         Error,
-        compiler::{
-            Context,
-            FuncBuilderExt,
-        },
+        compiler::Context,
         expression::{
             CompileExpression,
             Expression,
         },
         simd::SimdImmediates,
+        statement::{
+            CompileStatement,
+            Statement,
+        },
         types::{
             PointerType,
             Type,
         },
         util::alignment_log2,
         value::{
-            AsIrValue,
             AsIrValues,
-            PointerValue,
-            ScalarValue,
             StackLocation,
             Store,
             Value,
@@ -223,102 +220,10 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         }
     }
 
-    /// Compile a [`naga::Block`]
-    pub fn compile_block(&mut self, naga_block: &naga::ir::Block) -> Result<(), Error> {
-        for (statement, span) in naga_block.span_iter() {
-            self.set_source_span(*span);
-            self.compile_statement(statement)?;
-        }
-        Ok(())
-    }
-
     /// Compile a [`naga::Statement`]
     pub fn compile_statement(&mut self, statement: &naga::Statement) -> Result<(), Error> {
-        #![allow(unused_variables)]
-        use naga::Statement::*;
-
-        match statement {
-            Emit(range) => {
-                self.compile_emit(range.clone())?;
-            }
-            Block(naga_block) => {
-                // I don't think we actually have to emit a block in cranelift IR.
-                // We only have to emit blocks, if we want to jump to them from multiple other
-                // blocks, or as an entry point for functions.
-
-                /*let current_cl_block = self.function_builder.current_block().unwrap();
-                let new_cl_block = self.function_builder.create_block();
-
-                self.function_builder.switch_to_block(new_cl_block);
-                self.compile_block(naga_block);
-                self.function_builder.switch_to_block(current_cl_block);
-
-                self.function_builder.ins().jump(new_cl_block, []);
-                self.function_builder.seal_block(new_cl_block);*/
-
-                self.compile_block(naga_block)?;
-            }
-            If {
-                condition,
-                accept,
-                reject,
-            } => self.compile_if(*condition, accept, reject)?,
-            Switch { selector, cases } => todo!(),
-            Loop {
-                body,
-                continuing,
-                break_if,
-            } => todo!(),
-            Break => todo!(),
-            Continue => todo!(),
-            Return { value } => {
-                self.compile_return(*value)?;
-            }
-            Kill => todo!(),
-            ControlBarrier(barrier) => todo!(),
-            MemoryBarrier(barrier) => todo!(),
-            Store { pointer, value } => self.compile_store(*pointer, *value)?,
-            ImageStore {
-                image,
-                coordinate,
-                array_index,
-                value,
-            } => todo!(),
-            Atomic {
-                pointer,
-                fun,
-                value,
-                result,
-            } => todo!(),
-            ImageAtomic {
-                image,
-                coordinate,
-                array_index,
-                fun,
-                value,
-            } => todo!(),
-            WorkGroupUniformLoad { pointer, result } => todo!(),
-            Call {
-                function,
-                arguments,
-                result,
-            } => self.compile_call(*function, &arguments, *result)?,
-            RayQuery { query, fun } => todo!(),
-            SubgroupBallot { result, predicate } => todo!(),
-            SubgroupGather {
-                mode,
-                argument,
-                result,
-            } => todo!(),
-            SubgroupCollectiveOperation {
-                op,
-                collective_op,
-                argument,
-                result,
-            } => todo!(),
-        }
-
-        Ok(())
+        let statement: Statement = statement.clone().into();
+        statement.compile_statement(self)
     }
 
     pub fn compile_expression(
@@ -331,7 +236,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         else {
             let expression = &self.function.expressions[handle];
             // todo: do that here or in the constructor?
-            let expression = Expression::from_naga(&self.context.types, expression);
+            let expression: Expression = expression.clone().into();
 
             let span = &self.function.expressions.get_span(handle);
             self.set_source_span(*span);
@@ -353,121 +258,6 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         };
 
         Ok(value)
-    }
-
-    pub fn compile_emit(
-        &mut self,
-        expressions: naga::Range<naga::Expression>,
-    ) -> Result<(), Error> {
-        for expression in expressions {
-            self.compile_expression(expression)?;
-        }
-        Ok(())
-    }
-
-    pub fn compile_call(
-        &mut self,
-        function: naga::Handle<naga::Function>,
-        arguments: &[naga::Handle<naga::Expression>],
-        result: Option<naga::Handle<naga::Expression>>,
-    ) -> Result<(), Error> {
-        let argument_values = arguments
-            .iter()
-            .map(|argument| self.compile_expression(*argument))
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        // todo: error would be nicer
-        let imported_function = self
-            .imported_functions
-            .get(function)
-            .unwrap_or_else(|| panic!("Function not imported: {function:?}"));
-
-        let result_value = self.function_builder.call_(
-            self.context,
-            imported_function.function_ref,
-            argument_values,
-            imported_function.declaration.return_type,
-        );
-
-        if let Some(result) = result {
-            if let Some(result_value) = result_value {
-                self.emitted_expression.insert(result, result_value);
-            }
-            else {
-                panic!("Expected function to return a value");
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn compile_return(
-        &mut self,
-        expression: Option<naga::Handle<naga::Expression>>,
-    ) -> Result<(), Error> {
-        let mut return_values = vec![];
-
-        if let Some(expression) = expression {
-            let value = self.compile_expression(expression)?;
-            return_values.extend(value.as_ir_values());
-        }
-
-        self.function_builder.ins().return_(&return_values);
-
-        // fixme: return ControlFlow to stop compiling this block. this is a bit tricky
-        // because we also return Results for now we'll just switch to a new
-        // block for the rest. this block will not be jumped to, but we still do the
-        // work compiling it.
-        let void_block = self.function_builder.create_block();
-        self.function_builder.seal_block(void_block);
-        self.function_builder.switch_to_block(void_block);
-        self.function_builder.set_cold_block(void_block); // very cold lol
-
-        Ok(())
-    }
-
-    pub fn compile_store(
-        &mut self,
-        pointer: naga::Handle<naga::Expression>,
-        expression: naga::Handle<naga::Expression>,
-    ) -> Result<(), Error> {
-        let pointer: PointerValue = self.compile_expression(pointer)?.try_into()?;
-        let value: Value = self.compile_expression(expression)?;
-        pointer.deref_store(self.context, &mut self.function_builder, &value)
-    }
-
-    pub fn compile_if(
-        &mut self,
-        condition: naga::Handle<naga::Expression>,
-        accept: &naga::Block,
-        reject: &naga::Block,
-    ) -> Result<(), Error> {
-        let condition_value: ScalarValue = self.compile_expression(condition)?.try_into()?;
-        let condition_value = condition_value.as_ir_value();
-
-        let accept_block = self.function_builder.create_block();
-        let reject_block = self.function_builder.create_block();
-        let continue_block = self.function_builder.create_block();
-
-        self.function_builder
-            .ins()
-            .brif(condition_value, accept_block, [], reject_block, []);
-
-        self.function_builder.seal_block(accept_block);
-        self.function_builder.seal_block(reject_block);
-
-        self.function_builder.switch_to_block(accept_block);
-        self.compile_block(accept)?;
-        self.function_builder.ins().jump(continue_block, []);
-
-        self.function_builder.switch_to_block(reject_block);
-        self.compile_block(reject)?;
-        self.function_builder.ins().jump(continue_block, []);
-
-        self.function_builder.seal_block(continue_block);
-        self.function_builder.switch_to_block(continue_block);
-
-        Ok(())
     }
 }
 
@@ -567,7 +357,7 @@ where
 
     function_compiler.initialize_local_variables()?;
     function_compiler.import_functions(function_declarations, output)?;
-    function_compiler.compile_block(&function.body)?;
+    function.body.compile_statement(&mut function_compiler)?;
     function_compiler.finish();
 
     output.define_function(declaration.function_id, cl_context)?;

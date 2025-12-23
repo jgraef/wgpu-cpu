@@ -18,8 +18,6 @@ pub struct SelectExpression {
 }
 
 impl CompileExpression for SelectExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

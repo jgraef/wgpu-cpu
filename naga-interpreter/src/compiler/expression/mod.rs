@@ -52,20 +52,14 @@ pub use variable::*;
 pub use workgroup::*;
 pub use zero_value::*;
 
-use crate::{
-    compiler::{
-        Error,
-        compiler::Context,
-        constant::ConstantValue,
-        function::FunctionCompiler,
-        types::{
-            CastTo,
-            Type,
-        },
-        util::math_args_to_array_vec,
-        value::Value,
-    },
-    util::CoArena,
+use crate::compiler::{
+    Error,
+    compiler::Context,
+    constant::ConstantValue,
+    function::FunctionCompiler,
+    types::CastTo,
+    util::math_args_to_array_vec,
+    value::Value,
 };
 
 macro_rules! define_expression {
@@ -145,11 +139,11 @@ define_expression!(
     SubgroupOperationResult(SubgroupOperationResultExpression),
 );
 
-impl Expression {
-    pub fn from_naga(types: &CoArena<naga::Type, Type>, expression: &naga::Expression) -> Self {
+impl From<naga::Expression> for Expression {
+    fn from(expression: naga::Expression) -> Self {
         use naga::Expression::*;
 
-        match expression.clone() {
+        match expression {
             Literal(literal) => Self::Literal(LiteralExpression { literal }),
             Constant(handle) => Self::Constant(ConstantUseExpression { handle }),
             Override(handle) => Self::Override(OverrideExpression { handle }),
@@ -365,11 +359,18 @@ define_constant_expression!(
     As(AsExpression),
 );
 
-impl ConstantExpression {
-    pub fn from_naga(types: &CoArena<naga::Type, Type>, expression: naga::Expression) -> Self {
+#[derive(Clone, Debug)]
+pub struct ExpressionNotConstant {
+    pub expression: naga::Expression,
+}
+
+impl TryFrom<naga::Expression> for ConstantExpression {
+    type Error = ExpressionNotConstant;
+
+    fn try_from(expression: naga::Expression) -> Result<Self, ExpressionNotConstant> {
         use naga::Expression::*;
 
-        match expression {
+        let expression = match expression {
             Literal(literal) => Self::Literal(LiteralExpression { literal }),
             Constant(handle) => Self::Constant(ConstantUseExpression { handle }),
             ZeroValue(handle) => Self::ZeroValue(ZeroValueExpression { ty: handle }),
@@ -440,8 +441,10 @@ impl ConstantExpression {
                     target: CastTo::from_naga(kind, convert),
                 })
             }
-            _ => panic!("Not a constant expression: {expression:?}"),
-        }
+            _ => return Err(ExpressionNotConstant { expression }),
+        };
+
+        Ok(expression)
     }
 }
 

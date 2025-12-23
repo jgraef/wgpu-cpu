@@ -18,8 +18,6 @@ pub struct SwizzleExpression {
 }
 
 impl CompileExpression for SwizzleExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

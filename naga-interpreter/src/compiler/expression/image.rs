@@ -19,8 +19,6 @@ pub struct ImageSampleExpression {
 }
 
 impl CompileExpression for ImageSampleExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }
@@ -36,8 +34,6 @@ pub struct ImageLoadExpression {
 }
 
 impl CompileExpression for ImageLoadExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }
@@ -50,8 +46,6 @@ pub struct ImageQueryExpression {
 }
 
 impl CompileExpression for ImageQueryExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

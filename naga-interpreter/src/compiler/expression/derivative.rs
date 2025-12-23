@@ -13,8 +13,6 @@ pub struct DerivativeExpression {
 }
 
 impl CompileExpression for DerivativeExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

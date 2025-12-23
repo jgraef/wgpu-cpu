@@ -19,8 +19,6 @@ pub struct MathExpression {
 }
 
 impl CompileExpression for MathExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

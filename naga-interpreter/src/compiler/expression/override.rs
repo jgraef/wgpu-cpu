@@ -11,8 +11,6 @@ pub struct OverrideExpression {
 }
 
 impl CompileExpression for OverrideExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

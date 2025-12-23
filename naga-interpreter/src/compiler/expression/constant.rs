@@ -16,8 +16,6 @@ pub struct ConstantUseExpression {
 }
 
 impl CompileExpression for ConstantUseExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

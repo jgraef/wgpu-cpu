@@ -17,8 +17,6 @@ pub struct SplatExpression {
 }
 
 impl CompileExpression for SplatExpression {
-
-
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
         todo!()
     }

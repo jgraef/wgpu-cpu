@@ -5,6 +5,7 @@ pub mod function;
 pub mod product;
 pub mod runtime;
 pub mod simd;
+pub mod statement;
 #[cfg(test)]
 mod tests;
 pub mod types;
