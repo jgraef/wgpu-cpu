@@ -19,6 +19,7 @@ use crate::{
         expression::CompileExpression,
         simd::SimdImmediates,
         statement::{
+            BlockStatement,
             CompileStatement,
             LoopStack,
         },
@@ -308,7 +309,8 @@ where
 
     function_compiler.initialize_local_variables()?;
     function_compiler.import_functions(function_declarations, output)?;
-    function.body.compile_statement(&mut function_compiler)?;
+    let body = BlockStatement::from(&function.body);
+    body.compile_statement(&mut function_compiler)?;
     function_compiler.finish();
 
     output.define_function(declaration.function_id, cl_context)?;

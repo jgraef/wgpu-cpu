@@ -11,7 +11,10 @@ use crate::compiler::{
         Expression,
     },
     function::FunctionCompiler,
-    statement::CompileStatement,
+    statement::{
+        BlockStatement,
+        CompileStatement,
+    },
     value::{
         AsIrValue,
         ScalarValue,
@@ -20,8 +23,8 @@ use crate::compiler::{
 
 #[derive(Clone, Debug)]
 pub struct LoopStatement {
-    pub body: naga::Block,
-    pub continuing: naga::Block,
+    pub body: BlockStatement,
+    pub continuing: BlockStatement,
     pub break_if: Option<naga::Handle<naga::Expression>>,
 }
 

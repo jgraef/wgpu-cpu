@@ -107,45 +107,62 @@ pub trait CompileStatement {
     fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error>;
 }
 
-impl From<naga::Statement> for Statement {
-    fn from(value: naga::Statement) -> Self {
+impl From<&naga::Statement> for Statement {
+    fn from(value: &naga::Statement) -> Self {
         use naga::Statement::*;
 
         match value {
-            Emit(range) => EmitStatement { expressions: range }.into(),
-            Block(block) => BlockStatement { block }.into(),
+            Emit(range) => {
+                EmitStatement {
+                    expressions: range.clone(),
+                }
+                .into()
+            }
+            Block(block) => BlockStatement::from(block).into(),
             If {
                 condition,
                 accept,
                 reject,
             } => {
                 IfStatement {
-                    condition,
-                    accept: accept,
-                    reject,
+                    condition: *condition,
+                    accept: accept.into(),
+                    reject: reject.into(),
                 }
                 .into()
             }
-            Switch { selector, cases } => SwitchStatement { selector, cases }.into(),
+            Switch { selector, cases } => {
+                SwitchStatement {
+                    selector: *selector,
+                    cases: cases.iter().map(|case| case.into()).collect(),
+                }
+                .into()
+            }
             Loop {
                 body,
                 continuing,
                 break_if,
             } => {
                 LoopStatement {
-                    body,
-                    continuing,
-                    break_if,
+                    body: body.into(),
+                    continuing: continuing.into(),
+                    break_if: *break_if,
                 }
                 .into()
             }
             Break => BreakStatement.into(),
             Continue => ContinueStatement.into(),
-            Return { value } => ReturnStatement { value }.into(),
+            Return { value } => ReturnStatement { value: *value }.into(),
             Kill => KillStatement.into(),
-            ControlBarrier(barrier) => ControlBarrierStatement { barrier }.into(),
-            MemoryBarrier(barrier) => MemoryBarrierStatement { barrier }.into(),
-            Store { pointer, value } => StoreStatement { pointer, value }.into(),
+            ControlBarrier(barrier) => ControlBarrierStatement { barrier: *barrier }.into(),
+            MemoryBarrier(barrier) => MemoryBarrierStatement { barrier: *barrier }.into(),
+            Store { pointer, value } => {
+                StoreStatement {
+                    pointer: *pointer,
+                    value: *value,
+                }
+                .into()
+            }
             ImageStore {
                 image,
                 coordinate,
@@ -153,10 +170,10 @@ impl From<naga::Statement> for Statement {
                 value,
             } => {
                 ImageStoreStatement {
-                    image,
-                    coordinate,
-                    array_index,
-                    value,
+                    image: *image,
+                    coordinate: *coordinate,
+                    array_index: *array_index,
+                    value: *value,
                 }
                 .into()
             }
@@ -167,10 +184,10 @@ impl From<naga::Statement> for Statement {
                 result,
             } => {
                 AtomicStatement {
-                    pointer,
-                    function: fun,
-                    value,
-                    result,
+                    pointer: *pointer,
+                    function: *fun,
+                    value: *value,
+                    result: *result,
                 }
                 .into()
             }
@@ -182,11 +199,11 @@ impl From<naga::Statement> for Statement {
                 value,
             } => {
                 ImageAtomicStatement {
-                    image,
-                    coordinate,
-                    array_index,
-                    function: fun,
-                    value,
+                    image: *image,
+                    coordinate: *coordinate,
+                    array_index: *array_index,
+                    function: *fun,
+                    value: *value,
                 }
                 .into()
             }
@@ -197,21 +214,25 @@ impl From<naga::Statement> for Statement {
                 result,
             } => {
                 CallStatement {
-                    function,
-                    arguments,
-                    result,
+                    function: *function,
+                    arguments: arguments.clone(),
+                    result: *result,
                 }
                 .into()
             }
             RayQuery { query, fun } => {
                 RayQueryStatement {
-                    query,
-                    function: fun,
+                    query: *query,
+                    function: fun.clone(),
                 }
                 .into()
             }
             SubgroupBallot { result, predicate } => {
-                SubgroupBallotStatement { result, predicate }.into()
+                SubgroupBallotStatement {
+                    result: *result,
+                    predicate: *predicate,
+                }
+                .into()
             }
             SubgroupGather {
                 mode,
@@ -219,9 +240,9 @@ impl From<naga::Statement> for Statement {
                 result,
             } => {
                 SubgroupGatherStatement {
-                    mode,
-                    argument,
-                    result,
+                    mode: *mode,
+                    argument: *argument,
+                    result: *result,
                 }
                 .into()
             }
@@ -232,10 +253,10 @@ impl From<naga::Statement> for Statement {
                 result,
             } => {
                 SubgroupCollectiveOperationStatement {
-                    operation: op,
-                    collective_operation: collective_op,
-                    argument,
-                    result,
+                    operation: *op,
+                    collective_operation: *collective_op,
+                    argument: *argument,
+                    result: *result,
                 }
                 .into()
             }

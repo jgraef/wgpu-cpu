@@ -4,7 +4,10 @@ use crate::compiler::{
     Error,
     expression::CompileExpression,
     function::FunctionCompiler,
-    statement::CompileStatement,
+    statement::{
+        BlockStatement,
+        CompileStatement,
+    },
     value::{
         AsIrValue,
         ScalarValue,
@@ -14,8 +17,8 @@ use crate::compiler::{
 #[derive(Clone, Debug)]
 pub struct IfStatement {
     pub condition: naga::Handle<naga::Expression>,
-    pub accept: naga::Block,
-    pub reject: naga::Block,
+    pub accept: BlockStatement,
+    pub reject: BlockStatement,
 }
 
 impl CompileStatement for IfStatement {
