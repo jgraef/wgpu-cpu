@@ -1,9 +1,7 @@
 use std::{
     any::Any,
-    ffi::{
-        c_int,
-        c_void,
-    },
+    fmt::Debug,
+    marker::PhantomData,
     panic::AssertUnwindSafe,
 };
 
@@ -35,33 +33,202 @@ use crate::{
     },
 };
 
+pub trait Runtime: Sized {
+    type Error;
+
+    fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), Self::Error>;
+    fn copy_outputs_from(&mut self, source: &[u8]) -> Result<(), Self::Error>;
+}
+
+impl<R> Runtime for &mut R
+where
+    R: Runtime,
+{
+    type Error = R::Error;
+
+    fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), Self::Error> {
+        R::copy_inputs_to(self, target)
+    }
+
+    fn copy_outputs_from(&mut self, source: &[u8]) -> Result<(), Self::Error> {
+        R::copy_outputs_from(self, source)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum RuntimeStatusCode {
+    Abort = 0,
+    Ok = 1,
+}
+
+#[derive(derive_more::Debug)]
+pub enum AbortPayload<E> {
+    RuntimeError(E),
+    Panic(#[debug(skip)] Box<dyn Any + Send + 'static>),
+}
+
+#[derive(Debug)]
+pub struct RuntimeContextData<R>
+where
+    R: Runtime,
+{
+    pub runtime: R,
+    pub abort_payload: Option<AbortPayload<R::Error>>,
+}
+
+impl<R> RuntimeContextData<R>
+where
+    R: Runtime,
+{
+    pub fn new(runtime: R) -> Self {
+        Self {
+            runtime,
+            abort_payload: None,
+        }
+    }
+
+    pub fn into_inner(self) -> Result<R, R::Error> {
+        if let Some(abort_payload) = self.abort_payload {
+            match abort_payload {
+                AbortPayload::RuntimeError(runtime_error) => Err(runtime_error),
+                AbortPayload::Panic(payload) => {
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }
+        else {
+            Ok(self.runtime)
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The provided `*mut DynRuntimeContextData` must correspond to a valid
+    /// `&mut Self`.
+    pub unsafe fn from_pointer_mut<'a>(pointer: *mut DynRuntimeContextData) -> &'a mut Self {
+        unsafe { &mut *(pointer as *mut Self) }
+    }
+
+    pub fn as_pointer_mut(&mut self) -> *mut DynRuntimeContextData {
+        self as *mut Self as *mut DynRuntimeContextData
+    }
+
+    pub fn with_runtime(
+        &mut self,
+        mut f: impl FnMut(&mut R) -> Result<(), R::Error>,
+    ) -> RuntimeStatusCode {
+        // any panics in the bindings implementations will be catched here and
+        // propagated manually to where the entry point was called
+        match std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut self.runtime))) {
+            Ok(Ok(())) => RuntimeStatusCode::Ok,
+            Ok(Err(runtime_error)) => {
+                self.abort_payload = Some(AbortPayload::RuntimeError(runtime_error));
+                RuntimeStatusCode::Abort
+            }
+            Err(panic) => {
+                self.abort_payload = Some(AbortPayload::Panic(panic));
+                RuntimeStatusCode::Abort
+            }
+        }
+    }
+}
+
+/// Type representing the struct pointed to by an opaque runtime data pointer.
+///
+/// https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs
+#[repr(C)]
+pub struct DynRuntimeContextData {
+    _data: (),
+    _marker: PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+}
+
+impl Debug for DynRuntimeContextData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DynRuntimeContextData")
+            .field(&(self as *const _ as *const u8))
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct RuntimeContext {
+    /// Pointer to the underlying runtime context struct.
+    pub data: *mut DynRuntimeContextData,
+
+    /// Contains function pointers for the runtime API
+    pub vtable: RuntimeVtable,
+}
+
+impl RuntimeContext {
+    pub fn new<R>(data: &mut RuntimeContextData<R>) -> Self
+    where
+        R: Runtime,
+    {
+        Self {
+            data: data.as_pointer_mut(),
+            vtable: RuntimeVtable::new::<R>(),
+        }
+    }
+}
+
+/// Vtable containing function pointers for the runtime API.
+///
+/// These functions can be called from the compiled shader code. The first
+/// argument is always a pointer to runtime context struct.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct RuntimeVtable {
-    // the size of the stack slot is not strictly needed, but let's keep it somewhat safe :D
-    pub copy_inputs_to: unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> c_int,
-    pub copy_outputs_from: unsafe extern "C" fn(*mut c_void, *const u8, usize) -> c_int,
+    /// Copy shader parameters to stack.
+    ///
+    /// The runtime entry point will allocate stack space for all arguments to
+    /// the shader and call this function with it. It can then call the actual
+    /// shader entry point with the arguments.
+    ///
+    /// The provided arguments are:
+    /// 1. Pointer to the runtime context data
+    /// 2. Pointer to the allocated stack space
+    /// 3. Size of allocated stack space
+    ///
+    /// The [`Runtime`] implementation is responsible for knowing the correct
+    /// layout of the arguments on the stack. (see [`BindingStackLayout`]).
+    pub copy_inputs_to:
+        unsafe extern "C" fn(*mut DynRuntimeContextData, *mut u8, usize) -> RuntimeStatusCode,
+
+    /// Copy shader return value from stack
+    ///
+    /// The runtime entry point will write the return value of the shader to a
+    /// location on its stack and call this function with it.
+    ///
+    /// The provided arguments are:
+    /// 1. Pointer to the runtime context data
+    /// 2. Pointer to the stack space with the return value
+    /// 3. Size of the stack space with the return value
+    ///
+    /// The [`Runtime`] implementation is responsible for kowing the correct
+    /// layout of the return value on the stack. (see [`BindingStackLayout`]).
+    pub copy_outputs_from:
+        unsafe extern "C" fn(*mut DynRuntimeContextData, *const u8, usize) -> RuntimeStatusCode,
 }
 
 impl RuntimeVtable {
-    pub const fn new<I, O>() -> Self
+    pub const fn new<R>() -> Self
     where
-        I: ShaderInput,
-        O: ShaderOutput,
+        R: Runtime,
     {
-        unsafe extern "C" fn copy_inputs_to<I, O>(
-            data: *mut c_void,
+        unsafe extern "C" fn copy_inputs_to<R>(
+            data: *mut DynRuntimeContextData,
             target: *mut u8,
             len: usize,
-        ) -> i32
+        ) -> RuntimeStatusCode
         where
-            I: ShaderInput,
+            R: Runtime,
         {
             let data = unsafe {
-                // SAFETY: It is unsafe to pass anything but a pointer to RuntimeData<I, O> to
-                // this function. The lifetime of the RuntimeData is ensured by
-                // the code calling into the generated code.
-                &mut *(data as *mut RuntimeData<I, O>)
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut R`
+                RuntimeContextData::<R>::from_pointer_mut(data)
             };
 
             let target = std::ptr::slice_from_raw_parts_mut(target, len);
@@ -71,29 +238,21 @@ impl RuntimeVtable {
                 &mut *target
             };
 
-            // any panics in the bindings implementations will be catched here and
-            // propagated manually to where the entry point was called
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                data.copy_inputs_to(target);
-            }));
-
-            data.panic = result;
-            data.panic.is_ok() as i32
+            data.with_runtime(|runtime| runtime.copy_inputs_to(target))
         }
 
-        unsafe extern "C" fn copy_outputs_from<I, O>(
-            data: *mut c_void,
+        unsafe extern "C" fn copy_outputs_from<R>(
+            data: *mut DynRuntimeContextData,
             source: *const u8,
             len: usize,
-        ) -> i32
+        ) -> RuntimeStatusCode
         where
-            O: ShaderOutput,
+            R: Runtime,
         {
             let data = unsafe {
-                // SAFETY: It is unsafe to pass anything but a pointer to RuntimeData<I, O> to
-                // this function. The lifetime of the RuntimeData is ensured by
-                // the code calling into the generated code.
-                &mut *(data as *mut RuntimeData<I, O>)
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut R`
+                RuntimeContextData::<R>::from_pointer_mut(data)
             };
 
             let source = std::ptr::slice_from_raw_parts(source, len);
@@ -103,17 +262,12 @@ impl RuntimeVtable {
                 &*source
             };
 
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                data.copy_outputs_from(source);
-            }));
-
-            data.panic = result;
-            data.panic.is_ok() as i32
+            data.with_runtime(|runtime| runtime.copy_outputs_from(source))
         }
 
         RuntimeVtable {
-            copy_inputs_to: copy_inputs_to::<I, O>,
-            copy_outputs_from: copy_outputs_from::<I, O>,
+            copy_inputs_to: copy_inputs_to::<R>,
+            copy_outputs_from: copy_outputs_from::<R>,
         }
     }
 }
@@ -155,87 +309,9 @@ impl RuntimeMethodSignatures {
     }
 }
 
-#[derive(Debug)]
-pub struct RuntimeData<'layout, I, O> {
-    pub input: I,
-    pub input_layout: &'layout [BindingStackLayout],
-    pub output: O,
-    pub output_layout: &'layout [BindingStackLayout],
-    pub panic: Result<(), Box<dyn Any + Send + 'static>>,
-}
-
-impl<'layout, I, O> RuntimeData<'layout, I, O>
-where
-    I: ShaderInput,
-{
-    pub fn copy_inputs_to(&mut self, target: &mut [u8]) {
-        for layout in self.input_layout {
-            self.input.write_into(
-                &layout.binding,
-                &layout.ty,
-                &mut target[layout.offset..][..layout.size],
-            );
-        }
-    }
-}
-
-impl<'layout, I, O> RuntimeData<'layout, I, O>
-where
-    O: ShaderOutput,
-{
-    pub fn copy_outputs_from(&mut self, source: &[u8]) {
-        for layout in self.output_layout {
-            self.output.read_from(
-                &layout.binding,
-                &layout.ty,
-                &source[layout.offset..][..layout.size],
-            );
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct BindingStackLayout {
-    pub binding: naga::Binding,
-    pub ty: naga::Type,
-    pub offset: usize,
-    pub size: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct CollectBindingStackLayouts<'source> {
-    pub layouter: &'source naga::proc::Layouter,
-    pub layouts: Vec<BindingStackLayout>,
-}
-
-impl<'source> VisitIoBindings for CollectBindingStackLayouts<'source> {
-    fn visit(
-        &mut self,
-        binding: &naga::Binding,
-        ty_handle: naga::Handle<naga::Type>,
-        ty: &naga::Type,
-        offset: u32,
-        name: Option<&str>,
-        top_level: bool,
-    ) {
-        let _ = (name, top_level);
-
-        let type_layout = self.layouter[ty_handle];
-        let size = type_layout.size;
-
-        self.layouts.push(BindingStackLayout {
-            binding: binding.clone(),
-            ty: ty.clone(),
-            offset: offset as usize,
-            size: size as usize,
-        });
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeContextValue {
-    pub vtable_pointer: ir::Value,
-    pub data_pointer: ir::Value,
+    pub runtime_pointer: ir::Value,
     pub method_signatures: RuntimeMethodSignatures,
 }
 
@@ -243,22 +319,30 @@ impl RuntimeContextValue {
     pub fn new(
         context: &Context,
         function_builder: &mut FunctionBuilder,
-        vtable_pointer: ir::Value,
-        data_pointer: ir::Value,
+        runtime_pointer: ir::Value,
     ) -> Self {
         let method_signatures = RuntimeMethodSignatures::new(function_builder, context);
         Self {
-            vtable_pointer,
-            data_pointer,
+            runtime_pointer,
             method_signatures,
         }
     }
 }
 
+/// Emits code to call a runtime method
+///
+/// Can be created with the [`runtime_method`] macro.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeMethod<'a> {
-    pub runtime: &'a RuntimeContextValue,
+    /// The IR value for the runtime.
+    ///
+    /// Also contains all the runtime API method signatures.
+    pub runtime_value: &'a RuntimeContextValue,
+
+    /// Offset of the function pointer in the [`RuntimeVtable`].
     pub vtable_offset: i32,
+
+    /// Function signature
     pub signature: ir::SigRef,
 }
 
@@ -269,32 +353,56 @@ impl<'a> RuntimeMethod<'a> {
         function_builder: &mut FunctionBuilder,
         arguments: impl IntoIterator<Item = ir::Value>,
     ) -> ir::Value {
-        let arguments = std::iter::once(self.runtime.data_pointer)
+        let data_pointer_offset: i32 = memoffset::offset_of!(RuntimeContext, data)
+            .try_into()
+            .expect("pointer offset overflow");
+        let vtable_offset: i32 = memoffset::offset_of!(RuntimeContext, vtable)
+            .try_into()
+            .expect("pointer offset overflow");
+
+        // todo: these can probably be relaxed
+        let memory_flags = ir::MemFlags::new();
+
+        let data_pointer = function_builder.ins().load(
+            context.pointer_type(),
+            memory_flags,
+            self.runtime_value.runtime_pointer,
+            data_pointer_offset,
+        );
+
+        let function_pointer = function_builder.ins().load(
+            context.pointer_type(),
+            memory_flags,
+            self.runtime_value.runtime_pointer,
+            self.vtable_offset + vtable_offset,
+        );
+
+        let arguments = std::iter::once(data_pointer)
             .chain(arguments)
             .collect::<Vec<_>>();
 
-        let func_ptr = function_builder.ins().load(
-            context.pointer_type(),
-            ir::MemFlags::new(),
-            self.runtime.vtable_pointer,
-            self.vtable_offset,
-        );
-        let inst = function_builder
-            .ins()
-            .call_indirect(self.signature, func_ptr, &arguments);
+        let inst =
+            function_builder
+                .ins()
+                .call_indirect(self.signature, function_pointer, &arguments);
         let results = function_builder.inst_results(inst);
         assert_eq!(results.len(), 1);
         results[0]
     }
 }
 
+/// Creates a [`RuntimeMethod`] struct which can be used to emit code to call a
+/// runtime API method.
+///
+/// The first argument is the IR value for the pointer to the [`RuntimeContext`]
+/// struct.
 macro_rules! runtime_method {
     ($runtime:expr, $func:ident) => {{
         let vtable_offset = memoffset::offset_of!(RuntimeVtable, $func);
         let vtable_offset = i32::try_from(vtable_offset).expect("runtime vtable offset overflow");
         let signature = $runtime.method_signatures.$func;
         RuntimeMethod {
-            runtime: &$runtime,
+            runtime_value: &$runtime,
             vtable_offset,
             signature,
         }
@@ -474,5 +582,88 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
         self.function_builder.seal_block(continue_block);
 
         Ok(collect_binding_stack_layouts.layouts)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DefaultRuntimeError {
+    // todo
+}
+
+#[derive(Debug)]
+pub struct DefaultRuntime<'layout, I, O> {
+    pub input: I,
+    pub input_layout: &'layout [BindingStackLayout],
+    pub output: O,
+    pub output_layout: &'layout [BindingStackLayout],
+}
+
+impl<'layout, I, O> Runtime for DefaultRuntime<'layout, I, O>
+where
+    I: ShaderInput,
+    O: ShaderOutput,
+{
+    type Error = DefaultRuntimeError;
+
+    fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), DefaultRuntimeError> {
+        for layout in self.input_layout {
+            self.input.write_into(
+                &layout.binding,
+                &layout.ty,
+                &mut target[layout.offset..][..layout.size],
+            );
+        }
+
+        Ok(())
+    }
+
+    fn copy_outputs_from(&mut self, source: &[u8]) -> Result<(), DefaultRuntimeError> {
+        for layout in self.output_layout {
+            self.output.read_from(
+                &layout.binding,
+                &layout.ty,
+                &source[layout.offset..][..layout.size],
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BindingStackLayout {
+    pub binding: naga::Binding,
+    pub ty: naga::Type,
+    pub offset: usize,
+    pub size: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct CollectBindingStackLayouts<'source> {
+    pub layouter: &'source naga::proc::Layouter,
+    pub layouts: Vec<BindingStackLayout>,
+}
+
+impl<'source> VisitIoBindings for CollectBindingStackLayouts<'source> {
+    fn visit(
+        &mut self,
+        binding: &naga::Binding,
+        ty_handle: naga::Handle<naga::Type>,
+        ty: &naga::Type,
+        offset: u32,
+        name: Option<&str>,
+        top_level: bool,
+    ) {
+        let _ = (name, top_level);
+
+        let type_layout = self.layouter[ty_handle];
+        let size = type_layout.size;
+
+        self.layouts.push(BindingStackLayout {
+            binding: binding.clone(),
+            ty: ty.clone(),
+            offset: offset as usize,
+            size: size as usize,
+        });
     }
 }

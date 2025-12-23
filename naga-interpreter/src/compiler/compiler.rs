@@ -58,7 +58,6 @@ use cranelift_module::{
 use crate::{
     compiler::{
         Error,
-        expression::EvaluateExpression,
         function::{
             FunctionArgument,
             FunctionDeclaration,
@@ -78,6 +77,10 @@ use crate::{
             AsIrValues,
             FromIrValues,
             Value,
+        },
+        variable::{
+            GlobalVariable,
+            GlobalVariablesLayouter,
         },
     },
     entry_point::EntryPoints,
@@ -132,6 +135,8 @@ pub struct Context<'source> {
 
     /// Maps naga's types to our types
     pub types: CoArena<naga::Type, Type>,
+
+    pub global_variables: CoArena<naga::GlobalVariable, GlobalVariable>,
 }
 
 impl<'source> Context<'source> {
@@ -156,6 +161,25 @@ impl<'source> Context<'source> {
         //    CoArena::try_from_arena(&source.global_expressions, |handle, expression|
         // todo!())?;
 
+        let global_variables = {
+            let mut layouter = GlobalVariablesLayouter::new(&layouter);
+
+            CoArena::from_arena(&source.global_variables, |_handle, global_variable| {
+                // todo: initialize later
+                /*if let Some(init) = global_variable.init {
+                    assert!(global_variable.binding.is_none());
+                    let init = init.evaluate_expression(&self.context)?;
+
+
+                    dbg!(init);
+                    dbg!(type_layout);
+                    todo!("write constant value into global data");
+                }*/
+
+                layouter.push(global_variable)
+            })
+        };
+
         Ok(Self {
             source,
             info,
@@ -164,6 +188,7 @@ impl<'source> Context<'source> {
             simd_context,
             types,
             config,
+            global_variables,
         })
     }
 
@@ -362,11 +387,6 @@ where
             .signature
             .params
             .push(AbiParam::new(self.context.pointer_type()));
-        self.cl_context
-            .func
-            .signature
-            .params
-            .push(AbiParam::new(self.context.pointer_type()));
 
         let mut function_builder =
             FunctionBuilder::new(&mut self.cl_context.func, &mut self.fb_context);
@@ -380,15 +400,10 @@ where
         let runtime = {
             let block_params = function_builder.block_params(entry_block);
             // note: the order of these arguments must be synchronized with the call to the
-            // compiled code in `module.rs`.
-            let vtable_pointer = block_params[0];
-            let data_pointer = block_params[1];
-            RuntimeContextValue::new(
-                &self.context,
-                &mut function_builder,
-                vtable_pointer,
-                data_pointer,
-            )
+            // compiled code in
+            // [`EntryPoint::function`](super::product::EntryPoint::function).
+            let runtime_pointer = block_params[0];
+            RuntimeContextValue::new(&self.context, &mut function_builder, runtime_pointer)
         };
 
         function_builder.seal_block(entry_block);
@@ -452,43 +467,6 @@ where
             output_layout,
         })
     }
-
-    // wip
-    #[allow(unused)]
-    fn compile_global_variables(&mut self) -> Result<(), Error> {
-        //let mut global_data = vec![];
-        let mut offset = 0;
-
-        let global_variables = CoArena::try_from_arena(
-            &self.context.source.global_variables,
-            |handle, global_variable| {
-                let ty = self.context.types[global_variable.ty];
-
-                if let Some(init) = global_variable.init {
-                    assert!(global_variable.binding.is_none());
-                    let init = init.evaluate_expression(&self.context)?;
-                    let type_layout = self.context.layouter[global_variable.ty];
-
-                    dbg!(init);
-                    dbg!(type_layout);
-                    todo!("write constant value into global data");
-                }
-
-                if let Some(binding) = global_variable.binding {
-                    assert!(global_variable.init.is_none());
-                }
-
-                Ok::<_, Error>(GlobalVariable {
-                    offset,
-                    ty,
-                    address_space: global_variable.space,
-                })
-            },
-        )?;
-
-        // todo: store coarena for function compiler
-        todo!("return struct containing global data and layout");
-    }
 }
 
 // better name?
@@ -497,13 +475,6 @@ where
 #[derive(Clone, Debug)]
 pub struct PrivateMemory {
     data: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct GlobalVariable {
-    pub address_space: naga::AddressSpace,
-    pub offset: i32,
-    pub ty: Type,
 }
 
 pub trait FuncBuilderExt {

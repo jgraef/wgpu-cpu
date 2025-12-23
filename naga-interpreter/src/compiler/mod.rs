@@ -11,6 +11,7 @@ mod tests;
 pub mod types;
 pub mod util;
 pub mod value;
+pub mod variable;
 
 use std::sync::Arc;
 

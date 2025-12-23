@@ -10,8 +10,10 @@ use crate::{
     },
     compiler::runtime::{
         BindingStackLayout,
-        RuntimeData,
-        RuntimeVtable,
+        DefaultRuntime,
+        Runtime,
+        RuntimeContext,
+        RuntimeContextData,
     },
     entry_point::{
         EntryPointIndex,
@@ -134,42 +136,33 @@ impl<'a> EntryPoint<'a> {
         self.inner.early_depth_test
     }
 
-    pub fn function<I, O>(&self) -> impl Fn(I, O)
+    pub fn function<R>(&self) -> impl Fn(R) -> Result<(), R::Error>
     where
-        I: ShaderInput,
-        O: ShaderOutput,
+        R: Runtime,
     {
-        |input: I, output: O| {
-            let mut runtime_data = RuntimeData {
-                input,
-                input_layout: &self.inner.data.input_layout,
-                output,
-                output_layout: &self.inner.data.output_layout,
-                panic: Ok(()),
-            };
-
-            let runtime_vtable = RuntimeVtable::new::<I, O>();
+        |runtime: R| {
+            let mut runtime_context_data = RuntimeContextData::new(runtime);
+            let mut runtime_context = RuntimeContext::new(&mut runtime_context_data);
 
             unsafe {
-                // SAFETY: We just created the vtable and data with matching types. Thus it's
-                // safe to call the function with these arguments. The function itself is safe
-                // because `EntryPoint`s can only be created from `CompiledModule`s, which can
-                // only be created with an safety guarantuee that the compiled code is safe,
-                // takes 2 pointer arguments and returns nothing.
+                // SAFETY: We just created the context struct and it's valid until the end of
+                // the scope. Thus it's safe to call the function with this as
+                // argument. The function itself is safe because `EntryPoint`s
+                // can only be created from `CompiledModule`s, which can only be
+                // created with an safety guarantuee that the compiled code is safe,
+                // takes 1 pointer arguments and returns nothing.
 
-                let function = std::mem::transmute::<
-                    _,
-                    unsafe extern "C" fn(*const RuntimeVtable, *mut RuntimeData<I, O>),
-                >(self.function_pointer);
+                let function = std::mem::transmute::<_, unsafe extern "C" fn(*const RuntimeContext)>(
+                    self.function_pointer,
+                );
 
                 // note: the order of these arguments must be synchronized with the compiled
                 // code, which is generated in [`Compiler::compile_entry_point`].
-                function(&runtime_vtable as *const _, &mut runtime_data as *mut _);
+                function(&mut runtime_context as *mut _);
             }
 
-            if let Err(panic) = runtime_data.panic {
-                std::panic::resume_unwind(panic);
-            }
+            let _runtime = runtime_context_data.into_inner()?;
+            Ok(())
         }
     }
 
@@ -178,7 +171,14 @@ impl<'a> EntryPoint<'a> {
         I: ShaderInput,
         O: ShaderOutput,
     {
-        self.function()(input, output);
+        let runtime = DefaultRuntime {
+            input,
+            input_layout: &self.inner.data.input_layout,
+            output,
+            output_layout: &self.inner.data.output_layout,
+        };
+
+        self.function()(runtime).expect("runtime error");
     }
 }
 

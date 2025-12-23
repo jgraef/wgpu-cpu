@@ -6,6 +6,7 @@ use crate::compiler::{
         PointerValue,
         Value,
     },
+    variable::GlobalVariable,
 };
 #[derive(Clone, Copy, Debug)]
 pub struct GlobalVariableExpression {
@@ -14,7 +15,24 @@ pub struct GlobalVariableExpression {
 
 impl CompileExpression for GlobalVariableExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        todo!()
+        let global_variable = compiler.context.global_variables[self.handle];
+
+        match global_variable {
+            GlobalVariable::Memory {
+                address_space,
+                offset,
+            } => {
+                todo!("get pointer to global memory");
+            }
+            GlobalVariable::Resource {
+                address_space,
+                binding,
+            } => {
+                todo!("get pointer to resource binding");
+            }
+        }
+
+        //todo!();
     }
 }
 
