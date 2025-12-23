@@ -212,3 +212,27 @@ fn vector_constant() {
     );
     assert_eq!(output, [1, 2, 3, 4]);
 }
+
+#[test]
+fn loops() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var fac: i32 = 1;
+
+            for (var i = 2; i <= 6; i += 1) {
+                fac *= i;
+            }
+
+            return Output(vec4f(), fac);
+        }
+        "#,
+    );
+    assert_eq!(output, 720);
+}

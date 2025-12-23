@@ -18,7 +18,10 @@ use crate::{
         compiler::Context,
         expression::CompileExpression,
         simd::SimdImmediates,
-        statement::CompileStatement,
+        statement::{
+            CompileStatement,
+            LoopStack,
+        },
         types::{
             PointerType,
             Type,
@@ -76,13 +79,11 @@ pub struct FunctionCompiler<'source, 'compiler> {
     pub local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
     pub simd_immediates: SimdImmediates,
     pub imported_functions: SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
-
     #[debug(skip)]
     pub function_builder: FunctionBuilder<'compiler>,
-
     pub emitted_expression: SparseCoArena<naga::Expression, Value>,
-
     pub source_locations: Vec<naga::Span>,
+    pub loop_stack: LoopStack,
 }
 
 impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
@@ -145,6 +146,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             function_builder,
             emitted_expression: Default::default(),
             source_locations: vec![],
+            loop_stack: Default::default(),
         })
     }
 
@@ -191,6 +193,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
 
     /// Finish compilation of the function
     pub fn finish(self) {
+        assert!(self.loop_stack.is_empty());
         self.function_builder.finalize();
     }
 

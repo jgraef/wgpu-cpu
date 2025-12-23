@@ -461,6 +461,8 @@ pub trait FuncBuilderExt {
         arguments: impl IntoIterator<Item = Value>,
         return_type: Option<Type>,
     ) -> Option<Value>;
+
+    fn switch_to_void_block(&mut self);
 }
 
 impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
@@ -485,5 +487,13 @@ impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
                 self.inst_results(inst).iter().copied(),
             )
         })
+    }
+
+    fn switch_to_void_block(&mut self) {
+        // todo: return early from compiling a block with ControlFlow instead.
+        let void_block = self.create_block();
+        self.seal_block(void_block);
+        self.set_cold_block(void_block); // very cold lol
+        self.switch_to_block(void_block);
     }
 }

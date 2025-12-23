@@ -2,6 +2,7 @@ use cranelift_codegen::ir::InstBuilder;
 
 use crate::compiler::{
     Error,
+    compiler::FuncBuilderExt,
     expression::CompileExpression,
     function::FunctionCompiler,
     statement::CompileStatement,
@@ -23,15 +24,7 @@ impl CompileStatement for ReturnStatement {
         }
 
         compiler.function_builder.ins().return_(&return_values);
-
-        // fixme: return ControlFlow to stop compiling this block. this is a bit tricky
-        // because we also return Results for now we'll just switch to a new
-        // block for the rest. this block will not be jumped to, but we still do the
-        // work compiling it.
-        let void_block = compiler.function_builder.create_block();
-        compiler.function_builder.seal_block(void_block);
-        compiler.function_builder.switch_to_block(void_block);
-        compiler.function_builder.set_cold_block(void_block); // very cold lol
+        compiler.function_builder.switch_to_void_block();
 
         Ok(())
     }
