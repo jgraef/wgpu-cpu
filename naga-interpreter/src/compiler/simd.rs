@@ -107,8 +107,8 @@ pub struct SimdValues {
 }
 
 impl SimdValues {
-    pub fn stride(&self) -> i32 {
-        self.ty.bytes().try_into().expect("stack offset overflow")
+    pub fn stride(&self) -> u32 {
+        self.ty.bytes()
     }
 }
 

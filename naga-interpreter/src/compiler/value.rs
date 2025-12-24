@@ -25,6 +25,8 @@ use crate::compiler::{
     util::ieee16_from_f16,
 };
 
+pub const POINTER_OUT_OF_BOUNDS_TRAP_CODE: ir::TrapCode = const { ir::TrapCode::user(3).unwrap() };
+
 pub trait AsIrValue {
     fn try_as_ir_value(&self) -> Option<ir::Value>;
 
@@ -82,16 +84,45 @@ pub trait TypeOf {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Pointer {
+pub struct PointerRange<L> {
     pub value: ir::Value,
     pub memory_flags: ir::MemFlags,
-    pub offset: i32,
+    pub offset: u32,
+    pub len: L,
+}
+
+impl PointerRange<u32> {
+    pub fn check_bounds(&self) -> Result<(), Error> {
+        if self.offset < self.len {
+            Ok(())
+        }
+        else {
+            // naga will reject programs doing this.
+            panic!(
+                "out of bounds pointer access: offset={}, len={}",
+                self.offset, self.len
+            );
+        }
+    }
+}
+
+impl PointerRange<ir::Value> {
+    pub fn check_bounds(&self, function_builder: &mut FunctionBuilder) {
+        let in_bounds = function_builder.ins().icmp_imm(
+            ir::condcodes::IntCC::UnsignedGreaterThan,
+            self.len,
+            i64::from(self.offset),
+        );
+        function_builder
+            .ins()
+            .trapz(in_bounds, POINTER_OUT_OF_BOUNDS_TRAP_CODE);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct StackLocation {
     pub stack_slot: ir::StackSlot,
-    pub offset: i32,
+    pub offset: u32,
 }
 
 impl From<ir::StackSlot> for StackLocation {
@@ -104,27 +135,34 @@ impl From<ir::StackSlot> for StackLocation {
 }
 
 pub trait PointerOffset: Copy {
-    fn with_offset(self, offset: i32) -> Self;
+    fn with_offset(self, offset: u32) -> Self;
 
-    fn add_offset(&mut self, offset: i32) {
+    fn add_offset(&mut self, offset: u32) {
         *self = self.with_offset(offset);
     }
 }
 
-impl PointerOffset for Pointer {
-    fn with_offset(mut self, offset: i32) -> Self {
+impl PointerOffset for PointerRange<u32> {
+    fn with_offset(mut self, offset: u32) -> Self {
+        self.offset = offset;
+        self
+    }
+}
+
+impl PointerOffset for PointerRange<ir::Value> {
+    fn with_offset(mut self, offset: u32) -> Self {
         self.offset = offset;
         self
     }
 }
 
 impl PointerOffset for StackLocation {
-    fn with_offset(mut self, offset: i32) -> Self {
+    fn with_offset(mut self, offset: u32) -> Self {
         self.offset = offset;
         self
     }
 
-    fn add_offset(&mut self, offset: i32) {
+    fn add_offset(&mut self, offset: u32) {
         self.offset += offset;
     }
 }
@@ -138,18 +176,40 @@ pub trait Load<P, T>: Sized {
     ) -> Result<Self, Error>;
 }
 
-impl Load<Pointer, ir::Type> for ir::Value {
+impl Load<PointerRange<u32>, ir::Type> for ir::Value {
     fn load(
         context: &Context,
         function_builder: &mut FunctionBuilder,
         ty: ir::Type,
-        pointer: Pointer,
+        pointer: PointerRange<u32>,
     ) -> Result<Self, Error> {
         let _ = context;
-        let value =
-            function_builder
-                .ins()
-                .load(ty, pointer.memory_flags, pointer.value, pointer.offset);
+        pointer.check_bounds()?;
+        let value = function_builder.ins().load(
+            ty,
+            pointer.memory_flags,
+            pointer.value,
+            i32::try_from(pointer.offset).expect("pointer offset overflow"),
+        );
+        Ok(value)
+    }
+}
+
+impl Load<PointerRange<ir::Value>, ir::Type> for ir::Value {
+    fn load(
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        ty: ir::Type,
+        pointer: PointerRange<ir::Value>,
+    ) -> Result<Self, Error> {
+        let _ = context;
+        pointer.check_bounds(function_builder);
+        let value = function_builder.ins().load(
+            ty,
+            pointer.memory_flags,
+            pointer.value,
+            i32::try_from(pointer.offset).expect("pointer offset overflow"),
+        );
         Ok(value)
     }
 }
@@ -162,9 +222,12 @@ impl Load<StackLocation, ir::Type> for ir::Value {
         pointer: StackLocation,
     ) -> Result<Self, Error> {
         let _ = context;
-        let value = function_builder
-            .ins()
-            .stack_load(ty, pointer.stack_slot, pointer.offset);
+
+        let value = function_builder.ins().stack_load(
+            ty,
+            pointer.stack_slot,
+            i32::try_from(pointer.offset).expect("stack offset overflow"),
+        );
         Ok(value)
     }
 }
@@ -178,17 +241,40 @@ pub trait Store<P> {
     ) -> Result<(), Error>;
 }
 
-impl Store<Pointer> for ir::Value {
+impl Store<PointerRange<u32>> for ir::Value {
     fn store(
         &self,
         context: &Context,
         function_builder: &mut FunctionBuilder,
-        pointer: Pointer,
+        pointer: PointerRange<u32>,
     ) -> Result<(), Error> {
         let _ = context;
-        function_builder
-            .ins()
-            .store(pointer.memory_flags, *self, pointer.value, pointer.offset);
+        pointer.check_bounds()?;
+        function_builder.ins().store(
+            pointer.memory_flags,
+            *self,
+            pointer.value,
+            i32::try_from(pointer.offset).expect("pointer offset overflow"),
+        );
+        Ok(())
+    }
+}
+
+impl Store<PointerRange<ir::Value>> for ir::Value {
+    fn store(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        pointer: PointerRange<ir::Value>,
+    ) -> Result<(), Error> {
+        let _ = context;
+        pointer.check_bounds(function_builder);
+        function_builder.ins().store(
+            pointer.memory_flags,
+            *self,
+            pointer.value,
+            i32::try_from(pointer.offset).expect("pointer offset overflow"),
+        );
         Ok(())
     }
 }
@@ -201,9 +287,11 @@ impl Store<StackLocation> for ir::Value {
         pointer: StackLocation,
     ) -> Result<(), Error> {
         let _ = context;
-        function_builder
-            .ins()
-            .stack_store(*self, pointer.stack_slot, pointer.offset);
+        function_builder.ins().stack_store(
+            *self,
+            pointer.stack_slot,
+            i32::try_from(pointer.offset).expect("stack offset overflow"),
+        );
         Ok(())
     }
 }
@@ -323,7 +411,10 @@ impl PointerValue {
         let base_type = self.ty.base_type(context);
 
         let value = match self.inner {
-            PointerValueInner::Pointer(pointer) => {
+            PointerValueInner::StaticPointer(pointer) => {
+                Value::load(context, function_builder, base_type, pointer)?
+            }
+            PointerValueInner::DynamicPointer(pointer) => {
                 Value::load(context, function_builder, base_type, pointer)?
             }
             PointerValueInner::StackLocation(stack_location) => {
@@ -341,7 +432,10 @@ impl PointerValue {
         value: &Value,
     ) -> Result<(), Error> {
         match self.inner {
-            PointerValueInner::Pointer(pointer) => {
+            PointerValueInner::StaticPointer(pointer) => {
+                value.store(context, function_builder, pointer)?
+            }
+            PointerValueInner::DynamicPointer(pointer) => {
                 value.store(context, function_builder, pointer)?
             }
             PointerValueInner::StackLocation(stack_location) => {
@@ -350,17 +444,6 @@ impl PointerValue {
         }
 
         Ok(())
-    }
-
-    pub fn from_ir_value(ty: PointerType, value: ir::Value) -> Self {
-        Self {
-            ty,
-            inner: PointerValueInner::Pointer(Pointer {
-                value,
-                memory_flags: ir::MemFlags::new(),
-                offset: 0,
-            }),
-        }
     }
 
     pub fn from_stack_slot(ty: PointerType, stack_location: impl Into<StackLocation>) -> Self {
@@ -373,18 +456,25 @@ impl PointerValue {
 
 impl AsIrValue for PointerValue {
     fn try_as_ir_value(&self) -> Option<ir::Value> {
-        Some(self.as_ir_value())
-    }
-
-    fn as_ir_value(&self) -> ir::Value {
         match self.inner {
-            PointerValueInner::Pointer(pointer) => {
-                if pointer.offset != 0 {
-                    todo!();
+            PointerValueInner::StaticPointer(pointer) => {
+                if pointer.offset == 0 {
+                    Some(pointer.value)
                 }
-                pointer.value
+                else {
+                    // todo: need to emit instruction to add offset to pointer
+                    None
+                }
             }
-            PointerValueInner::StackLocation(_stack_location) => todo!(),
+            PointerValueInner::DynamicPointer(_pointer) => {
+                // Can't turn a dynamic pointer into a single IR value
+                None
+            }
+            PointerValueInner::StackLocation(_stack_location) => {
+                // todo: need to emit instruction to get address
+                //todo!();
+                None
+            }
         }
     }
 }
@@ -399,10 +489,13 @@ impl FromIrValues for PointerValue {
     fn try_from_ir_values_fn<E>(
         context: &Context,
         ty: Self::Type,
-        mut f: impl FnMut(ir::Type) -> Result<ir::Value, E>,
+        f: impl FnMut(ir::Type) -> Result<ir::Value, E>,
     ) -> Result<Self, E> {
-        let _ = context;
-        Ok(Self::from_ir_value(ty, f(context.pointer_type())?))
+        let _ = (context, ty, f);
+        todo!();
+        //let pointer = f(context.pointer_type())?;
+        //let len = f(context.pointer_type())?;
+        //Ok(Self::from_ir_value(ty, f(context.pointer_type())?))
     }
 }
 
@@ -424,8 +517,10 @@ where
         ty: PointerType,
         pointer: P,
     ) -> Result<Self, Error> {
-        let value = ir::Value::load(context, function_builder, context.pointer_type(), pointer)?;
-        Ok(Self::from_ir_value(ty, value))
+        let _ = (context, function_builder, ty, pointer);
+        //let value = ir::Value::load(context, function_builder,
+        // context.pointer_type(), pointer)?; Ok(Self::from_ir_value(ty, value))
+        todo!("check spec if we need to have this.");
     }
 }
 
@@ -439,14 +534,16 @@ where
         function_builder: &mut FunctionBuilder,
         pointer: P,
     ) -> Result<(), Error> {
-        self.as_ir_value()
-            .store(context, function_builder, pointer)?;
-        Ok(())
+        let _ = (context, function_builder, pointer);
+        //self.as_ir_value()
+        //    .store(context, function_builder, pointer)?;
+        //Ok(())
+        todo!("check spec if we need to have this.");
     }
 }
 
 impl PointerOffset for PointerValue {
-    fn with_offset(self, offset: i32) -> Self {
+    fn with_offset(self, offset: u32) -> Self {
         Self {
             ty: self.ty,
             inner: self.inner.with_offset(offset),
@@ -456,14 +553,16 @@ impl PointerOffset for PointerValue {
 
 #[derive(Clone, Copy, Debug)]
 pub enum PointerValueInner {
-    Pointer(Pointer),
+    StaticPointer(PointerRange<u32>),
+    DynamicPointer(PointerRange<ir::Value>),
     StackLocation(StackLocation),
 }
 
 impl PointerOffset for PointerValueInner {
-    fn with_offset(self, offset: i32) -> Self {
+    fn with_offset(self, offset: u32) -> Self {
         match self {
-            Self::Pointer(pointer) => Self::Pointer(pointer.with_offset(offset)),
+            Self::StaticPointer(pointer) => Self::StaticPointer(pointer.with_offset(offset)),
+            Self::DynamicPointer(pointer) => Self::DynamicPointer(pointer.with_offset(offset)),
             Self::StackLocation(stack_location) => {
                 Self::StackLocation(stack_location.with_offset(offset))
             }
@@ -780,9 +879,7 @@ where
                     context,
                     function_builder,
                     member_type,
-                    pointer.with_offset(
-                        i32::try_from(member.offset).expect("struct member offset overflow"),
-                    ),
+                    pointer.with_offset(member.offset),
                 )
             })
             .collect::<Result<_, Error>>()?;
@@ -806,9 +903,7 @@ where
             member_value.store(
                 context,
                 function_builder,
-                pointer.with_offset(
-                    i32::try_from(member.offset).expect("struct member offset overflow"),
-                ),
+                pointer.with_offset(member.offset),
             )?;
         }
 
@@ -864,12 +959,11 @@ where
     ) -> Result<Self, Error> {
         let count = ty.expect_size();
         let base_type = ty.base_type(context);
-        let stride = i32::try_from(ty.stride).expect("array offset overflow");
 
         let values = (0..count)
             .map(|_i| {
                 let value = Value::load(context, function_builder, base_type, pointer)?;
-                pointer.add_offset(stride);
+                pointer.add_offset(ty.stride);
                 Ok(value)
             })
             .collect::<Result<Vec<Value>, Error>>()?;
@@ -889,11 +983,9 @@ where
         function_builder: &mut FunctionBuilder,
         mut pointer: P,
     ) -> Result<(), Error> {
-        let stride = i32::try_from(self.ty.stride).expect("array offset overflow");
-
         for value in &self.values {
             value.store(context, function_builder, pointer)?;
-            pointer.add_offset(stride);
+            pointer.add_offset(self.ty.stride);
         }
 
         Ok(())
@@ -993,7 +1085,8 @@ macro_rules! define_value {
             }
         }
 
-        define_value!(@impl_load_store([$(($variant, $ty)),*], Pointer));
+        define_value!(@impl_load_store([$(($variant, $ty)),*], PointerRange<u32>));
+        define_value!(@impl_load_store([$(($variant, $ty)),*], PointerRange<ir::Value>));
         define_value!(@impl_load_store([$(($variant, $ty)),*], StackLocation));
 
         $(

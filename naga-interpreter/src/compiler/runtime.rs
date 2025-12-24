@@ -26,6 +26,7 @@ use crate::{
         value::{
             Load,
             PointerOffset,
+            PointerRange,
             StackLocation,
             Store,
             Value,
@@ -93,6 +94,20 @@ pub trait Runtime: Sized {
     /// such as the [work group address space](naga::AddressSpace::WorkGroup).
     /// Only private global variables are implemented right now.
     fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// # TODO
+    ///
+    /// Can we design a safe API?
+    unsafe fn buffer(
+        &mut self,
+        binding: naga::ResourceBinding,
+        access: naga::StorageAccess,
+    ) -> Result<(*mut u8, usize), Self::Error> {
+        // todo: remove default impl
+        let _ = (binding, access);
+        let buffer = &mut [];
+        Ok((buffer.as_mut_ptr(), buffer.len()))
+    }
 }
 
 impl<R> Runtime for &mut R
@@ -111,6 +126,17 @@ where
 
     fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error> {
         R::initialize_global_variables(self, private_data)
+    }
+
+    unsafe fn buffer(
+        &mut self,
+        binding: naga::ResourceBinding,
+        access: naga::StorageAccess,
+    ) -> Result<(*mut u8, usize), Self::Error> {
+        unsafe {
+            // SAFETY: callee's responsibility
+            R::buffer(self, binding, access)
+        }
     }
 }
 
@@ -321,6 +347,15 @@ pub struct RuntimeVtable {
     /// only sets the abort payload and returns a [`RuntimeResult`] telling the
     /// shader to abort execution.
     pub kill: unsafe extern "C" fn(*mut DynRuntimeData) -> RuntimeResult,
+
+    pub buffer: unsafe extern "C" fn(
+        *mut DynRuntimeData,
+        group: u32,
+        binding: u32,
+        access: u32,
+        pointer_out: &mut *const u8,
+        len_out: &mut usize,
+    ) -> RuntimeResult,
 }
 
 impl RuntimeVtable {
@@ -420,11 +455,45 @@ impl RuntimeVtable {
             RuntimeResult::Abort
         }
 
+        unsafe extern "C" fn buffer<R>(
+            data: *mut DynRuntimeData,
+            group: u32,
+            binding: u32,
+            access: u32,
+            pointer_out: &mut *const u8,
+            len_out: &mut usize,
+        ) -> RuntimeResult
+        where
+            R: Runtime,
+        {
+            let data = unsafe {
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
+            };
+
+            data.with_runtime(move |runtime| {
+                let access = naga::StorageAccess::from_bits_retain(access);
+                let binding = naga::ResourceBinding { group, binding };
+
+                let (pointer, len) = unsafe {
+                    // SAFETY: callee's responsibility
+                    runtime.buffer(binding, access)?
+                };
+
+                *pointer_out = pointer;
+                *len_out = len;
+
+                Ok(())
+            })
+        }
+
         RuntimeVtable {
             copy_inputs_to: copy_inputs_to::<R>,
             copy_outputs_from: copy_outputs_from::<R>,
             initialize_global_variables: initialize_global_variables::<R>,
             kill: kill::<R>,
+            buffer: buffer::<R>,
         }
     }
 }
@@ -438,18 +507,23 @@ pub struct RuntimeMethodSignatures {
     pub copy_outputs_from: ir::SigRef,
     pub initialize_global_variables: ir::SigRef,
     pub kill: ir::SigRef,
+    pub buffer: ir::SigRef,
 }
 
 impl RuntimeMethodSignatures {
     pub fn new(function_builder: &mut FunctionBuilder, context: &Context) -> Self {
-        let data = ir::AbiParam::new(context.pointer_type());
+        let pointer_param = ir::AbiParam::new(context.pointer_type());
+        let context_param = pointer_param;
         let result = ir::AbiParam::new(ir::types::I8);
 
         let copy_inputs_to = function_builder.import_signature(ir::Signature {
             params: vec![
-                data,
-                ir::AbiParam::new(context.pointer_type()),
-                ir::AbiParam::new(context.pointer_type()),
+                // context pointer
+                context_param,
+                // stack slot pointer
+                pointer_param,
+                // stack slot size
+                pointer_param,
             ],
             returns: vec![result],
             call_conv: context.target_config.default_call_conv,
@@ -457,9 +531,12 @@ impl RuntimeMethodSignatures {
 
         let copy_outputs_from = function_builder.import_signature(ir::Signature {
             params: vec![
-                data,
-                ir::AbiParam::new(context.pointer_type()),
-                ir::AbiParam::new(context.pointer_type()),
+                // context pointer
+                context_param,
+                // stack slot pointer
+                pointer_param,
+                // stack slot size
+                pointer_param,
             ],
             returns: vec![result],
             call_conv: context.target_config.default_call_conv,
@@ -467,16 +544,41 @@ impl RuntimeMethodSignatures {
 
         let initialize_global_variables = function_builder.import_signature(ir::Signature {
             params: vec![
-                data,
-                ir::AbiParam::new(context.pointer_type()),
-                ir::AbiParam::new(context.pointer_type()),
+                // context pointer
+                context_param,
+                // stack slot pointer
+                pointer_param,
+                // stack slot size
+                pointer_param,
             ],
             returns: vec![result],
             call_conv: context.target_config.default_call_conv,
         });
 
         let kill = function_builder.import_signature(ir::Signature {
-            params: vec![data],
+            params: vec![
+                // context pointer
+                context_param,
+            ],
+            returns: vec![result],
+            call_conv: context.target_config.default_call_conv,
+        });
+
+        let buffer = function_builder.import_signature(ir::Signature {
+            params: vec![
+                // context pointer
+                context_param,
+                // binding group
+                ir::AbiParam::new(ir::types::I32),
+                // binding index
+                ir::AbiParam::new(ir::types::I32),
+                // access flags
+                ir::AbiParam::new(ir::types::I32),
+                // buffer pointer, return by reference
+                pointer_param,
+                // buffer size, return by reference
+                pointer_param,
+            ],
             returns: vec![result],
             call_conv: context.target_config.default_call_conv,
         });
@@ -486,6 +588,7 @@ impl RuntimeMethodSignatures {
             copy_outputs_from,
             initialize_global_variables,
             kill,
+            buffer,
         }
     }
 }
@@ -574,6 +677,72 @@ impl RuntimeContextValue {
     /// execution.
     pub fn kill(&self, context: &Context, function_builder: &mut FunctionBuilder) {
         runtime_method!(self, kill).call(context, function_builder, []);
+    }
+
+    pub fn buffer(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        resource_binding: naga::ir::ResourceBinding,
+        access: naga::StorageAccess,
+    ) -> PointerRange<ir::Value> {
+        // values for arguments
+        let group = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(resource_binding.group));
+        let binding = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(resource_binding.binding));
+        let access = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(access.bits()));
+
+        // the runtime api method will return the pointer by reference.
+        let pointer_type = context.pointer_type();
+        let pointer_out_stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
+            kind: ir::StackSlotKind::ExplicitSlot,
+            size: pointer_type.bytes(),
+            align_shift: 1, // i think cranelift will figure it out
+            key: None,
+        });
+        let pointer_out =
+            function_builder
+                .ins()
+                .stack_addr(pointer_type, pointer_out_stack_slot, 0);
+
+        let len_out_stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
+            kind: ir::StackSlotKind::ExplicitSlot,
+            size: pointer_type.bytes(),
+            align_shift: 1, // i think cranelift will figure it out
+            key: None,
+        });
+        let len_out = function_builder
+            .ins()
+            .stack_addr(pointer_type, len_out_stack_slot, 0);
+
+        // call runtime
+        runtime_method!(self, buffer).call(
+            context,
+            function_builder,
+            [group, binding, access, pointer_out, len_out],
+        );
+
+        // load returned pointer and len
+        let pointer = function_builder
+            .ins()
+            .stack_load(pointer_type, pointer_out_stack_slot, 0);
+        let len = function_builder
+            .ins()
+            .stack_load(pointer_type, len_out_stack_slot, 0);
+
+        // we probably need to think about what memory flags to use here (depends on
+        // address space i think)
+        PointerRange {
+            value: pointer,
+            memory_flags: self.memory_flags,
+            offset: 0,
+            len,
+        }
     }
 }
 
@@ -907,6 +1076,17 @@ where
         private_data[..initialized.len()].copy_from_slice(initialized);
         private_data[initialized.len()..].fill(0);
         Ok(())
+    }
+
+    unsafe fn buffer(
+        &mut self,
+        binding: naga::ResourceBinding,
+        access: naga::StorageAccess,
+    ) -> Result<(*mut u8, usize), Self::Error> {
+        todo!("buffer: {binding:?}, {access:?}");
+        /*// todo
+        let buffer = &mut [];
+        Ok((buffer.as_mut_ptr(), buffer.len()))*/
     }
 }
 

@@ -46,11 +46,11 @@ pub trait CompileConstant: Sized {
 }
 
 pub trait WriteConstant {
-    fn write_into(&self, destination: &mut [u8]);
+    fn write_into(&self, context: &Context, destination: &mut [u8]);
 }
 
 impl WriteConstant for bool {
-    fn write_into(&self, destination: &mut [u8]) {
+    fn write_into(&self, context: &Context, destination: &mut [u8]) {
         destination[0] = *self as u8;
     }
 }
@@ -59,7 +59,8 @@ macro_rules! write_constant_primitive_impl {
     ($($ty:ty),*) => {
         $(
             impl WriteConstant for $ty {
-                fn write_into(&self, destination: &mut [u8]) {
+                fn write_into(&self, context: &Context,destination: &mut [u8]) {
+                    let _ = context;
                     *bytemuck::from_bytes_mut(destination) = *self;
                 }
             }
@@ -101,9 +102,9 @@ macro_rules! define_constant_value {
         }
 
         impl WriteConstant for ConstantValue {
-            fn write_into(&self, destination: &mut [u8]) {
+            fn write_into(&self, context: &Context, destination: &mut [u8]) {
                 match self {
-                    $(Self::$variant(value) => value.write_into(destination),)*
+                    $(Self::$variant(value) => value.write_into(context, destination),)*
                 }
             }
         }
@@ -145,9 +146,9 @@ macro_rules! define_constant_scalar {
         }
 
         impl WriteConstant for ConstantScalar {
-            fn write_into(&self, destination: &mut [u8]) {
+            fn write_into(&self, context: &Context, destination: &mut [u8]) {
                 match self {
-                    $(Self::$variant(value) => value.write_into(destination),)*
+                    $(Self::$variant(value) => value.write_into(context, destination),)*
                 }
             }
         }
@@ -324,7 +325,7 @@ impl CompileConstant for ConstantVector {
 }
 
 impl WriteConstant for ConstantVector {
-    fn write_into(&self, destination: &mut [u8]) {
+    fn write_into(&self, context: &Context, destination: &mut [u8]) {
         let mut offset = 0;
 
         let scalar_type = self.data.scalar_type();
@@ -332,7 +333,7 @@ impl WriteConstant for ConstantVector {
 
         for i in 0..u8::from(self.size) {
             self.data
-                .write_into(i, &mut destination[offset..][..byte_width]);
+                .write_into(i, context, &mut destination[offset..][..byte_width]);
             offset += byte_width;
         }
     }
@@ -381,7 +382,7 @@ impl CompileConstant for ConstantMatrix {
 }
 
 impl WriteConstant for ConstantMatrix {
-    fn write_into(&self, destination: &mut [u8]) {
+    fn write_into(&self, context: &Context, destination: &mut [u8]) {
         todo!("write constant matrix")
     }
 }
@@ -426,23 +427,23 @@ impl<const N: usize> ConstantVectorData<N> {
         }
     }
 
-    pub fn write_into(&self, i: impl Into<usize>, destination: &mut [u8]) {
+    pub fn write_into(&self, i: impl Into<usize>, context: &Context, destination: &mut [u8]) {
         let i = i.into();
         match self {
             ConstantVectorData::Bool(array_vec) => {
-                array_vec[i].write_into(destination);
+                array_vec[i].write_into(context, destination);
             }
             ConstantVectorData::U32(array_vec) => {
-                array_vec[i].write_into(destination);
+                array_vec[i].write_into(context, destination);
             }
             ConstantVectorData::I32(array_vec) => {
-                array_vec[i].write_into(destination);
+                array_vec[i].write_into(context, destination);
             }
             ConstantVectorData::F16(array_vec) => {
-                array_vec[i].write_into(destination);
+                array_vec[i].write_into(context, destination);
             }
             ConstantVectorData::F32(array_vec) => {
-                array_vec[i].write_into(destination);
+                array_vec[i].write_into(context, destination);
             }
         }
     }
@@ -514,13 +515,36 @@ impl CompileConstant for ConstantStruct {
     type Output = StructValue;
 
     fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error> {
-        todo!()
+        let members = self
+            .members
+            .iter()
+            .map(|value| value.compile_constant(compiler))
+            .collect::<Result<Vec<Value>, Error>>()?;
+
+        Ok(StructValue {
+            ty: self.ty,
+            members,
+        })
     }
 }
 
 impl WriteConstant for ConstantStruct {
-    fn write_into(&self, destination: &mut [u8]) {
-        todo!()
+    fn write_into(&self, context: &Context, destination: &mut [u8]) {
+        let members = self.ty.members(context.source);
+
+        assert_eq!(self.members.len(), members.len());
+
+        for (member, value) in members.iter().zip(&self.members) {
+            let offset: usize = member
+                .offset
+                .try_into()
+                .expect("struct member offset overflow");
+            let size: usize = context.layouter[member.ty]
+                .size
+                .try_into()
+                .expect("struct member size overflow");
+            value.write_into(context, &mut destination[offset..][..size]);
+        }
     }
 }
 
@@ -555,13 +579,33 @@ impl CompileConstant for ConstantArray {
     type Output = ArrayValue;
 
     fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error> {
-        todo!()
+        let values = self
+            .elements
+            .iter()
+            .map(|value| value.compile_constant(compiler))
+            .collect::<Result<Vec<Value>, Error>>()?;
+
+        Ok(ArrayValue {
+            ty: self.ty,
+            values,
+        })
     }
 }
 
 impl WriteConstant for ConstantArray {
-    fn write_into(&self, destination: &mut [u8]) {
-        todo!()
+    fn write_into(&self, context: &Context, destination: &mut [u8]) {
+        let mut offset = 0;
+        let stride: usize = self.ty.stride.try_into().expect("array stride overflow");
+
+        for value in &self.elements {
+            let size: usize = context.layouter[self.ty.base_type]
+                .size
+                .try_into()
+                .expect("struct member size overflow");
+            value.write_into(context, &mut destination[offset..][..size]);
+
+            offset += stride;
+        }
     }
 }
 

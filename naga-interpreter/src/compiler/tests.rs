@@ -627,3 +627,76 @@ fn kill() {
         }
     }
 }
+
+#[test]
+fn access_global_variable_array_in_bounds_static() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        var<private> foo: array<i32, 4> = array<i32, 4>(4, 5, 6, 7);
+
+        @vertex
+        fn main() -> Output {
+            var out = foo[2];
+            return Output(vec4f(), out);
+        }
+        "#,
+    );
+    assert_eq!(output, 6);
+}
+
+#[test]
+#[ignore = "dynamic indexing not implemented yet"]
+fn access_global_variable_array_in_bounds_dynamic() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        var<private> foo: array<i32, 4> = array<i32, 4>(4, 5, 6, 7);
+
+        @vertex
+        fn main() -> Output {
+            var out = 0;
+            for (var i = 0; i < 4; i += 1) {
+                out += foo[i];
+            }
+            return Output(vec4f(), out);
+        }
+        "#,
+    );
+    assert_eq!(output, 22);
+}
+
+#[test]
+#[ignore = "dynamic indexing not implemented yet"]
+fn access_global_variable_array_out_of_bounds_dynamic() {
+    // todo: get result or panic and check it
+
+    let _output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        var<private> foo: array<i32, 4> = array<i32, 4>(4, 5, 6, 7);
+
+        @vertex
+        fn main() -> Output {
+            var out = 0;
+            // oops, such an easy mistake to make :D
+            for (var i = 0; i <= 4; i += 1) {
+                out += foo[i];
+            }
+            return Output(vec4f(), out);
+        }
+        "#,
+    );
+}

@@ -5,7 +5,7 @@ use crate::compiler::{
     expression::CompileExpression,
     function::FunctionCompiler,
     value::{
-        Pointer,
+        PointerRange,
         PointerValue,
         PointerValueInner,
         Value,
@@ -29,15 +29,26 @@ impl CompileExpression for GlobalVariableExpression {
 
                 PointerValue {
                     ty: global_variable.pointer_type,
-                    inner: PointerValueInner::Pointer(Pointer {
+                    inner: PointerValueInner::StaticPointer(PointerRange {
                         value: base_pointer,
                         memory_flags: MemFlags::new(),
                         offset: offset.try_into().expect("pointer offset overflow"),
+                        len,
                     }),
                 }
             }
             GlobalVariableInner::Resource { binding } => {
-                todo!("get pointer to resource binding");
+                let pointer = compiler.runtime_context.buffer(
+                    compiler.context,
+                    &mut compiler.function_builder,
+                    binding,
+                    global_variable.address_space.access(),
+                );
+
+                PointerValue {
+                    ty: global_variable.pointer_type,
+                    inner: PointerValueInner::DynamicPointer(pointer),
+                }
             }
         };
 

@@ -512,7 +512,7 @@ where
 
                 layouter.push(handle, global_variable, |expression, data| {
                     let value = &self.global_expressions[expression];
-                    value.write_into(data);
+                    value.write_into(&self.context, data);
                 });
             }
         }

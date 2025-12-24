@@ -241,26 +241,23 @@ impl CompileAccess<u32> for PointerValue {
 
         let (base_type, offset) = match base_type {
             Type::Vector(vector_type) => {
-                let index = i32::try_from(*index).expect("pointer index overflow");
-                let offset = i32::from(vector_type.scalar.byte_width()) * index;
+                let offset = u32::from(vector_type.scalar.byte_width()) * *index;
                 let base_type = PointerTypeBase::ScalarPointer(vector_type.scalar);
                 (base_type, offset)
             }
             Type::Matrix(matrix_type) => {
-                let index = i32::try_from(*index).expect("pointer index overflow");
-                let offset = i32::from(matrix_type.column_stride()) * index;
+                let offset = u32::from(matrix_type.column_stride()) * *index;
                 let base_type = PointerTypeBase::VectorPointer(matrix_type.column_vector());
                 (base_type, offset)
             }
             Type::Struct(struct_type) => {
                 let index = usize::try_from(*index).expect("pointer index overflow");
                 let member = &struct_type.members(compiler.context.source)[index];
-                let offset = i32::try_from(member.offset).expect("struct member offset overflow");
                 let base_type = PointerTypeBase::Pointer(member.ty);
-                (base_type, offset)
+                (base_type, member.offset)
             }
             Type::Array(array_type) => {
-                let offset = i32::try_from(array_type.stride).expect("array stride overflow");
+                let offset = array_type.stride * *index;
                 let base_type = PointerTypeBase::Pointer(array_type.base_type);
                 (base_type, offset)
             }
