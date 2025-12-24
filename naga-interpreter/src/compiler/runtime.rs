@@ -34,11 +34,64 @@ use crate::{
     },
 };
 
+/// Runtime API
+///
+/// This is used by the generated code to access shader inputs/outputs,
+/// initialize global variables, etc.
+///
+/// The runtime implementation is responsible for knowing the layouts of the
+/// different buffers, but it'll get passed a slice that is safe to access.
+///
+/// The runtime can return errors or panic. Both will be handled properly and
+/// propagated to the call of the entry point (TODO: propagation itself doesn't
+/// work right now).
 pub trait Runtime: Sized {
+    /// Error type returned by the runtme.
+    ///
+    /// When the runtime returns an error it is stored in [`RuntimeData`] and
+    /// the shader aborts execution. When it returns from the entrypoint the
+    /// call to [`EntryPoint::function`](super::product::EntryPoint::function)
+    /// will return that error.
     type Error;
 
+    /// Copy shader parameters to stack.
+    ///
+    /// The runtime entry point will allocate stack space for all arguments to
+    /// the shader and call this function with it. It can then call the actual
+    /// shader entry point with the arguments.
+    ///
+    /// The [`Runtime`] implementation is responsible for knowing the correct
+    /// layout of the arguments on the stack. (see [`BindingStackLayout`]).
+    ///
+    /// Note that this method is only called once per shader invocation on
+    /// startup. It's fine to drop any references to the input data after this
+    /// is called.
     fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// Copy shader return value from stack.
+    ///
+    /// The runtime entry point will write the return value of the shader to a
+    /// location on its stack and call this function with it.
+    ///
+    /// The [`Runtime`] implementation is responsible for knowing the correct
+    /// layout of the return value on the stack. (see [`BindingStackLayout`]).
     fn copy_outputs_from(&mut self, source: &[u8]) -> Result<(), Self::Error>;
+
+    /// Initialize the global variables.
+    ///
+    /// The runtime entry point will allocate space for its global variables on
+    /// its stack and call this function to populate these with initial values.
+    ///
+    /// The [`Runtime`] implementation is responsible for knowing the correct
+    /// layout of the global variables. (see
+    /// [`GlobalVariableLayout`](super::variable::GlobalVariableLayout)).
+    ///
+    /// # TODO
+    ///
+    /// Global variables usually live in the [private address
+    /// space](naga::AddressSpace::Private), but they might also live in others,
+    /// such as the [work group address space](naga::AddressSpace::WorkGroup).
+    /// Only private global variables are implemented right now.
     fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error>;
 }
 
@@ -61,8 +114,15 @@ where
     }
 }
 
-// note: this must be synchronized with the code generated in
-// RuntimeMethod::call
+/// Result code returned by a runtime API method to the shader.
+///
+/// Implementors of [`Runtime`] can ignore this, because this is returned by the
+/// code calling into the [`Runtime`] implementation.
+///
+/// # Note
+///
+/// This must be synchronized with the code generated in
+/// [`RuntimeMethod::call`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i8)]
 pub enum RuntimeResult {
@@ -70,12 +130,23 @@ pub enum RuntimeResult {
     Ok = 0,
 }
 
+/// Payload propagated to the entry point call site when the shader aborts
+/// execution.
+///
+/// This is stored in [`RuntimeData`] when the [`Runtime`] implementation
+/// returns an [`Err`] or panics.
 #[derive(derive_more::Debug)]
 pub enum AbortPayload<E> {
+    /// Call to a [`Runtime`] method returned an error.
     RuntimeError(E),
+
+    /// Call to a [`Runtime`] method panicked.
     Panic(#[debug(skip)] Box<dyn Any + Send + 'static>),
 }
 
+/// All of the runtime data.
+///
+/// This contains the runtime itself and a place to store an [`AbortPayload`].
 #[derive(Debug)]
 pub struct RuntimeData<R>
 where
@@ -96,6 +167,15 @@ where
         }
     }
 
+    /// Returns the inner runtime if it didn't panic or return an error. If the
+    /// runtime produced an error, it is returned. If the runtime panicked, the
+    /// panic is resumed.
+    ///
+    /// # TODO
+    ///
+    /// Technically it's fine to return the runtime if it returned an error.
+    /// Only a runtime that panicked might be in a inconsistent state. We only
+    /// ever use this method to get the error though.
     pub fn into_inner(self) -> Result<R, R::Error> {
         if let Some(abort_payload) = self.abort_payload {
             match abort_payload {
@@ -122,6 +202,11 @@ where
         self as *mut Self as *mut DynRuntimeData
     }
 
+    /// Calls the provided closure with the runtime and handles errors and
+    /// panics.
+    ///
+    /// This is used by the implementations for the methods in the
+    /// [`RuntimeVtable`].
     pub fn with_runtime(
         &mut self,
         mut f: impl FnMut(&mut R) -> Result<(), R::Error>,
@@ -154,21 +239,35 @@ pub struct DynRuntimeData {
     _marker: PhantomData<(*mut u8, std::marker::PhantomPinned)>,
 }
 
+/// A pointer to this struct is passed through the compiled shader code. This
+/// allows the compiled code to always call the runtime and it provides some
+/// auxilary "global" storage for e.g. private memory.
 #[derive(Debug)]
 #[repr(C)]
 pub struct RuntimeContext {
-    /// Pointer to the underlying runtime context struct.
+    /// Opaque pointer to the underlying [`RuntimeData`].
     pub runtime: *mut DynRuntimeData,
 
-    /// Contains function pointers for the runtime API
+    /// Contains function pointers for the runtime API.
     pub vtable: RuntimeVtable,
 
     /// The compiled shader will store a reference to its stack allocated
-    /// private data here
+    /// private data here.
     pub private_memory: *mut u8,
 }
 
 impl RuntimeContext {
+    /// Creates a [`RuntimeContext`] for the specific [`Runtime`].
+    ///
+    /// This produces the opaque runtime pointer and vtable. It also initializes
+    /// the `private_memory` pointer to `null`.
+    ///
+    /// # Safety
+    ///
+    /// Since this struct contains a pointer to the provided [`RuntimeData`],
+    /// the runtime data must be valid for as long as this might get used. The
+    /// method is safe because a shader can only be called with a runtime after
+    /// agreeing to all the safety contracts.
     pub fn new<R>(data: &mut RuntimeData<R>) -> Self
     where
         R: Runtime,
@@ -185,6 +284,10 @@ impl RuntimeContext {
 ///
 /// These functions can be called from the compiled shader code. The first
 /// argument is always a pointer to runtime context struct.
+///
+/// These functions correspond to methods of the [`Runtime`] trait and they are
+/// light wrappers that produce safe variants for passed-in pointers and handle
+/// errors and panics.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct RuntimeVtable {
@@ -203,7 +306,7 @@ pub struct RuntimeVtable {
     /// layout of the arguments on the stack. (see [`BindingStackLayout`]).
     pub copy_inputs_to: unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> RuntimeResult,
 
-    /// Copy shader return value from stack
+    /// Copy shader return value from stack.
     ///
     /// The runtime entry point will write the return value of the shader to a
     /// location on its stack and call this function with it.
@@ -213,16 +316,30 @@ pub struct RuntimeVtable {
     /// 2. Pointer to the stack space with the return value
     /// 3. Size of the stack space with the return value
     ///
-    /// The [`Runtime`] implementation is responsible for kowing the correct
+    /// The [`Runtime`] implementation is responsible for knowing the correct
     /// layout of the return value on the stack. (see [`BindingStackLayout`]).
     pub copy_outputs_from:
         unsafe extern "C" fn(*mut DynRuntimeData, *const u8, usize) -> RuntimeResult,
 
+    /// Initialize the global variables.
+    ///
+    /// The runtime entry point will allocate space for its global variables on
+    /// its stack and call this function to populate these with initial values.
+    ///
+    /// The [`Runtime`] implementation is responsible for knowing the correct
+    /// layout of the global variables. (see
+    /// [`GlobalVariableLayout`](super::variable::GlobalVariableLayout)).
     pub initialize_global_variables:
         unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> RuntimeResult,
 }
 
 impl RuntimeVtable {
+    /// Creates a [`RuntimeVtable`] for a type implementing [`Runtime`].
+    ///
+    /// This is a safe way to create a vtable for a [`Runtime`] implementation.
+    ///
+    /// Note that the method is `const` and thus a `&'static RuntimeVtable` can
+    /// be obtained.
     pub const fn new<R>() -> Self
     where
         R: Runtime,
@@ -307,6 +424,9 @@ impl RuntimeVtable {
     }
 }
 
+/// Signatures for runtime API methods.
+///
+/// This is used by the code generation.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeMethodSignatures {
     pub copy_inputs_to: ir::SigRef,
@@ -357,6 +477,10 @@ impl RuntimeMethodSignatures {
     }
 }
 
+/// A [`ir::Value`] representing the runtime context pointer.
+///
+/// You can obtain a [`RuntimeMethod`] with the [`runtime_method`] macro and use
+/// that to generate runtime API calls.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeContextValue {
     pub pointer: ir::Value,
@@ -380,6 +504,7 @@ impl RuntimeContextValue {
         }
     }
 
+    /// Generates code to fetch the pointer to private memory.
     pub fn private_memory(
         &self,
         context: &Context,
@@ -397,6 +522,7 @@ impl RuntimeContextValue {
         )
     }
 
+    /// Stores the private memory pointer in the runtime context struct.
     pub fn stash_private_memory_pointer(
         &self,
         function_builder: &mut FunctionBuilder,
@@ -482,8 +608,10 @@ impl<'a> RuntimeMethod<'a> {
 /// Creates a [`RuntimeMethod`] struct which can be used to emit code to call a
 /// runtime API method.
 ///
-/// The first argument is the IR value for the pointer to the [`RuntimeContext`]
-/// struct.
+/// The first argument is the [`RuntimeContextValue`] containing the runtime
+/// context pointer.
+///
+/// The second argument is the API method name (as an identifier)
 macro_rules! runtime_method {
     ($runtime:expr, $func:ident) => {{
         let vtable_offset = memoffset::offset_of!(RuntimeVtable, $func);
@@ -497,6 +625,10 @@ macro_rules! runtime_method {
     }};
 }
 
+/// Helper to build a shim around a shader entry point.
+///
+/// This shim is needed to fetch inputs, initialize global variables and write
+/// back outputs.
 pub struct RuntimeEntryPointBuilder<'source, 'compiler> {
     pub context: &'compiler Context<'source>,
     pub function_builder: FunctionBuilder<'compiler>,

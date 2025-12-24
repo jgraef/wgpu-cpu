@@ -505,6 +505,7 @@ where
                     GlobalVariable {
                         address_space: global_variable.space,
                         pointer_type,
+                        // offset and len will be patched later when we finalize the layout
                         inner: GlobalVariableInner::Memory { offset: 0, len: 0 },
                     },
                 );
@@ -512,7 +513,6 @@ where
                 layouter.push(handle, global_variable, |expression, data| {
                     let value = &self.global_expressions[expression];
                     value.write_into(data);
-                    //todo!("initialize global variable")
                 });
             }
         }
