@@ -204,6 +204,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
     /// Finish compilation of the function
     pub fn finish(self) {
         assert!(self.loop_switch_stack.is_empty());
+
         self.function_builder.finalize();
     }
 
@@ -419,6 +420,10 @@ impl LoopSwitchStack {
 
     pub fn is_empty(&self) -> bool {
         self.stack.is_empty()
+    }
+
+    pub fn is_continuing(&self) -> bool {
+        matches!(self.stack.last(), Some(LoopSwitchState::LoopContinuing))
     }
 }
 

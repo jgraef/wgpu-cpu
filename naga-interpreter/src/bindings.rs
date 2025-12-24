@@ -266,3 +266,20 @@ where
         self.visit(result.binding.as_ref(), result.ty, offset, None, true);
     }
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NullShaderIo;
+
+impl ShaderInput for NullShaderIo {
+    fn write_into(&self, binding: &Binding, ty: &Type, target: &mut [u8]) {
+        let _ = (binding, ty);
+        target.fill(0);
+    }
+}
+
+impl ShaderOutput for NullShaderIo {
+    fn read_from(&mut self, binding: &Binding, ty: &Type, source: &[u8]) {
+        let _ = (binding, ty, source);
+        // nop
+    }
+}

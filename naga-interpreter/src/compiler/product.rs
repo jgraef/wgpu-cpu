@@ -10,8 +10,10 @@ use crate::{
     },
     compiler::{
         runtime::{
+            AbortPayload,
             BindingStackLayout,
             DefaultRuntime,
+            DefaultRuntimeError,
             Runtime,
             RuntimeContext,
             RuntimeData,
@@ -145,7 +147,7 @@ impl<'a> EntryPoint<'a> {
         self.inner.early_depth_test
     }
 
-    pub fn function<R>(&self) -> impl Fn(R) -> Result<(), R::Error>
+    pub fn function<R>(&self) -> impl Fn(R) -> Result<(), EntryPointError<R::Error>>
     where
         R: Runtime,
     {
@@ -170,19 +172,25 @@ impl<'a> EntryPoint<'a> {
                 function(&mut runtime_context as *mut _);
             }
 
-            let _runtime = runtime_context_data.into_inner()?;
-            Ok(())
+            match runtime_context_data.abort_payload {
+                Some(AbortPayload::Panic(payload)) => std::panic::resume_unwind(payload),
+                Some(AbortPayload::RuntimeError(runtime_error)) => {
+                    Err(EntryPointError::RuntimeError(runtime_error))
+                }
+                Some(AbortPayload::Kill) => Err(EntryPointError::Killed),
+                None => Ok(()),
+            }
         }
     }
 
-    pub fn run_with_runtime<R>(&self, runtime: R) -> Result<(), R::Error>
+    pub fn run_with_runtime<R>(&self, runtime: R) -> Result<(), EntryPointError<R::Error>>
     where
         R: Runtime,
     {
         self.function()(runtime)
     }
 
-    pub fn run<I, O>(&self, input: I, output: O)
+    pub fn run<I, O>(&self, input: I, output: O) -> Result<(), EntryPointError<DefaultRuntimeError>>
     where
         I: ShaderInput,
         O: ShaderOutput,
@@ -195,8 +203,16 @@ impl<'a> EntryPoint<'a> {
             &self.private_memory_layout,
         );
 
-        self.run_with_runtime(runtime).expect("runtime error");
+        self.run_with_runtime(runtime)
     }
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub enum EntryPointError<R> {
+    #[error(transparent)]
+    RuntimeError(#[from] R),
+
+    Killed,
 }
 
 #[cfg(test)]

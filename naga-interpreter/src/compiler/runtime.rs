@@ -142,6 +142,9 @@ pub enum AbortPayload<E> {
 
     /// Call to a [`Runtime`] method panicked.
     Panic(#[debug(skip)] Box<dyn Any + Send + 'static>),
+
+    /// The shader executed a [`Kill statement`](naga::Statement::Kill)
+    Kill,
 }
 
 /// All of the runtime data.
@@ -164,29 +167,6 @@ where
         Self {
             runtime,
             abort_payload: None,
-        }
-    }
-
-    /// Returns the inner runtime if it didn't panic or return an error. If the
-    /// runtime produced an error, it is returned. If the runtime panicked, the
-    /// panic is resumed.
-    ///
-    /// # TODO
-    ///
-    /// Technically it's fine to return the runtime if it returned an error.
-    /// Only a runtime that panicked might be in a inconsistent state. We only
-    /// ever use this method to get the error though.
-    pub fn into_inner(self) -> Result<R, R::Error> {
-        if let Some(abort_payload) = self.abort_payload {
-            match abort_payload {
-                AbortPayload::RuntimeError(runtime_error) => Err(runtime_error),
-                AbortPayload::Panic(payload) => {
-                    std::panic::resume_unwind(payload);
-                }
-            }
-        }
-        else {
-            Ok(self.runtime)
         }
     }
 
@@ -331,6 +311,16 @@ pub struct RuntimeVtable {
     /// [`GlobalVariableLayout`](super::variable::GlobalVariableLayout)).
     pub initialize_global_variables:
         unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> RuntimeResult,
+
+    /// Terminates shader execution
+    ///
+    /// This is called by the shader for [`Kill
+    /// statements`](naga::Statement::Kill).
+    ///
+    /// This API method doesn't call into the [`Runtime`] implementation, but
+    /// only sets the abort payload and returns a [`RuntimeResult`] telling the
+    /// shader to abort execution.
+    pub kill: unsafe extern "C" fn(*mut DynRuntimeData) -> RuntimeResult,
 }
 
 impl RuntimeVtable {
@@ -416,10 +406,25 @@ impl RuntimeVtable {
             data.with_runtime(|runtime| runtime.initialize_global_variables(target))
         }
 
+        unsafe extern "C" fn kill<R>(data: *mut DynRuntimeData) -> RuntimeResult
+        where
+            R: Runtime,
+        {
+            let data = unsafe {
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
+            };
+
+            data.abort_payload = Some(AbortPayload::Kill);
+            RuntimeResult::Abort
+        }
+
         RuntimeVtable {
             copy_inputs_to: copy_inputs_to::<R>,
             copy_outputs_from: copy_outputs_from::<R>,
             initialize_global_variables: initialize_global_variables::<R>,
+            kill: kill::<R>,
         }
     }
 }
@@ -432,6 +437,7 @@ pub struct RuntimeMethodSignatures {
     pub copy_inputs_to: ir::SigRef,
     pub copy_outputs_from: ir::SigRef,
     pub initialize_global_variables: ir::SigRef,
+    pub kill: ir::SigRef,
 }
 
 impl RuntimeMethodSignatures {
@@ -469,12 +475,39 @@ impl RuntimeMethodSignatures {
             call_conv: context.target_config.default_call_conv,
         });
 
+        let kill = function_builder.import_signature(ir::Signature {
+            params: vec![data],
+            returns: vec![result],
+            call_conv: context.target_config.default_call_conv,
+        });
+
         Self {
             copy_inputs_to,
             copy_outputs_from,
             initialize_global_variables,
+            kill,
         }
     }
+}
+
+/// Creates a [`RuntimeMethod`] struct which can be used to emit code to call a
+/// runtime API method.
+///
+/// The first argument is the [`RuntimeContextValue`] containing the runtime
+/// context pointer.
+///
+/// The second argument is the API method name (as an identifier)
+macro_rules! runtime_method {
+    ($runtime:expr, $func:ident) => {{
+        let vtable_offset = memoffset::offset_of!(RuntimeVtable, $func);
+        let vtable_offset = i32::try_from(vtable_offset).expect("runtime vtable offset overflow");
+        let signature = $runtime.signatures.$func;
+        RuntimeMethod {
+            runtime_value: &$runtime,
+            vtable_offset,
+            signature,
+        }
+    }};
 }
 
 /// A [`ir::Value`] representing the runtime context pointer.
@@ -535,6 +568,12 @@ impl RuntimeContextValue {
         function_builder
             .ins()
             .store(self.memory_flags, pointer, self.pointer, offset);
+    }
+
+    /// Generates a call to the kill runtime API method which kills shader
+    /// execution.
+    pub fn kill(&self, context: &Context, function_builder: &mut FunctionBuilder) {
+        runtime_method!(self, kill).call(context, function_builder, []);
     }
 }
 
@@ -603,26 +642,6 @@ impl<'a> RuntimeMethod<'a> {
             .ins()
             .trapnz(abort_flag, RUNTIME_ERROR_TRAP_CODE);
     }
-}
-
-/// Creates a [`RuntimeMethod`] struct which can be used to emit code to call a
-/// runtime API method.
-///
-/// The first argument is the [`RuntimeContextValue`] containing the runtime
-/// context pointer.
-///
-/// The second argument is the API method name (as an identifier)
-macro_rules! runtime_method {
-    ($runtime:expr, $func:ident) => {{
-        let vtable_offset = memoffset::offset_of!(RuntimeVtable, $func);
-        let vtable_offset = i32::try_from(vtable_offset).expect("runtime vtable offset overflow");
-        let signature = $runtime.signatures.$func;
-        RuntimeMethod {
-            runtime_value: &$runtime,
-            vtable_offset,
-            signature,
-        }
-    }};
 }
 
 /// Helper to build a shim around a shader entry point.

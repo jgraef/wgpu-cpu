@@ -146,7 +146,10 @@ impl crate::backend::Module for CompiledModule {
         I: ShaderInput,
         O: ShaderOutput,
     {
-        self.entry_point(index).run(input, output);
+        // todo: propagate error
+        self.entry_point(index)
+            .run(input, output)
+            .expect("runtime error");
     }
 
     fn inter_stage_layout(&self, entry_point: EntryPointIndex) -> Option<&InterStageLayout> {

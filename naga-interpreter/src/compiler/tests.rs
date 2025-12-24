@@ -5,6 +5,7 @@ use naga::BuiltIn;
 
 use crate::{
     bindings::{
+        NullShaderIo,
         ShaderInput,
         ShaderOutput,
     },
@@ -15,6 +16,7 @@ use crate::{
         compile_clif_to_string,
         compile_jit,
         compiler::Config,
+        product::EntryPointError,
         runtime::Runtime,
     },
     entry_point::EntryPointIndex,
@@ -85,7 +87,9 @@ fn vertex_triangle() {
     let mut output = VertexOutput::default();
 
     for i in 0..3 {
-        entry_point.run(VertexInput { vertex_index: i }, &mut output);
+        entry_point
+            .run(VertexInput { vertex_index: i }, &mut output)
+            .unwrap();
     }
 
     assert_abs_diff_eq!(
@@ -590,4 +594,36 @@ fn trap_runtime_panic() {
     let module = compile_jit(&module, &info).unwrap();
     let entry_point = module.entry_point(EntryPointIndex::from(0));
     entry_point.run_with_runtime(PanicInTheRuntime).unwrap();
+}
+
+#[test]
+#[ignore = "traps"]
+fn kill() {
+    // note: wgsl discard statements translate to kill statements in naga IR. those
+    // are only valid in fragment shaders though.
+
+    let source = r#"
+        @fragment
+        fn main(@builtin(position) position: vec4f) -> @location(0) vec4f {
+            discard;
+        }
+        "#;
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+
+    let module = compile_jit(&module, &info).unwrap();
+    let entry_point = module.entry_point(EntryPointIndex::from(0));
+    let result = entry_point.run(NullShaderIo, NullShaderIo);
+
+    match result {
+        Ok(()) => panic!("Expected shader invocation to be killed"),
+        Err(EntryPointError::RuntimeError(runtime_error)) => {
+            panic!("Unexpected runtime error: {runtime_error:?}")
+        }
+        Err(EntryPointError::Killed) => {
+            // expected result
+        }
+    }
 }
