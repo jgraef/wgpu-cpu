@@ -10,7 +10,10 @@ use half::f16;
 use crate::compiler::{
     Error,
     compiler::Context,
-    expression::EvaluateCompose,
+    expression::{
+        CompileCompose,
+        EvaluateCompose,
+    },
     function::FunctionCompiler,
     types::{
         ArrayType,
@@ -266,7 +269,57 @@ impl CompileConstant for ConstantVector {
     type Output = VectorValue;
 
     fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error> {
-        todo!()
+        // i noticed that this is a naive/silly solution. we can use vconst to compile
+        // the constant. but it's written now and i'm too lazy to implement it
+        // with vconst right now.
+        //
+        // an alternative is to just use `WriteConstant` to collect anything that is not
+        // a scalar literal into a buffer and just emit loads from that buffer. this
+        // might be the right choice for structs and arrays anyway.
+
+        let values = match &self.data {
+            ConstantVectorData::Bool(array_vec) => {
+                array_vec
+                    .iter()
+                    .copied()
+                    .map(|scalar| ConstantScalar::Bool(scalar).compile_constant(compiler))
+                    .collect::<Result<Vec<_>, Error>>()?
+            }
+            ConstantVectorData::U32(array_vec) => {
+                array_vec
+                    .iter()
+                    .copied()
+                    .map(|scalar| ConstantScalar::U32(scalar).compile_constant(compiler))
+                    .collect::<Result<Vec<_>, Error>>()?
+            }
+            ConstantVectorData::I32(array_vec) => {
+                array_vec
+                    .iter()
+                    .copied()
+                    .map(|scalar| ConstantScalar::I32(scalar).compile_constant(compiler))
+                    .collect::<Result<Vec<_>, Error>>()?
+            }
+            ConstantVectorData::F16(array_vec) => {
+                array_vec
+                    .iter()
+                    .copied()
+                    .map(|scalar| ConstantScalar::F16(scalar).compile_constant(compiler))
+                    .collect::<Result<Vec<_>, Error>>()?
+            }
+            ConstantVectorData::F32(array_vec) => {
+                array_vec
+                    .iter()
+                    .copied()
+                    .map(|scalar| ConstantScalar::F32(scalar).compile_constant(compiler))
+                    .collect::<Result<Vec<_>, Error>>()?
+            }
+        };
+
+        let vector_type = VectorType {
+            size: self.size,
+            scalar: self.data.scalar_type(),
+        };
+        VectorValue::compile_compose(compiler, vector_type, values)
     }
 }
 

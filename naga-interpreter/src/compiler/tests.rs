@@ -197,7 +197,6 @@ fn scalar_constant() {
 }
 
 #[test]
-#[ignore = "wip"]
 fn vector_constant() {
     let output = helper().exec::<[i32; 4]>(
         r#"
