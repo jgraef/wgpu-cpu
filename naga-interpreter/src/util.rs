@@ -26,7 +26,14 @@ pub struct CoArena<K, V> {
 }
 
 impl<K, V> CoArena<K, V> {
-    fn try_from_arena_iter<'a, E>(
+    pub(crate) fn new(items: Vec<V>) -> Self {
+        Self {
+            items,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub(crate) fn try_from_arena_iter<'a, E>(
         arena: impl Iterator<Item = (Handle<K>, &'a K)>,
         mut map: impl FnMut(Handle<K>, &'a K) -> Result<V, E>,
     ) -> Result<Self, E>
@@ -127,15 +134,17 @@ impl<K, V> SparseCoArena<K, V> {
     }
 
     pub fn from_arena(arena: &Arena<K>, mut map: impl FnMut(Handle<K>, &K) -> Option<V>) -> Self {
+        let items = arena
+            .iter()
+            .enumerate()
+            .map(|(i, (handle, value))| {
+                assert_eq!(i, handle.index());
+                map(handle, value)
+            })
+            .collect();
+
         Self {
-            items: arena
-                .iter()
-                .enumerate()
-                .map(|(i, (handle, value))| {
-                    assert_eq!(i, handle.index());
-                    map(handle, value)
-                })
-                .collect(),
+            items,
             _phantom: PhantomData,
         }
     }
@@ -160,6 +169,14 @@ impl<K, V> SparseCoArena<K, V> {
         if let Some((_, handle)) = range.first_and_last() {
             self.items.reserve_for_index(handle.index());
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
     }
 }
 

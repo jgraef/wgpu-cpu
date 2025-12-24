@@ -1,12 +1,16 @@
+use cranelift_codegen::ir::MemFlags;
+
 use crate::compiler::{
     Error,
     expression::CompileExpression,
     function::FunctionCompiler,
     value::{
+        Pointer,
         PointerValue,
+        PointerValueInner,
         Value,
     },
-    variable::GlobalVariable,
+    variable::GlobalVariableInner,
 };
 #[derive(Clone, Copy, Debug)]
 pub struct GlobalVariableExpression {
@@ -15,24 +19,29 @@ pub struct GlobalVariableExpression {
 
 impl CompileExpression for GlobalVariableExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        let global_variable = compiler.context.global_variables[self.handle];
+        let global_variable = compiler.global_variables[self.handle];
 
-        match global_variable {
-            GlobalVariable::Memory {
-                address_space,
-                offset,
-            } => {
-                todo!("get pointer to global memory");
+        let value = match global_variable.inner {
+            GlobalVariableInner::Memory { offset, len } => {
+                let base_pointer = compiler
+                    .runtime_context
+                    .private_memory(compiler.context, &mut compiler.function_builder);
+
+                PointerValue {
+                    ty: global_variable.pointer_type,
+                    inner: PointerValueInner::Pointer(Pointer {
+                        value: base_pointer,
+                        memory_flags: MemFlags::new(),
+                        offset: offset.try_into().expect("pointer offset overflow"),
+                    }),
+                }
             }
-            GlobalVariable::Resource {
-                address_space,
-                binding,
-            } => {
+            GlobalVariableInner::Resource { binding } => {
                 todo!("get pointer to resource binding");
             }
-        }
+        };
 
-        //todo!();
+        Ok(value.into())
     }
 }
 

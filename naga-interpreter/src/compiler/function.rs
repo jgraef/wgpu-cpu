@@ -30,6 +30,7 @@ use crate::{
             Store,
             Value,
         },
+        variable::GlobalVariable,
     },
     util::{
         CoArena,
@@ -75,6 +76,7 @@ pub struct FunctionCompiler<'source, 'compiler> {
     pub declaration: &'compiler FunctionDeclaration,
     pub entry_block: ir::Block,
     pub local_variables: CoArena<naga::LocalVariable, LocalVariable<'source>>,
+    pub global_variables: &'compiler SparseCoArena<naga::GlobalVariable, GlobalVariable>,
     //pub simd_immediates: SimdImmediates,
     pub imported_functions: SparseCoArena<naga::Function, ImportedFunction<'compiler>>,
     #[debug(skip)]
@@ -92,6 +94,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         fb_context: &'compiler mut cranelift_frontend::FunctionBuilderContext,
         function: &'source naga::Function,
         declaration: &'compiler FunctionDeclaration,
+        global_variables: &'compiler SparseCoArena<naga::GlobalVariable, GlobalVariable>,
     ) -> Result<Self, Error> {
         cl_context.clear();
 
@@ -146,6 +149,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             declaration,
             entry_block,
             local_variables,
+            global_variables,
             //simd_immediates,
             imported_functions: Default::default(),
             function_builder,
@@ -305,12 +309,19 @@ pub fn compile_function<'source, 'compiler, Output>(
     output: &'compiler mut Output,
     function: &'source naga::Function,
     declaration: &FunctionDeclaration,
+    global_variables: &'compiler SparseCoArena<naga::GlobalVariable, GlobalVariable>,
 ) -> Result<(), Error>
 where
     Output: Module,
 {
-    let mut function_compiler =
-        FunctionCompiler::new(context, cl_context, fb_context, function, declaration)?;
+    let mut function_compiler = FunctionCompiler::new(
+        context,
+        cl_context,
+        fb_context,
+        function,
+        declaration,
+        global_variables,
+    )?;
 
     function_compiler.initialize_local_variables()?;
     function_compiler.import_functions(function_declarations, output)?;

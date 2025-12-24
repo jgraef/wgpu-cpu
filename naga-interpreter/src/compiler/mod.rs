@@ -101,6 +101,7 @@ pub fn compile_jit(
     let mut compiler = Compiler::new(module, info, &mut jit_module, config)?;
     compiler.declare_all_functions()?;
     compiler.compile_all_functions()?;
+    let private_memory_layout = compiler.layout_private_memory();
     let entry_points = compiler.compile_all_entry_points()?;
 
     jit_module.finalize_definitions()?;
@@ -109,7 +110,7 @@ pub fn compile_jit(
         // SAFETY: The whole compilation process was done without any outside
         // intervention. Therefore the compiled entry point functions follow our rules:
         // They take 2 pointer arguments, return nothing, and are safe to run.
-        CompiledModule::new(jit_module, entry_points)
+        CompiledModule::new(jit_module, entry_points, private_memory_layout)
     };
 
     Ok(compiled_module)

@@ -8,12 +8,15 @@ use crate::{
         ShaderInput,
         ShaderOutput,
     },
-    compiler::runtime::{
-        BindingStackLayout,
-        DefaultRuntime,
-        Runtime,
-        RuntimeContext,
-        RuntimeData,
+    compiler::{
+        runtime::{
+            BindingStackLayout,
+            DefaultRuntime,
+            Runtime,
+            RuntimeContext,
+            RuntimeData,
+        },
+        variable::PrivateMemoryLayout,
     },
     entry_point::{
         EntryPointIndex,
@@ -36,11 +39,13 @@ impl CompiledModule {
     pub unsafe fn new(
         jit_module: JITModule,
         entry_points: EntryPoints<CompiledEntryPoint>,
+        private_memory_layout: PrivateMemoryLayout,
     ) -> Self {
         Self {
             inner: Arc::new(CompiledModuleInner {
                 jit_module: Some(jit_module),
                 entry_points,
+                private_memory_layout,
             }),
         }
     }
@@ -66,6 +71,7 @@ impl CompiledModule {
         EntryPoint {
             inner,
             function_pointer,
+            private_memory_layout: &self.inner.private_memory_layout,
         }
     }
 }
@@ -77,6 +83,8 @@ struct CompiledModuleInner {
     jit_module: Option<JITModule>,
 
     entry_points: EntryPoints<CompiledEntryPoint>,
+
+    private_memory_layout: PrivateMemoryLayout,
 }
 
 impl Drop for CompiledModuleInner {
@@ -113,6 +121,7 @@ pub struct CompiledEntryPoint {
 pub struct EntryPoint<'a> {
     inner: &'a crate::entry_point::EntryPoint<CompiledEntryPoint>,
     function_pointer: *const u8,
+    private_memory_layout: &'a PrivateMemoryLayout,
 }
 
 impl<'a> EntryPoint<'a> {
@@ -178,12 +187,13 @@ impl<'a> EntryPoint<'a> {
         I: ShaderInput,
         O: ShaderOutput,
     {
-        let runtime = DefaultRuntime {
+        let runtime = DefaultRuntime::new(
             input,
-            input_layout: &self.inner.data.input_layout,
+            &self.inner.data.input_layout,
             output,
-            output_layout: &self.inner.data.output_layout,
-        };
+            &self.inner.data.output_layout,
+            &self.private_memory_layout,
+        );
 
         self.run_with_runtime(runtime).expect("runtime error");
     }

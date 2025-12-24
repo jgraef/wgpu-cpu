@@ -9,6 +9,8 @@ use half::f16;
 
 use crate::compiler::{
     Error,
+    compiler::Context,
+    expression::EvaluateCompose,
     function::FunctionCompiler,
     types::{
         ArrayType,
@@ -23,12 +25,46 @@ use crate::compiler::{
     },
     util::ieee16_from_f16,
     value::{
+        ArrayValue,
+        MatrixValue,
         ScalarValue,
+        StructValue,
         TypeOf,
         UnexpectedType,
         Value,
+        VectorValue,
     },
 };
+
+pub trait CompileConstant: Sized {
+    type Output;
+
+    fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error>;
+}
+
+pub trait WriteConstant {
+    fn write_into(&self, destination: &mut [u8]);
+}
+
+impl WriteConstant for bool {
+    fn write_into(&self, destination: &mut [u8]) {
+        destination[0] = *self as u8;
+    }
+}
+
+macro_rules! write_constant_primitive_impl {
+    ($($ty:ty),*) => {
+        $(
+            impl WriteConstant for $ty {
+                fn write_into(&self, destination: &mut [u8]) {
+                    *bytemuck::from_bytes_mut(destination) = *self;
+                }
+            }
+        )*
+    };
+}
+
+write_constant_primitive_impl!(u32, i32, f16, f32);
 
 macro_rules! define_constant_value {
     ($($variant:ident($ty:ty),)*) => {
@@ -55,13 +91,17 @@ macro_rules! define_constant_value {
                 compiler: &mut FunctionCompiler,
             ) -> Result<Value, Error> {
                 let value = match self {
-                    ConstantValue::Scalar(value) => value.compile_constant(compiler)?.into(),
-                    ConstantValue::Vector(value) => todo!(), //value.compile_constant(compiler)?.into(),
-                    ConstantValue::Matrix(value) => todo!(), //value.compile_constant(compiler)?.into(),
-                    ConstantValue::Struct(value) => todo!(), //value.compile_constant(compiler)?.into(),
-                    ConstantValue::Array(value) => todo!(), //value.compile_constant(compiler)?.into(),
+                    $(Self::$variant(value) => value.compile_constant(compiler)?.into(),)*
                 };
                 Ok(value)
+            }
+        }
+
+        impl WriteConstant for ConstantValue {
+            fn write_into(&self, destination: &mut [u8]) {
+                match self {
+                    $(Self::$variant(value) => value.write_into(destination),)*
+                }
             }
         }
 
@@ -94,14 +134,44 @@ define_constant_value!(
     Array(ConstantArray),
 );
 
-#[derive(Clone, Copy, Debug)]
-pub enum ConstantScalar {
+macro_rules! define_constant_scalar {
+    ($($variant:ident($ty:ty),)*) => {
+        #[derive(Clone, Copy, Debug)]
+        pub enum ConstantScalar {
+            $($variant($ty),)*
+        }
+
+        impl WriteConstant for ConstantScalar {
+            fn write_into(&self, destination: &mut [u8]) {
+                match self {
+                    $(Self::$variant(value) => value.write_into(destination),)*
+                }
+            }
+        }
+
+        $(
+            impl TryFrom<ConstantScalar> for $ty {
+                type Error = ConstantScalar;
+
+                fn try_from(value: ConstantScalar) -> Result<$ty, Self::Error> {
+                    match value {
+                        ConstantScalar::$variant(value) => Ok(value),
+                        _ => Err(value)
+                    }
+                }
+            }
+        )*
+    };
+}
+
+#[rustfmt::skip]
+define_constant_scalar!(
     Bool(bool),
     U32(u32),
     I32(i32),
     F16(f16),
     F32(f32),
-}
+);
 
 impl TypeOf for ConstantScalar {
     type Type = ScalarType;
@@ -192,6 +262,44 @@ impl TypeOf for ConstantVector {
     }
 }
 
+impl CompileConstant for ConstantVector {
+    type Output = VectorValue;
+
+    fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error> {
+        todo!()
+    }
+}
+
+impl WriteConstant for ConstantVector {
+    fn write_into(&self, destination: &mut [u8]) {
+        let mut offset = 0;
+
+        let scalar_type = self.data.scalar_type();
+        let byte_width: usize = scalar_type.byte_width().into();
+
+        for i in 0..u8::from(self.size) {
+            self.data
+                .write_into(i, &mut destination[offset..][..byte_width]);
+            offset += byte_width;
+        }
+    }
+}
+
+impl EvaluateCompose<ConstantScalar> for ConstantVector {
+    fn evaluate_compose(
+        context: &Context,
+        ty: VectorType,
+        components: Vec<ConstantScalar>,
+    ) -> Result<Self, Error> {
+        assert_eq!(components.len(), usize::from(u8::from(ty.size)));
+
+        Ok(Self {
+            size: ty.size,
+            data: ConstantVectorData::from_scalars(ty.scalar, components),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConstantMatrix {
     pub columns: naga::VectorSize,
@@ -208,6 +316,40 @@ impl TypeOf for ConstantMatrix {
             rows: self.rows,
             scalar: self.data.scalar_type(),
         }
+    }
+}
+
+impl CompileConstant for ConstantMatrix {
+    type Output = MatrixValue;
+
+    fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error> {
+        todo!("compile constant matrix")
+    }
+}
+
+impl WriteConstant for ConstantMatrix {
+    fn write_into(&self, destination: &mut [u8]) {
+        todo!("write constant matrix")
+    }
+}
+
+impl EvaluateCompose<ConstantScalar> for ConstantMatrix {
+    fn evaluate_compose(
+        context: &Context,
+        ty: MatrixType,
+        components: Vec<ConstantScalar>,
+    ) -> Result<Self, Error> {
+        todo!("compose constant matrix from scalars");
+    }
+}
+
+impl EvaluateCompose<ConstantVector> for ConstantMatrix {
+    fn evaluate_compose(
+        context: &Context,
+        ty: MatrixType,
+        components: Vec<ConstantVector>,
+    ) -> Result<Self, Error> {
+        todo!("compose constant matrix from vectors");
     }
 }
 
@@ -231,9 +373,74 @@ impl<const N: usize> ConstantVectorData<N> {
         }
     }
 
-    /*pub fn as_scalars(&self) -> impl Iterator<Item = ScalarValue> {
-        todo!();
-    }*/
+    pub fn write_into(&self, i: impl Into<usize>, destination: &mut [u8]) {
+        let i = i.into();
+        match self {
+            ConstantVectorData::Bool(array_vec) => {
+                array_vec[i].write_into(destination);
+            }
+            ConstantVectorData::U32(array_vec) => {
+                array_vec[i].write_into(destination);
+            }
+            ConstantVectorData::I32(array_vec) => {
+                array_vec[i].write_into(destination);
+            }
+            ConstantVectorData::F16(array_vec) => {
+                array_vec[i].write_into(destination);
+            }
+            ConstantVectorData::F32(array_vec) => {
+                array_vec[i].write_into(destination);
+            }
+        }
+    }
+
+    pub fn from_scalars(
+        ty: ScalarType,
+        components: impl IntoIterator<Item = ConstantScalar>,
+    ) -> Self {
+        match ty {
+            ScalarType::Bool => {
+                Self::Bool(
+                    components
+                        .into_iter()
+                        .map(|component| component.try_into().unwrap())
+                        .collect(),
+                )
+            }
+            ScalarType::Int(Signedness::Unsigned, IntWidth::I32) => {
+                Self::U32(
+                    components
+                        .into_iter()
+                        .map(|component| component.try_into().unwrap())
+                        .collect(),
+                )
+            }
+            ScalarType::Int(Signedness::Signed, IntWidth::I32) => {
+                Self::I32(
+                    components
+                        .into_iter()
+                        .map(|component| component.try_into().unwrap())
+                        .collect(),
+                )
+            }
+            ScalarType::Float(FloatWidth::F16) => {
+                Self::F16(
+                    components
+                        .into_iter()
+                        .map(|component| component.try_into().unwrap())
+                        .collect(),
+                )
+            }
+            ScalarType::Float(FloatWidth::F32) => {
+                Self::F32(
+                    components
+                        .into_iter()
+                        .map(|component| component.try_into().unwrap())
+                        .collect(),
+                )
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -247,6 +454,33 @@ impl TypeOf for ConstantStruct {
 
     fn type_of(&self) -> Self::Type {
         self.ty
+    }
+}
+
+impl CompileConstant for ConstantStruct {
+    type Output = StructValue;
+
+    fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error> {
+        todo!()
+    }
+}
+
+impl WriteConstant for ConstantStruct {
+    fn write_into(&self, destination: &mut [u8]) {
+        todo!()
+    }
+}
+
+impl EvaluateCompose<ConstantValue> for ConstantStruct {
+    fn evaluate_compose(
+        context: &Context,
+        ty: StructType,
+        components: Vec<ConstantValue>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            ty,
+            members: components,
+        })
     }
 }
 
@@ -264,8 +498,29 @@ impl TypeOf for ConstantArray {
     }
 }
 
-pub trait CompileConstant: Sized {
-    type Output;
+impl CompileConstant for ConstantArray {
+    type Output = ArrayValue;
 
-    fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error>;
+    fn compile_constant(&self, compiler: &mut FunctionCompiler) -> Result<Self::Output, Error> {
+        todo!()
+    }
+}
+
+impl WriteConstant for ConstantArray {
+    fn write_into(&self, destination: &mut [u8]) {
+        todo!()
+    }
+}
+
+impl EvaluateCompose<ConstantValue> for ConstantArray {
+    fn evaluate_compose(
+        context: &Context,
+        ty: ArrayType,
+        components: Vec<ConstantValue>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            ty,
+            elements: components,
+        })
+    }
 }

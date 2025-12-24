@@ -30,6 +30,7 @@ use crate::{
             Store,
             Value,
         },
+        variable::PrivateMemoryLayout,
     },
 };
 
@@ -164,7 +165,7 @@ pub struct RuntimeContext {
 
     /// The compiled shader will store a reference to its stack allocated
     /// private data here
-    pub private_data: *mut u8,
+    pub private_memory: *mut u8,
 }
 
 impl RuntimeContext {
@@ -175,7 +176,7 @@ impl RuntimeContext {
         Self {
             runtime: data.as_pointer_mut(),
             vtable: RuntimeVtable::new::<R>(),
-            private_data: std::ptr::null_mut(),
+            private_memory: std::ptr::null_mut(),
         }
     }
 }
@@ -216,6 +217,9 @@ pub struct RuntimeVtable {
     /// layout of the return value on the stack. (see [`BindingStackLayout`]).
     pub copy_outputs_from:
         unsafe extern "C" fn(*mut DynRuntimeData, *const u8, usize) -> RuntimeResult,
+
+    pub initialize_global_variables:
+        unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> RuntimeResult,
 }
 
 impl RuntimeVtable {
@@ -271,9 +275,34 @@ impl RuntimeVtable {
             data.with_runtime(|runtime| runtime.copy_outputs_from(source))
         }
 
+        unsafe extern "C" fn initialize_global_variables<R>(
+            data: *mut DynRuntimeData,
+            target: *mut u8,
+            len: usize,
+        ) -> RuntimeResult
+        where
+            R: Runtime,
+        {
+            let data = unsafe {
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
+            };
+
+            let target = std::ptr::slice_from_raw_parts_mut(target, len);
+            let target = unsafe {
+                // SAFETY: The `target` pointer with `len` length must correspond to a valid
+                // `&mut [u8]` produced by the compiled code
+                &mut *target
+            };
+
+            data.with_runtime(|runtime| runtime.initialize_global_variables(target))
+        }
+
         RuntimeVtable {
             copy_inputs_to: copy_inputs_to::<R>,
             copy_outputs_from: copy_outputs_from::<R>,
+            initialize_global_variables: initialize_global_variables::<R>,
         }
     }
 }
@@ -282,11 +311,13 @@ impl RuntimeVtable {
 pub struct RuntimeMethodSignatures {
     pub copy_inputs_to: ir::SigRef,
     pub copy_outputs_from: ir::SigRef,
+    pub initialize_global_variables: ir::SigRef,
 }
 
 impl RuntimeMethodSignatures {
     pub fn new(function_builder: &mut FunctionBuilder, context: &Context) -> Self {
         let data = ir::AbiParam::new(context.pointer_type());
+        let result = ir::AbiParam::new(ir::types::I8);
 
         let copy_inputs_to = function_builder.import_signature(ir::Signature {
             params: vec![
@@ -294,7 +325,7 @@ impl RuntimeMethodSignatures {
                 ir::AbiParam::new(context.pointer_type()),
                 ir::AbiParam::new(context.pointer_type()),
             ],
-            returns: vec![ir::AbiParam::new(ir::types::I32)],
+            returns: vec![result],
             call_conv: context.target_config.default_call_conv,
         });
 
@@ -304,13 +335,24 @@ impl RuntimeMethodSignatures {
                 ir::AbiParam::new(context.pointer_type()),
                 ir::AbiParam::new(context.pointer_type()),
             ],
-            returns: vec![ir::AbiParam::new(ir::types::I32)],
+            returns: vec![result],
+            call_conv: context.target_config.default_call_conv,
+        });
+
+        let initialize_global_variables = function_builder.import_signature(ir::Signature {
+            params: vec![
+                data,
+                ir::AbiParam::new(context.pointer_type()),
+                ir::AbiParam::new(context.pointer_type()),
+            ],
+            returns: vec![result],
             call_conv: context.target_config.default_call_conv,
         });
 
         Self {
             copy_inputs_to,
             copy_outputs_from,
+            initialize_global_variables,
         }
     }
 }
@@ -319,6 +361,7 @@ impl RuntimeMethodSignatures {
 pub struct RuntimeContextValue {
     pub pointer: ir::Value,
     pub signatures: RuntimeMethodSignatures,
+    pub memory_flags: ir::MemFlags,
 }
 
 impl RuntimeContextValue {
@@ -327,10 +370,45 @@ impl RuntimeContextValue {
         function_builder: &mut FunctionBuilder,
         runtime_pointer: ir::Value,
     ) -> Self {
+        // todo: these can probably be relaxed
+        let memory_flags = ir::MemFlags::new();
+
         Self {
             pointer: runtime_pointer,
             signatures: RuntimeMethodSignatures::new(function_builder, context),
+            memory_flags,
         }
+    }
+
+    pub fn private_memory(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+    ) -> ir::Value {
+        let offset: i32 = memoffset::offset_of!(RuntimeContext, private_memory)
+            .try_into()
+            .expect("pointer offset overflow");
+
+        function_builder.ins().load(
+            context.pointer_type(),
+            self.memory_flags,
+            self.pointer,
+            offset,
+        )
+    }
+
+    pub fn stash_private_memory_pointer(
+        &self,
+        function_builder: &mut FunctionBuilder,
+        pointer: ir::Value,
+    ) {
+        let offset: i32 = memoffset::offset_of!(RuntimeContext, private_memory)
+            .try_into()
+            .expect("pointer offset overflow");
+
+        function_builder
+            .ins()
+            .store(self.memory_flags, pointer, self.pointer, offset);
     }
 }
 
@@ -365,19 +443,16 @@ impl<'a> RuntimeMethod<'a> {
             .try_into()
             .expect("pointer offset overflow");
 
-        // todo: these can probably be relaxed
-        let memory_flags = ir::MemFlags::new();
-
         let data_pointer = function_builder.ins().load(
             context.pointer_type(),
-            memory_flags,
+            self.runtime_value.memory_flags,
             self.runtime_value.pointer,
             data_pointer_offset,
         );
 
         let function_pointer = function_builder.ins().load(
             context.pointer_type(),
-            memory_flags,
+            self.runtime_value.memory_flags,
             self.runtime_value.pointer,
             self.vtable_offset + vtable_offset,
         );
@@ -576,8 +651,36 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
         Ok(collect_binding_stack_layouts.layouts)
     }
 
-    pub fn compile_private_data_initialization(&mut self) -> Result<(), Error> {
-        todo!();
+    pub fn compile_private_data_initialization(
+        &mut self,
+        private_memory_stack_slot_data: ir::StackSlotData,
+    ) -> Result<(), Error> {
+        let size = private_memory_stack_slot_data.size;
+
+        let stack_slot = self
+            .function_builder
+            .create_sized_stack_slot(private_memory_stack_slot_data);
+
+        let stack_slot_pointer =
+            self.function_builder
+                .ins()
+                .stack_addr(self.context.pointer_type(), stack_slot, 0);
+
+        let size = self
+            .function_builder
+            .ins()
+            .iconst(self.context.pointer_type(), i64::from(size));
+
+        runtime_method!(self.runtime, initialize_global_variables).call(
+            self.context,
+            &mut self.function_builder,
+            [stack_slot_pointer, size],
+        );
+
+        self.runtime
+            .stash_private_memory_pointer(&mut self.function_builder, stack_slot_pointer);
+
+        Ok(())
     }
 }
 
@@ -590,8 +693,29 @@ pub enum DefaultRuntimeError {
 pub struct DefaultRuntime<'layout, I, O> {
     pub input: I,
     pub input_layout: &'layout [BindingStackLayout],
+
     pub output: O,
     pub output_layout: &'layout [BindingStackLayout],
+
+    pub private_memory_layout: &'layout PrivateMemoryLayout,
+}
+
+impl<'layout, I, O> DefaultRuntime<'layout, I, O> {
+    pub fn new(
+        input: I,
+        input_layout: &'layout [BindingStackLayout],
+        output: O,
+        output_layout: &'layout [BindingStackLayout],
+        private_memory_layout: &'layout PrivateMemoryLayout,
+    ) -> Self {
+        Self {
+            input,
+            input_layout,
+            output,
+            output_layout,
+            private_memory_layout,
+        }
+    }
 }
 
 impl<'layout, I, O> Runtime for DefaultRuntime<'layout, I, O>
@@ -626,7 +750,12 @@ where
     }
 
     fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error> {
-        todo!("initialize global variables: {private_data:p}");
+        tracing::debug!("initialize global variables: {private_data:p}");
+
+        let initialized = &self.private_memory_layout.initialized;
+        private_data[..initialized.len()].copy_from_slice(initialized);
+        private_data[initialized.len()..].fill(0);
+        Ok(())
     }
 }
 

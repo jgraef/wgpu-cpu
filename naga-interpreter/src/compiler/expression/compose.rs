@@ -3,7 +3,14 @@ use cranelift_codegen::ir::InstBuilder;
 use crate::compiler::{
     Error,
     compiler::Context,
-    constant::ConstantValue,
+    constant::{
+        ConstantArray,
+        ConstantMatrix,
+        ConstantScalar,
+        ConstantStruct,
+        ConstantValue,
+        ConstantVector,
+    },
     expression::{
         CompileExpression,
         EvaluateExpression,
@@ -251,8 +258,6 @@ impl CompileCompose<Value> for Value {
 }
 
 pub trait EvaluateCompose<Inner>: Sized + TypeOf {
-    type Output;
-
     fn evaluate_compose(
         context: &Context,
         ty: Self::Type,
@@ -261,31 +266,75 @@ pub trait EvaluateCompose<Inner>: Sized + TypeOf {
 }
 
 impl EvaluateCompose<ConstantValue> for ConstantValue {
-    type Output = ConstantValue;
-
     fn evaluate_compose(
         context: &Context,
         ty: Type,
         components: Vec<ConstantValue>,
     ) -> Result<Self, Error> {
-        match ty {
+        let value = match ty {
             Type::Vector(vector_type) => {
-                // todo: try_into components to scalars and put them into vector
-                todo!();
+                let components = components
+                    .into_iter()
+                    .map(|component| component.try_into().expect("expected scalar constant"))
+                    .collect();
+                <ConstantVector as EvaluateCompose<ConstantScalar>>::evaluate_compose(
+                    context,
+                    vector_type,
+                    components,
+                )?
+                .into()
             }
             Type::Matrix(matrix_type) => {
-                // like vector but check if inner type is a scalar or vector
-                todo!()
+                let inner_type = components[0].type_of();
+                match inner_type {
+                    Type::Scalar(scalar_type) => {
+                        let components = components
+                            .into_iter()
+                            .map(|component| {
+                                component.try_into().expect("expected scalar constant")
+                            })
+                            .collect();
+                        <ConstantMatrix as EvaluateCompose<ConstantScalar>>::evaluate_compose(
+                            context,
+                            matrix_type,
+                            components,
+                        )?
+                        .into()
+                    }
+                    Type::Vector(vector_type) => {
+                        let components = components
+                            .into_iter()
+                            .map(|component| {
+                                component.try_into().expect("expected scalar constant")
+                            })
+                            .collect();
+                        <ConstantMatrix as EvaluateCompose<ConstantVector>>::evaluate_compose(
+                            context,
+                            matrix_type,
+                            components,
+                        )?
+                        .into()
+                    }
+                    _ => panic!("Invalid to compose matrix from {inner_type:?}"),
+                }
             }
             Type::Struct(struct_type) => {
-                // just build struct
+                <ConstantStruct as EvaluateCompose<ConstantValue>>::evaluate_compose(
+                    context,
+                    struct_type,
+                    components,
+                )?
+                .into()
             }
             Type::Array(array_type) => {
-                // just build array
+                <ConstantArray as EvaluateCompose<ConstantValue>>::evaluate_compose(
+                    context, array_type, components,
+                )?
+                .into()
             }
             _ => panic!("Compose is invalid for {ty:?}"),
-        }
+        };
 
-        todo!();
+        Ok(value)
     }
 }

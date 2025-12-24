@@ -57,6 +57,14 @@ use cranelift_module::{
 use crate::{
     compiler::{
         Error,
+        constant::{
+            ConstantValue,
+            WriteConstant,
+        },
+        expression::{
+            ConstantExpression,
+            EvaluateExpression,
+        },
         function::{
             FunctionArgument,
             FunctionDeclaration,
@@ -70,6 +78,8 @@ use crate::{
         simd::SimdContext,
         types::{
             AsIrTypes,
+            PointerType,
+            PointerTypeBase,
             Type,
         },
         value::{
@@ -79,7 +89,9 @@ use crate::{
         },
         variable::{
             GlobalVariable,
+            GlobalVariableInner,
             GlobalVariablesLayouter,
+            PrivateMemoryLayout,
         },
     },
     entry_point::EntryPoints,
@@ -132,8 +144,6 @@ pub struct Context<'source> {
 
     /// Maps naga's types to our types
     pub types: CoArena<naga::Type, Type>,
-
-    pub global_variables: CoArena<naga::GlobalVariable, GlobalVariable>,
 }
 
 impl<'source> Context<'source> {
@@ -154,29 +164,6 @@ impl<'source> Context<'source> {
             Type::from_naga(&source, handle)
         })?;
 
-        //let global_expressions =
-        //    CoArena::try_from_arena(&source.global_expressions, |handle, expression|
-        // todo!())?;
-
-        let global_variables = {
-            let mut layouter = GlobalVariablesLayouter::new(&layouter);
-
-            CoArena::from_arena(&source.global_variables, |_handle, global_variable| {
-                // todo: initialize later
-                /*if let Some(init) = global_variable.init {
-                    assert!(global_variable.binding.is_none());
-                    let init = init.evaluate_expression(&self.context)?;
-
-
-                    dbg!(init);
-                    dbg!(type_layout);
-                    todo!("write constant value into global data");
-                }*/
-
-                layouter.push(global_variable)
-            })
-        };
-
         Ok(Self {
             source,
             info,
@@ -185,7 +172,6 @@ impl<'source> Context<'source> {
             simd_context,
             types,
             config,
-            global_variables,
         })
     }
 
@@ -218,10 +204,14 @@ pub struct Compiler<'source, Output> {
 
     /// Contains signatures and function IDs of functions declared by the shader
     /// module
-    pub function_declarations: SparseCoArena<naga::Function, FunctionDeclaration>,
+    function_declarations: SparseCoArena<naga::Function, FunctionDeclaration>,
 
     #[debug(skip)]
     output: Output,
+
+    global_expressions: CoArena<naga::Expression, ConstantValue>,
+    global_variables: SparseCoArena<naga::GlobalVariable, GlobalVariable>,
+    private_memory_stack_slot_data: Option<ir::StackSlotData>,
 }
 
 impl<'source, Output> Compiler<'source, Output>
@@ -242,12 +232,21 @@ where
 
         let context = Context::new(source, info, isa, config)?;
 
+        let global_expressions =
+            CoArena::try_from_arena(&source.global_expressions, |_handle, expression| {
+                let expression = ConstantExpression::try_from(expression.clone())?;
+                expression.evaluate_expression(&context)
+            })?;
+
         Ok(Self {
             context,
             cl_context: output.make_context(),
             fb_context: FunctionBuilderContext::new(),
             function_declarations: Default::default(),
             output,
+            global_expressions,
+            global_variables: Default::default(),
+            private_memory_stack_slot_data: None,
         })
     }
 }
@@ -276,6 +275,7 @@ where
                     &mut self.output,
                     function,
                     declaration,
+                    &self.global_variables,
                 )?;
             }
         }
@@ -308,6 +308,7 @@ where
             &mut self.output,
             function,
             declaration,
+            &self.global_variables,
         )
     }
 
@@ -413,6 +414,23 @@ where
         let mut shim_builder =
             RuntimeEntryPointBuilder::new(&self.context, function_builder, runtime_context);
 
+        // allocates space for global variables on stack. then calls into the runtime to
+        // initialize that memory. then stashes the pointer to that stack slot into the
+        // runtime context struct.
+        //
+        // don't forget this! otherwise the global variables pointers will be dangling
+        // and the pointer in the context will be null
+        //
+        // todo: I think we should move the global variables / private memory stuff from
+        // context into the state and set everything up in one place so that we can't
+        // mess this up (draumatized from my first segfault lol).
+        if let Some(private_memory_stack_slot_data) = self.private_memory_stack_slot_data.clone() {
+            shim_builder.compile_private_data_initialization(private_memory_stack_slot_data)?;
+        }
+        else {
+            assert!(self.global_variables.is_empty());
+        }
+
         let (arguments, input_layout) =
             shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
 
@@ -459,14 +477,66 @@ where
             output_layout,
         })
     }
-}
 
-// better name?
-// todo
-#[allow(unused)]
-#[derive(Clone, Debug)]
-pub struct PrivateMemory {
-    data: Vec<u8>,
+    pub fn layout_private_memory(&mut self) -> PrivateMemoryLayout {
+        let mut layouter = GlobalVariablesLayouter::new(&self.context.layouter);
+
+        assert!(self.global_variables.is_empty());
+
+        for (handle, global_variable) in self.context.source.global_variables.iter() {
+            let pointer_type = PointerType {
+                base_type: PointerTypeBase::Pointer(global_variable.ty),
+                address_space: global_variable.space,
+            };
+
+            if let Some(binding) = global_variable.binding {
+                self.global_variables.insert(
+                    handle,
+                    GlobalVariable {
+                        address_space: global_variable.space,
+                        pointer_type,
+                        inner: GlobalVariableInner::Resource { binding },
+                    },
+                );
+            }
+            else {
+                self.global_variables.insert(
+                    handle,
+                    GlobalVariable {
+                        address_space: global_variable.space,
+                        pointer_type,
+                        inner: GlobalVariableInner::Memory { offset: 0, len: 0 },
+                    },
+                );
+
+                layouter.push(handle, global_variable, |expression, data| {
+                    let value = &self.global_expressions[expression];
+                    value.write_into(data);
+                    //todo!("initialize global variable")
+                });
+            }
+        }
+
+        let layout = layouter.finish();
+
+        for (handle, entry) in layout.iter() {
+            let global_variable = self.global_variables.get_mut(handle).unwrap();
+            match &mut global_variable.inner {
+                GlobalVariableInner::Memory { offset, len } => {
+                    *offset = entry.offset;
+                    *len = entry.len;
+                }
+                GlobalVariableInner::Resource { binding: _ } => unreachable!(),
+            }
+        }
+
+        if !self.global_variables.is_empty() {
+            self.private_memory_stack_slot_data =
+                Some(layout.private_memory_layout.stack_slot_data());
+        }
+
+        layout.private_memory_layout
+    }
 }
 
 pub trait FuncBuilderExt {
