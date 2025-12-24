@@ -89,8 +89,6 @@ use crate::{
     },
 };
 
-const SHIM_FUNCTION_NAME: &str = "__naga_rt0";
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Config {
     /// Calling convention used for internal function
@@ -290,7 +288,8 @@ where
 
         for entry_point in &self.context.source.entry_points {
             let entry_point_data = self.compile_entry_point(entry_point)?;
-            entry_points.push(entry_point, entry_point_data);
+            let mut builder = entry_points.push(entry_point, entry_point_data);
+            builder.collect_inter_stage_layouts(&self.context.source, &self.context.layouter);
         }
 
         Ok(entry_points)
@@ -445,11 +444,11 @@ where
         // return from function
         function_builder.ins().return_(&[]);
 
-        let shim_function = self.output.declare_function(
-            SHIM_FUNCTION_NAME,
-            Linkage::Local,
-            &self.cl_context.func.signature,
-        )?;
+        function_builder.finalize();
+
+        let shim_function = self
+            .output
+            .declare_anonymous_function(&self.cl_context.func.signature)?;
 
         self.output
             .define_function(shim_function, &mut self.cl_context)?;

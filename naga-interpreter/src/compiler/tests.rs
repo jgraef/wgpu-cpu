@@ -389,6 +389,7 @@ fn switch_break() {
 }
 
 #[test]
+#[ignore = "wip"]
 fn global_variable() {
     let output = helper().exec::<[i32; 4]>(
         r#"

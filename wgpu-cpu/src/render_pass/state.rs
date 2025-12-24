@@ -161,7 +161,8 @@ impl<'pass> State<'pass> {
             .inter_stage_layout(vertex_state.entry_point_index)
         {
             Some(InterStageLayout::Vertex { output }) => output,
-            _ => panic!("user defined io layouts for entry point are not for vertex stage"),
+            Some(_) => panic!("user defined io layouts for entry point are not for vertex stage"),
+            None => panic!("no user defined io layouts available for entry point"),
         };
 
         let interstage_user_pool = UserDefinedIoBufferPool::new(vertex_output_layout.clone());

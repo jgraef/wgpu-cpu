@@ -28,7 +28,7 @@ use crate::util::{
 
 mod colored_triangle;
 
-const ALL_SHADER_BACKENDS: &[ShaderBackend] = &[
+pub const ALL_SHADER_BACKENDS: &[ShaderBackend] = &[
     wgpu_cpu::ShaderBackend::Interpreter,
     wgpu_cpu::ShaderBackend::Compiler,
 ];
@@ -84,13 +84,14 @@ impl<'files> Test<'files> {
 
     pub fn run_with(&self, reference: &RgbaImage, config: Config) -> Result<TestResult, Error> {
         let render_result = catch_unwind(|| {
-            let (device, queue) = create_device_and_queue(config);
+            let (device, queue) = create_device_and_queue(config.clone());
             (self.test.renderer)(device, queue)
         });
 
         let test_result = match render_result {
             Ok(rendered) => {
-                self.files.save_output(self.test.name, &rendered)?;
+                self.files
+                    .save_output(self.test.name, config.shader_backend, &rendered)?;
                 if let Err(error) = check_eq_image(reference, &rendered) {
                     TestResult::ImageTestFailed(error)
                 }
@@ -180,21 +181,38 @@ impl TestFiles {
     }
 
     fn save_reference(&self, test_name: &str, output: &RgbaImage) -> Result<(), Error> {
-        let file_name = format!("{}.png", test_name);
-        let path = self.reference.join(&file_name);
+        let mut path = self.reference.clone();
+        std::fs::create_dir_all(&path)?;
+        path.push(format!("{}.png", test_name));
+
         output
             .save(&path)
             .map_err(|error| eyre!("Could not save reference: {}: {error}", path.display()))?;
         Ok(())
     }
 
-    fn save_output(&self, test_name: &str, output: &RgbaImage) -> Result<(), Error> {
-        let file_name = format!("{}.png", test_name);
-        let path = self.output.join(&file_name);
+    fn save_output(
+        &self,
+        test_name: &str,
+        backend: ShaderBackend,
+        output: &RgbaImage,
+    ) -> Result<(), Error> {
+        let mut path = self.output.clone();
+        path.push(output_directory(backend));
+        std::fs::create_dir_all(&path)?;
+        path.push(format!("{}.png", test_name));
+
         output
             .save(&path)
             .map_err(|error| eyre!("Could not save output: {}: {error}", path.display()))?;
         Ok(())
+    }
+}
+
+fn output_directory(backend: ShaderBackend) -> &'static str {
+    match backend {
+        ShaderBackend::Interpreter => "interpreter",
+        ShaderBackend::Compiler => "compiler",
     }
 }
 

@@ -35,6 +35,8 @@ pub struct Instance {
 
 impl Instance {
     pub fn new(config: InstanceConfig) -> Self {
+        tracing::debug!(?config, "creating instance");
+
         Self {
             instance_config: Arc::new(config),
         }

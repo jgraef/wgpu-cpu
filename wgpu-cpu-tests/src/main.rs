@@ -15,6 +15,7 @@ use wgpu_cpu::{
 };
 
 use crate::tests::{
+    ALL_SHADER_BACKENDS,
     TestConfig,
     TestFiles,
     Tests,
@@ -82,9 +83,13 @@ fn main() -> Result<(), Error> {
             no_unit_tests,
             shader_backends,
         } => {
-            let test_config = TestConfig {
+            let mut test_config = TestConfig {
                 shader_backends: shader_backends.into_iter().map(Into::into).collect(),
             };
+
+            if test_config.shader_backends.is_empty() {
+                test_config.shader_backends = ALL_SHADER_BACKENDS.to_vec();
+            }
 
             if !no_unit_tests {
                 let mut cargo = std::process::Command::new("cargo")
