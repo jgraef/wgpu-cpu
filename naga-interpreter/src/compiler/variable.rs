@@ -175,22 +175,28 @@ impl PrivateMemoryLayout {
         len_initialized + self.zeroed
     }
 
-    pub fn stack_slot_data(&self) -> ir::StackSlotData {
-        assert!(
-            self.alignment.is_power_of_two(),
-            "alignment is not a power of 2: {}",
-            self.alignment
-        );
-        let align_shift = self
-            .alignment
-            .ilog2()
-            .try_into()
-            .expect("align_shift overflow");
-        ir::StackSlotData {
-            kind: ir::StackSlotKind::ExplicitSlot,
-            size: self.size(),
-            align_shift,
-            key: None,
+    pub fn stack_slot_data(&self) -> Option<ir::StackSlotData> {
+        let size = self.size();
+        if size == 0 {
+            None
+        }
+        else {
+            assert!(
+                self.alignment.is_power_of_two(),
+                "alignment is not a power of 2: {}",
+                self.alignment
+            );
+            let align_shift = self
+                .alignment
+                .ilog2()
+                .try_into()
+                .expect("align_shift overflow");
+            Some(ir::StackSlotData {
+                kind: ir::StackSlotKind::ExplicitSlot,
+                size: self.size(),
+                align_shift,
+                key: None,
+            })
         }
     }
 }

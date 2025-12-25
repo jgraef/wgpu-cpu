@@ -33,9 +33,11 @@ use crate::{
             Config,
         },
         expression::ExpressionNotConstant,
-        types::InvalidType,
+        types::{
+            InvalidType,
+            UnexpectedType,
+        },
         util::ClifOutput,
-        value::UnexpectedType,
     },
     entry_point::{
         EntryPointIndex,

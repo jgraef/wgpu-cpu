@@ -15,11 +15,14 @@ use crate::compiler::{
     types::{
         ArrayType,
         FloatWidth,
+        IntWidth,
         MatrixType,
         PointerType,
         ScalarType,
+        Signedness,
         StructType,
         Type,
+        UnexpectedType,
         VectorType,
     },
     util::ieee16_from_f16,
@@ -303,24 +306,32 @@ pub struct ScalarValue {
 }
 
 impl ScalarValue {
-    pub fn compile_neg_zero(
-        float_width: FloatWidth,
-        function_compiler: &mut FunctionCompiler,
-    ) -> Result<ScalarValue, Error> {
+    pub fn compile_neg_zero(compiler: &mut FunctionCompiler, float_width: FloatWidth) -> Self {
         let value = match float_width {
             FloatWidth::F16 => {
-                function_compiler
+                compiler
                     .function_builder
                     .ins()
                     .f16const(ieee16_from_f16(f16::NEG_ZERO))
             }
-            FloatWidth::F32 => function_compiler.function_builder.ins().f32const(-0.0),
+            FloatWidth::F32 => compiler.function_builder.ins().f32const(-0.0),
         };
 
-        Ok(ScalarValue {
+        Self {
             ty: ScalarType::Float(float_width),
             value,
-        })
+        }
+    }
+
+    pub fn compile_u32(compiler: &mut FunctionCompiler, literal: u32) -> Self {
+        let value = compiler
+            .function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(literal));
+        Self {
+            ty: ScalarType::Int(Signedness::Unsigned, IntWidth::I32),
+            value,
+        }
     }
 
     pub fn with_ir_value(self, value: ir::Value) -> Self {
@@ -1108,13 +1119,6 @@ macro_rules! define_value {
             }
         )*
     };
-}
-
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("Expected {expected}, but found {ty:?}")]
-pub struct UnexpectedType {
-    pub ty: Type,
-    pub expected: &'static str,
 }
 
 define_value!(

@@ -700,3 +700,82 @@ fn access_global_variable_array_out_of_bounds_dynamic() {
         "#,
     );
 }
+
+#[test]
+fn array_length() {
+    let source = r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: u32,
+        }
+
+        @group(0)
+        @binding(0)
+        var<storage, read> what_len_is_this_array: array<i32>;
+
+        @vertex
+        fn main() -> Output {
+            let out = arrayLength(&what_len_is_this_array);
+            return Output(vec4f(), out);
+        }
+        "#;
+
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+    let module = compile_jit(&module, &info).unwrap();
+
+    struct DynamicArrayRuntime<'a> {
+        buffer: Vec<i32>,
+        output: &'a mut u32,
+    }
+
+    impl<'a> Runtime for DynamicArrayRuntime<'a> {
+        type Error = Infallible;
+
+        fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), Self::Error> {
+            target.fill(0);
+            Ok(())
+        }
+
+        fn copy_outputs_from(&mut self, source: &[u8]) -> Result<(), Self::Error> {
+            // too lazy to actually look at the compiled stack layout. pretty sure that's
+            // where the output is
+            *self.output = *bytemuck::from_bytes(&source[16..20]);
+            Ok(())
+        }
+
+        fn initialize_global_variables(
+            &mut self,
+            private_data: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            private_data.fill(0);
+            Ok(())
+        }
+
+        // SAFETY: pinky promise to not touch this buffer while shader has an aliased
+        // pointer
+        unsafe fn buffer(
+            &mut self,
+            binding: naga::ResourceBinding,
+            access: naga::StorageAccess,
+        ) -> Result<(*mut u8, usize), Self::Error> {
+            assert_eq!(binding.group, 0);
+            assert_eq!(binding.binding, 0);
+            assert_eq!(access, naga::StorageAccess::LOAD);
+
+            Ok((self.buffer.as_mut_ptr() as *mut u8, self.buffer.len() * 4))
+        }
+    }
+
+    let mut output = 0;
+    module
+        .entry_point(EntryPointIndex::from(0))
+        .run_with_runtime(DynamicArrayRuntime {
+            buffer: vec![42i32; 123],
+            output: &mut output,
+        })
+        .unwrap();
+
+    assert_eq!(output, 123);
+}

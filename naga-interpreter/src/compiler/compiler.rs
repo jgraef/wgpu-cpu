@@ -427,9 +427,6 @@ where
         if let Some(private_memory_stack_slot_data) = self.private_memory_stack_slot_data.clone() {
             shim_builder.compile_private_data_initialization(private_memory_stack_slot_data)?;
         }
-        else {
-            assert!(self.global_variables.is_empty());
-        }
 
         let (arguments, input_layout) =
             shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
@@ -519,20 +516,28 @@ where
 
         let layout = layouter.finish();
 
+        let mut no_private_memory_allocated = true;
         for (handle, entry) in layout.iter() {
             let global_variable = self.global_variables.get_mut(handle).unwrap();
             match &mut global_variable.inner {
                 GlobalVariableInner::Memory { offset, len } => {
                     *offset = entry.offset;
                     *len = entry.len;
+                    no_private_memory_allocated = false;
                 }
                 GlobalVariableInner::Resource { binding: _ } => unreachable!(),
             }
         }
 
         if !self.global_variables.is_empty() {
-            self.private_memory_stack_slot_data =
-                Some(layout.private_memory_layout.stack_slot_data());
+            self.private_memory_stack_slot_data = layout.private_memory_layout.stack_slot_data();
+
+            if self.private_memory_stack_slot_data.is_none() {
+                assert!(
+                    no_private_memory_allocated,
+                    "memory variables emitted, but no memory will be allocated"
+                );
+            }
         }
 
         layout.private_memory_layout

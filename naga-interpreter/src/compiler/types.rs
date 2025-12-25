@@ -9,6 +9,13 @@ use crate::compiler::{
     },
 };
 
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("Expected {expected}, but found {ty:?}")]
+pub struct UnexpectedType {
+    pub ty: Type,
+    pub expected: &'static str,
+}
+
 pub trait AsIrTypes {
     fn try_as_ir_type(&self, context: &Context) -> Option<ir::Type>;
 
@@ -547,15 +554,63 @@ impl AsIrTypes for ArrayType {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Type {
+macro_rules! define_type {
+    ($($variant:ident($ty:ty),)*) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Type {
+            $($variant($ty),)*
+        }
+
+        impl AsIrTypes for Type {
+            fn try_as_ir_type(&self, context: &Context) -> Option<ir::Type> {
+                match self {
+                    $(Self::$variant(ty) => ty.try_as_ir_type(context),)*
+                }
+            }
+
+            fn as_ir_types<'a>(&'a self, context: &'a Context) -> impl Iterator<Item = ir::Type> + 'a {
+                let output: Box<dyn Iterator<Item = ir::Type>> = match self {
+                    $(Self::$variant(ty) => Box::new(ty.as_ir_types(context)),)*
+                };
+                output
+            }
+
+            fn try_ir_size(&self, context: &Context) -> Option<usize> {
+                match self {
+                    $(Self::$variant(ty) => ty.try_ir_size(context),)*
+                }
+            }
+        }
+
+        $(
+            impl From<$ty> for Type {
+                fn from(ty: $ty) -> Self {
+                    Self::$variant(ty)
+                }
+            }
+
+            impl TryFrom<Type> for $ty {
+                type Error = UnexpectedType;
+
+                fn try_from(ty: Type) -> Result<$ty, UnexpectedType> {
+                    match ty {
+                        Type::$variant(ty) => Ok(ty),
+                        _ => Err(UnexpectedType { ty, expected: stringify!($ty)})
+                    }
+                }
+            }
+        )*
+    };
+}
+
+define_type!(
     Scalar(ScalarType),
     Vector(VectorType),
     Matrix(MatrixType),
     Pointer(PointerType),
     Struct(StructType),
     Array(ArrayType),
-}
+);
 
 impl Type {
     pub fn from_naga(
@@ -614,111 +669,3 @@ impl Type {
         Ok(output)
     }
 }
-
-impl AsIrTypes for Type {
-    fn try_as_ir_type(&self, context: &Context) -> Option<ir::Type> {
-        match self {
-            Type::Scalar(scalar_type) => scalar_type.try_as_ir_type(context),
-            Type::Vector(vector_type) => vector_type.try_as_ir_type(context),
-            Type::Matrix(matrix_type) => matrix_type.try_as_ir_type(context),
-            Type::Pointer(pointer_type) => pointer_type.try_as_ir_type(context),
-            Type::Struct(_handle) => None,
-            Type::Array(_array_type) => None,
-        }
-    }
-
-    fn as_ir_types<'a>(&'a self, context: &'a Context) -> impl Iterator<Item = ir::Type> + 'a {
-        let output: Box<dyn Iterator<Item = ir::Type>> = match self {
-            Type::Scalar(scalar_type) => Box::new(scalar_type.as_ir_types(context)),
-            Type::Vector(vector_type) => Box::new(vector_type.as_ir_types(context)),
-            Type::Matrix(matrix_type) => Box::new(matrix_type.as_ir_types(context)),
-            Type::Pointer(pointer_type) => Box::new(pointer_type.as_ir_types(context)),
-            Type::Struct(struct_type) => Box::new(struct_type.as_ir_types(context)),
-            Type::Array(array_type) => Box::new(array_type.as_ir_types(context)),
-        };
-        output
-    }
-
-    fn try_ir_size(&self, context: &Context) -> Option<usize> {
-        match self {
-            Type::Scalar(scalar_type) => scalar_type.try_ir_size(context),
-            Type::Vector(vector_type) => vector_type.try_ir_size(context),
-            Type::Matrix(matrix_type) => matrix_type.try_ir_size(context),
-            Type::Pointer(pointer_type) => pointer_type.try_ir_size(context),
-            Type::Struct(struct_type) => struct_type.try_ir_size(context),
-            Type::Array(array_type) => array_type.try_ir_size(context),
-        }
-    }
-}
-
-impl From<ScalarType> for Type {
-    fn from(ty: ScalarType) -> Self {
-        Self::Scalar(ty)
-    }
-}
-
-impl From<PointerType> for Type {
-    fn from(ty: PointerType) -> Self {
-        Self::Pointer(ty)
-    }
-}
-
-impl From<VectorType> for Type {
-    fn from(ty: VectorType) -> Self {
-        Self::Vector(ty)
-    }
-}
-
-impl From<MatrixType> for Type {
-    fn from(ty: MatrixType) -> Self {
-        Self::Matrix(ty)
-    }
-}
-
-impl From<StructType> for Type {
-    fn from(ty: StructType) -> Self {
-        Self::Struct(ty)
-    }
-}
-
-impl From<ArrayType> for Type {
-    fn from(ty: ArrayType) -> Self {
-        Self::Array(ty)
-    }
-}
-
-/*
-#[derive(Clone, Debug)]
-pub enum IrTypesIter<'a, 'source> {
-    Repeat(std::iter::Repeat<ir::Type>),
-    Nested(NestedIrTypesIter<'a, 'source>),
-}
-
-impl<'a> From<&'a ir::Type> for IrTypesIter<'a> {
-    fn from(value: &'a ir::Type) -> Self {
-        Self::Single(std::iter::once(value))
-    }
-}
-
-impl<'a> From<&'a [ir::Type]> for IrTypesIter<'a> {
-    fn from(value: &'a [ir::Type]) -> Self {
-        Self::Vector(value.into_iter())
-    }
-}
-
-impl<'a> Iterator for IrTypesIter<'a> {
-    type Item = ir::Type;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            IrTypesIter::Single(once) => once.next().copied(),
-            IrTypesIter::Vector(iter) => iter.next().copied(),
-            IrTypesIter::Nested(values) => values.next(),
-        }
-    }
-}
-
-context: &'a Context<'source>,
-        inner: std::slice::Iter<'a, naga::StructMember>,
-        current: Option<naga::Handle<
-*/

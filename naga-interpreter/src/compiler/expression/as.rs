@@ -134,7 +134,7 @@ impl CompileAs for ScalarValue {
                     .fcvt_from_uint(output_type.ir_type(), self.value)
             }
             (ScalarType::Float(float_width), ScalarType::Bool) => {
-                let zero = ScalarValue::compile_neg_zero(float_width, compiler)?;
+                let zero = ScalarValue::compile_neg_zero(compiler, float_width);
                 compiler.function_builder.ins().fcmp(
                     ir::condcodes::FloatCC::NotEqual,
                     self.value,
