@@ -176,7 +176,9 @@ fn clif_output() {
     let output = String::from_utf8(output).unwrap();
 
     println!("{output}");
-    assert!(output.contains("function %main(i64, i32) -> f32x4"));
+    // expected arguments: runtime pointer, result pointer, normal function
+    // arguments expected return values: abort code
+    assert!(output.contains("function %main(i64, i64, i32) -> i8"));
 }
 
 #[test]
@@ -554,8 +556,8 @@ fn trap_divide_by_zero() {
 }
 
 #[test]
-#[ignore = "traps"]
-fn trap_runtime_panic() {
+#[should_panic(expected = "copy_outputs_from")]
+fn runtime_panic() {
     let source = r#"
         struct Output {
             @builtin(position) p: vec4f,
@@ -576,6 +578,7 @@ fn trap_runtime_panic() {
         type Error = Infallible;
 
         fn copy_inputs_to(&mut self, _target: &mut [u8]) -> Result<(), Self::Error> {
+            // note: this is never called because the shader doesn't take any inputs
             panic!("copy_inputs_to")
         }
 
@@ -589,6 +592,17 @@ fn trap_runtime_panic() {
         ) -> Result<(), Self::Error> {
             panic!("initialize_global_variables")
         }
+
+        fn buffer(&mut self, _binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
+            panic!("buffer")
+        }
+
+        fn buffer_mut(
+            &mut self,
+            _binding: naga::ResourceBinding,
+        ) -> Result<&mut [u8], Self::Error> {
+            panic!("buffer_mut")
+        }
     }
 
     let module = compile_jit(&module, &info).unwrap();
@@ -597,7 +611,6 @@ fn trap_runtime_panic() {
 }
 
 #[test]
-#[ignore = "traps"]
 fn kill() {
     // note: wgsl discard statements translate to kill statements in naga IR. those
     // are only valid in fragment shaders though.
@@ -753,18 +766,18 @@ fn array_length() {
             Ok(())
         }
 
-        // SAFETY: pinky promise to not touch this buffer while shader has an aliased
-        // pointer
-        unsafe fn buffer(
-            &mut self,
-            binding: naga::ResourceBinding,
-            access: naga::StorageAccess,
-        ) -> Result<(*mut u8, usize), Self::Error> {
+        fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
             assert_eq!(binding.group, 0);
             assert_eq!(binding.binding, 0);
-            assert_eq!(access, naga::StorageAccess::LOAD);
 
-            Ok((self.buffer.as_mut_ptr() as *mut u8, self.buffer.len() * 4))
+            Ok(bytemuck::cast_slice(&*self.buffer))
+        }
+
+        fn buffer_mut(
+            &mut self,
+            _binding: naga::ResourceBinding,
+        ) -> Result<&mut [u8], Self::Error> {
+            Ok(&mut [])
         }
     }
 

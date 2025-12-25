@@ -17,6 +17,7 @@ use crate::{
             Runtime,
             RuntimeContext,
             RuntimeData,
+            RuntimeResult,
         },
         variable::PrivateMemoryLayout,
     },
@@ -155,7 +156,7 @@ impl<'a> EntryPoint<'a> {
             let mut runtime_context_data = RuntimeData::new(runtime);
             let mut runtime_context = RuntimeContext::new(&mut runtime_context_data);
 
-            unsafe {
+            let result_code = unsafe {
                 // SAFETY: We just created the context struct and it's valid until the end of
                 // the scope. Thus it's safe to call the function with this as
                 // argument. The function itself is safe because `EntryPoint`s
@@ -163,22 +164,29 @@ impl<'a> EntryPoint<'a> {
                 // created with an safety guarantuee that the compiled code is safe,
                 // takes 1 pointer arguments and returns nothing.
 
-                let function = std::mem::transmute::<_, unsafe extern "C" fn(*const RuntimeContext)>(
-                    self.function_pointer,
-                );
+                let function = std::mem::transmute::<
+                    _,
+                    unsafe extern "C" fn(*const RuntimeContext) -> RuntimeResult,
+                >(self.function_pointer);
 
                 // note: the order of these arguments must be synchronized with the compiled
                 // code, which is generated in [`Compiler::compile_entry_point`].
-                function(&mut runtime_context as *mut _);
-            }
+                function(&mut runtime_context as *mut _)
+            };
 
-            match runtime_context_data.abort_payload {
-                Some(AbortPayload::Panic(payload)) => std::panic::resume_unwind(payload),
-                Some(AbortPayload::RuntimeError(runtime_error)) => {
-                    Err(EntryPointError::RuntimeError(runtime_error))
+            if let Some(payload) = runtime_context_data.abort_payload {
+                assert_eq!(result_code, RuntimeResult::Abort);
+                match payload {
+                    AbortPayload::Panic(payload) => std::panic::resume_unwind(payload),
+                    AbortPayload::RuntimeError(runtime_error) => {
+                        Err(EntryPointError::RuntimeError(runtime_error))
+                    }
+                    AbortPayload::Kill => Err(EntryPointError::Killed),
                 }
-                Some(AbortPayload::Kill) => Err(EntryPointError::Killed),
-                None => Ok(()),
+            }
+            else {
+                assert_eq!(result_code, RuntimeResult::Ok);
+                Ok(())
             }
         }
     }

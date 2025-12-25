@@ -66,8 +66,10 @@ use crate::{
             EvaluateExpression,
         },
         function::{
+            ABORT_CODE_TYPE,
             FunctionArgument,
             FunctionDeclaration,
+            FunctionResult,
             compile_function,
         },
         product::CompiledEntryPoint,
@@ -82,11 +84,7 @@ use crate::{
             PointerTypeBase,
             Type,
         },
-        value::{
-            AsIrValues,
-            FromIrValues,
-            Value,
-        },
+        util::alignment_log2,
         variable::{
             GlobalVariable,
             GlobalVariableInner,
@@ -318,21 +316,35 @@ where
     ) -> Result<FunctionDeclaration, Error> {
         let mut signature = ir::Signature::new(self.context.internal_calling_convention());
 
-        // return values
-        let return_type = function.result.as_ref().map(|result| {
-            let return_type = self.context.types[result.ty];
-            signature.returns.extend(
-                return_type
-                    .as_ir_types(&self.context)
-                    .map(ir::AbiParam::new),
-            );
-            return_type
-        });
+        // functions only return an abort code
+        signature.returns.push(ir::AbiParam::new(ABORT_CODE_TYPE));
 
         // implicit first argument is the runtime context pointer
         signature
             .params
             .push(ir::AbiParam::new(self.context.pointer_type()));
+
+        // return values
+        let return_type = function.result.as_ref().map(|result| {
+            let return_type = self.context.types[result.ty];
+
+            signature
+                .params
+                .push(ir::AbiParam::new(self.context.pointer_type()));
+
+            let type_layout = self.context.layouter[result.ty];
+            let stack_slot_data = ir::StackSlotData {
+                kind: ir::StackSlotKind::ExplicitSlot,
+                size: type_layout.size,
+                align_shift: alignment_log2(type_layout.alignment),
+                key: None,
+            };
+
+            FunctionResult {
+                ty: return_type,
+                stack_slot_data,
+            }
+        });
 
         // arguments
         let mut arguments = Vec::with_capacity(function.arguments.len());
@@ -392,13 +404,22 @@ where
             .signature
             .params
             .push(ir::AbiParam::new(self.context.pointer_type()));
+        self.cl_context
+            .func
+            .signature
+            .returns
+            .push(ir::AbiParam::new(ABORT_CODE_TYPE));
 
         let mut function_builder =
             FunctionBuilder::new(&mut self.cl_context.func, &mut self.fb_context);
 
         let entry_block = function_builder.create_block();
-        function_builder.append_block_params_for_function_params(entry_block);
+        let exit_block = function_builder.create_block();
+
+        // compile entry block first. this determines that it's actually the entry block
+        // for the function
         function_builder.switch_to_block(entry_block);
+        function_builder.append_block_params_for_function_params(entry_block);
 
         let runtime_context = {
             let block_params = function_builder.block_params(entry_block);
@@ -425,39 +446,63 @@ where
         // context into the state and set everything up in one place so that we can't
         // mess this up (draumatized from my first segfault lol).
         if let Some(private_memory_stack_slot_data) = self.private_memory_stack_slot_data.clone() {
-            shim_builder.compile_private_data_initialization(private_memory_stack_slot_data)?;
+            shim_builder
+                .compile_private_data_initialization(private_memory_stack_slot_data, exit_block)?;
         }
 
-        let (arguments, input_layout) =
-            shim_builder.compile_arguments_shim(&entry_point.function.arguments)?;
+        let mut argument_values = Vec::with_capacity(entry_point.function.arguments.len() + 2);
+        argument_values.push(runtime_context.pointer);
 
-        let return_type = entry_point
-            .function
-            .result
-            .as_ref()
-            .map(|function_result| Type::from_naga(&self.context.source, function_result.ty))
-            .transpose()?;
+        let mut output_layout = vec![];
+        let mut result_pointer = None;
 
-        let return_value = shim_builder.function_builder.call_shader_function(
-            &self.context,
-            main_function_ref,
-            &runtime_context,
-            arguments,
-            return_type,
+        if let Some(result) = &entry_point.function.result {
+            let (pointer, layout) = shim_builder.allocate_result(result)?;
+            result_pointer = Some(pointer);
+            output_layout = layout;
+            argument_values.push(pointer.pointer.value);
+        }
+
+        let input_layout = shim_builder.load_arguments(
+            &entry_point.function.arguments,
+            &mut argument_values,
+            exit_block,
+        )?;
+
+        let inst = shim_builder
+            .function_builder
+            .ins()
+            .call(main_function_ref, &argument_values);
+        let abort_code = shim_builder.function_builder.inst_results(inst)[0];
+        let continue_block = shim_builder.function_builder.create_block();
+        shim_builder.function_builder.ins().brif(
+            abort_code,
+            exit_block,
+            [&ir::BlockArg::Value(abort_code)],
+            continue_block,
+            [],
         );
+        shim_builder.function_builder.seal_block(continue_block);
+        shim_builder
+            .function_builder
+            .switch_to_block(continue_block);
 
-        let output_layout = entry_point
-            .function
-            .result
-            .as_ref()
-            .map(|result| shim_builder.compile_result_shim(result, return_value.unwrap()))
-            .transpose()?
-            .unwrap_or_default();
+        if let Some(pointer) = result_pointer {
+            shim_builder.pass_result_to_runtime(pointer, exit_block);
+        }
 
         let mut function_builder = shim_builder.function_builder;
+        let abort_code = function_builder.ins().iconst(ABORT_CODE_TYPE, 0);
+        function_builder
+            .ins()
+            .jump(exit_block, [&ir::BlockArg::Value(abort_code)]);
+        function_builder.seal_block(exit_block);
 
-        // return from function
-        function_builder.ins().return_(&[]);
+        // create exit block
+        function_builder.append_block_param(exit_block, ABORT_CODE_TYPE);
+        function_builder.switch_to_block(exit_block);
+        let abort_code = function_builder.block_params(exit_block)[0];
+        function_builder.ins().return_(&[abort_code]);
 
         function_builder.finalize();
 
@@ -545,41 +590,10 @@ where
 }
 
 pub trait FuncBuilderExt {
-    fn call_shader_function(
-        &mut self,
-        context: &Context,
-        func_ref: ir::FuncRef,
-        runtime_context: &RuntimeContextValue,
-        arguments: impl IntoIterator<Item = Value>,
-        return_type: Option<Type>,
-    ) -> Option<Value>;
-
     fn switch_to_void_block(&mut self);
 }
 
 impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
-    fn call_shader_function(
-        &mut self,
-        context: &Context,
-        func_ref: ir::FuncRef,
-        runtime_context: &RuntimeContextValue,
-        arguments: impl IntoIterator<Item = Value>,
-        return_type: Option<Type>,
-    ) -> Option<Value> {
-        let mut values = vec![runtime_context.pointer];
-        for argument in arguments {
-            values.extend(argument.as_ir_values());
-        }
-
-        let inst = self.ins().call(func_ref, &values);
-        let results = self.inst_results(inst).iter().copied();
-
-        let return_value = return_type
-            .map(|return_type| Value::from_ir_values_iter(context, return_type, results));
-
-        return_value
-    }
-
     fn switch_to_void_block(&mut self) {
         // todo: return early from compiling a block with ControlFlow instead.
         let void_block = self.create_block();

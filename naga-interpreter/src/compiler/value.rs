@@ -87,23 +87,28 @@ pub trait TypeOf {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct PointerRange<L> {
+pub struct Pointer {
     pub value: ir::Value,
     pub memory_flags: ir::MemFlags,
     pub offset: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PointerRange<L> {
+    pub pointer: Pointer,
     pub len: L,
 }
 
 impl PointerRange<u32> {
     pub fn check_bounds(&self) -> Result<(), Error> {
-        if self.offset < self.len {
+        if self.pointer.offset < self.len {
             Ok(())
         }
         else {
             // naga will reject programs doing this.
             panic!(
                 "out of bounds pointer access: offset={}, len={}",
-                self.offset, self.len
+                self.pointer.offset, self.len
             );
         }
     }
@@ -114,8 +119,13 @@ impl PointerRange<ir::Value> {
         let in_bounds = function_builder.ins().icmp_imm(
             ir::condcodes::IntCC::UnsignedGreaterThan,
             self.len,
-            i64::from(self.offset),
+            i64::from(self.pointer.offset),
         );
+
+        // todo: i think bounds checks should be done in the CompileAccess impl, but
+        // this is a good failsafe. should we branch to the abort block here instead? we
+        // could also call into the runtime to set an abort payload with a helpful error
+        // message
         function_builder
             .ins()
             .trapz(in_bounds, POINTER_OUT_OF_BOUNDS_TRAP_CODE);
@@ -145,17 +155,22 @@ pub trait PointerOffset: Copy {
     }
 }
 
-impl PointerOffset for PointerRange<u32> {
+impl PointerOffset for Pointer {
     fn with_offset(mut self, offset: u32) -> Self {
         self.offset = offset;
         self
     }
 }
 
-impl PointerOffset for PointerRange<ir::Value> {
-    fn with_offset(mut self, offset: u32) -> Self {
-        self.offset = offset;
-        self
+impl<L> PointerOffset for PointerRange<L>
+where
+    L: Copy,
+{
+    fn with_offset(self, offset: u32) -> Self {
+        Self {
+            pointer: self.pointer.with_offset(offset),
+            len: self.len,
+        }
     }
 }
 
@@ -179,15 +194,14 @@ pub trait Load<P, T>: Sized {
     ) -> Result<Self, Error>;
 }
 
-impl Load<PointerRange<u32>, ir::Type> for ir::Value {
+impl Load<Pointer, ir::Type> for ir::Value {
     fn load(
         context: &Context,
         function_builder: &mut FunctionBuilder,
         ty: ir::Type,
-        pointer: PointerRange<u32>,
+        pointer: Pointer,
     ) -> Result<Self, Error> {
         let _ = context;
-        pointer.check_bounds()?;
         let value = function_builder.ins().load(
             ty,
             pointer.memory_flags,
@@ -198,6 +212,18 @@ impl Load<PointerRange<u32>, ir::Type> for ir::Value {
     }
 }
 
+impl Load<PointerRange<u32>, ir::Type> for ir::Value {
+    fn load(
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        ty: ir::Type,
+        pointer: PointerRange<u32>,
+    ) -> Result<Self, Error> {
+        pointer.check_bounds()?;
+        Self::load(context, function_builder, ty, pointer.pointer)
+    }
+}
+
 impl Load<PointerRange<ir::Value>, ir::Type> for ir::Value {
     fn load(
         context: &Context,
@@ -205,15 +231,8 @@ impl Load<PointerRange<ir::Value>, ir::Type> for ir::Value {
         ty: ir::Type,
         pointer: PointerRange<ir::Value>,
     ) -> Result<Self, Error> {
-        let _ = context;
         pointer.check_bounds(function_builder);
-        let value = function_builder.ins().load(
-            ty,
-            pointer.memory_flags,
-            pointer.value,
-            i32::try_from(pointer.offset).expect("pointer offset overflow"),
-        );
-        Ok(value)
+        Self::load(context, function_builder, ty, pointer.pointer)
     }
 }
 
@@ -244,15 +263,14 @@ pub trait Store<P> {
     ) -> Result<(), Error>;
 }
 
-impl Store<PointerRange<u32>> for ir::Value {
+impl Store<Pointer> for ir::Value {
     fn store(
         &self,
         context: &Context,
         function_builder: &mut FunctionBuilder,
-        pointer: PointerRange<u32>,
+        pointer: Pointer,
     ) -> Result<(), Error> {
         let _ = context;
-        pointer.check_bounds()?;
         function_builder.ins().store(
             pointer.memory_flags,
             *self,
@@ -260,6 +278,18 @@ impl Store<PointerRange<u32>> for ir::Value {
             i32::try_from(pointer.offset).expect("pointer offset overflow"),
         );
         Ok(())
+    }
+}
+
+impl Store<PointerRange<u32>> for ir::Value {
+    fn store(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        pointer: PointerRange<u32>,
+    ) -> Result<(), Error> {
+        pointer.check_bounds()?;
+        self.store(context, function_builder, pointer.pointer)
     }
 }
 
@@ -272,13 +302,7 @@ impl Store<PointerRange<ir::Value>> for ir::Value {
     ) -> Result<(), Error> {
         let _ = context;
         pointer.check_bounds(function_builder);
-        function_builder.ins().store(
-            pointer.memory_flags,
-            *self,
-            pointer.value,
-            i32::try_from(pointer.offset).expect("pointer offset overflow"),
-        );
-        Ok(())
+        self.store(context, function_builder, pointer.pointer)
     }
 }
 
@@ -469,8 +493,8 @@ impl AsIrValue for PointerValue {
     fn try_as_ir_value(&self) -> Option<ir::Value> {
         match self.inner {
             PointerValueInner::StaticPointer(pointer) => {
-                if pointer.offset == 0 {
-                    Some(pointer.value)
+                if pointer.pointer.offset == 0 {
+                    Some(pointer.pointer.value)
                 }
                 else {
                     // todo: need to emit instruction to add offset to pointer
@@ -1096,6 +1120,7 @@ macro_rules! define_value {
             }
         }
 
+        define_value!(@impl_load_store([$(($variant, $ty)),*], Pointer));
         define_value!(@impl_load_store([$(($variant, $ty)),*], PointerRange<u32>));
         define_value!(@impl_load_store([$(($variant, $ty)),*], PointerRange<ir::Value>));
         define_value!(@impl_load_store([$(($variant, $ty)),*], StackLocation));

@@ -1,12 +1,21 @@
-use cranelift_codegen::ir::InstBuilder;
+use cranelift_codegen::ir::{
+    self,
+    InstBuilder,
+};
 
 use crate::compiler::{
     Error,
     compiler::FuncBuilderExt,
     expression::CompileExpression,
-    function::FunctionCompiler,
+    function::{
+        ABORT_CODE_TYPE,
+        FunctionCompiler,
+    },
     statement::CompileStatement,
-    value::AsIrValues,
+    value::{
+        Pointer,
+        Store,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -16,14 +25,26 @@ pub struct ReturnStatement {
 
 impl CompileStatement for ReturnStatement {
     fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
-        let mut return_values = vec![];
+        // note: should we instead generate an exit block that returns the result in
+        // FunctionCompiler::new (like we do for the abort block)? then we'd just need
+        // to jump to it from here.
 
         if let Some(expression) = self.value {
+            let result_pointer = compiler.function_builder.block_params(compiler.entry_block)[1];
             let value = expression.compile_expression(compiler)?;
-            return_values.extend(value.as_ir_values());
+            value.store(
+                compiler.context,
+                &mut compiler.function_builder,
+                Pointer {
+                    value: result_pointer,
+                    memory_flags: ir::MemFlags::trusted(),
+                    offset: 0,
+                },
+            )?;
         }
 
-        compiler.function_builder.ins().return_(&return_values);
+        let abort_code = compiler.function_builder.ins().iconst(ABORT_CODE_TYPE, 0);
+        compiler.function_builder.ins().return_(&[abort_code]);
         compiler.function_builder.switch_to_void_block();
 
         Ok(())

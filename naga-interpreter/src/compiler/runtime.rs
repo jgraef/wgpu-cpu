@@ -7,6 +7,7 @@ use std::{
 
 use cranelift_codegen::ir::{
     self,
+    BlockArg,
     InstBuilder,
 };
 use cranelift_frontend::FunctionBuilder;
@@ -21,14 +22,16 @@ use crate::{
     compiler::{
         Error,
         compiler::Context,
+        function::ABORT_CODE_TYPE,
         types::Type,
         util::alignment_log2,
         value::{
+            AsIrValues,
             Load,
+            Pointer,
             PointerOffset,
             PointerRange,
             StackLocation,
-            Store,
             Value,
         },
         variable::PrivateMemoryLayout,
@@ -97,17 +100,13 @@ pub trait Runtime: Sized {
 
     /// # TODO
     ///
-    /// Can we design a safe API?
-    unsafe fn buffer(
-        &mut self,
-        binding: naga::ResourceBinding,
-        access: naga::StorageAccess,
-    ) -> Result<(*mut u8, usize), Self::Error> {
-        // todo: remove default impl
-        let _ = (binding, access);
-        let buffer = &mut [];
-        Ok((buffer.as_mut_ptr(), buffer.len()))
-    }
+    /// Is this usable and safe?
+    fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error>;
+
+    /// # TODO
+    ///
+    /// Is this usable and safe?
+    fn buffer_mut(&mut self, binding: naga::ResourceBinding) -> Result<&mut [u8], Self::Error>;
 }
 
 impl<R> Runtime for &mut R
@@ -128,15 +127,12 @@ where
         R::initialize_global_variables(self, private_data)
     }
 
-    unsafe fn buffer(
-        &mut self,
-        binding: naga::ResourceBinding,
-        access: naga::StorageAccess,
-    ) -> Result<(*mut u8, usize), Self::Error> {
-        unsafe {
-            // SAFETY: callee's responsibility
-            R::buffer(self, binding, access)
-        }
+    fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
+        R::buffer(self, binding)
+    }
+
+    fn buffer_mut(&mut self, binding: naga::ResourceBinding) -> Result<&mut [u8], Self::Error> {
+        R::buffer_mut(self, binding)
     }
 }
 
@@ -476,9 +472,16 @@ impl RuntimeVtable {
                 let access = naga::StorageAccess::from_bits_retain(access);
                 let binding = naga::ResourceBinding { group, binding };
 
-                let (pointer, len) = unsafe {
-                    // SAFETY: callee's responsibility
-                    runtime.buffer(binding, access)?
+                let (pointer, len) = if access.contains(naga::StorageAccess::STORE) {
+                    let buffer = runtime.buffer_mut(binding)?;
+                    (buffer.as_mut_ptr() as *const u8, buffer.len())
+                }
+                else if access.contains(naga::StorageAccess::LOAD) {
+                    let buffer = runtime.buffer(binding)?;
+                    (buffer.as_ptr(), buffer.len())
+                }
+                else {
+                    panic!("Shader requested buffer access that is neither store or load");
                 };
 
                 *pointer_out = pointer;
@@ -514,7 +517,7 @@ impl RuntimeMethodSignatures {
     pub fn new(function_builder: &mut FunctionBuilder, context: &Context) -> Self {
         let pointer_param = ir::AbiParam::new(context.pointer_type());
         let context_param = pointer_param;
-        let result = ir::AbiParam::new(ir::types::I8);
+        let result = ir::AbiParam::new(ABORT_CODE_TYPE);
 
         let copy_inputs_to = function_builder.import_signature(ir::Signature {
             params: vec![
@@ -675,8 +678,13 @@ impl RuntimeContextValue {
 
     /// Generates a call to the kill runtime API method which kills shader
     /// execution.
-    pub fn kill(&self, context: &Context, function_builder: &mut FunctionBuilder) {
-        runtime_method!(self, kill).call(context, function_builder, []);
+    pub fn kill(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        abort_block: ir::Block,
+    ) {
+        runtime_method!(self, kill).call(context, function_builder, [], abort_block);
     }
 
     pub fn buffer(
@@ -685,6 +693,7 @@ impl RuntimeContextValue {
         function_builder: &mut FunctionBuilder,
         resource_binding: naga::ir::ResourceBinding,
         access: naga::StorageAccess,
+        abort_block: ir::Block,
     ) -> PointerRange<ir::Value> {
         // values for arguments
         let group = function_builder
@@ -725,6 +734,7 @@ impl RuntimeContextValue {
             context,
             function_builder,
             [group, binding, access, pointer_out, len_out],
+            abort_block,
         );
 
         // load returned pointer and len
@@ -738,9 +748,11 @@ impl RuntimeContextValue {
         // we probably need to think about what memory flags to use here (depends on
         // address space i think)
         PointerRange {
-            value: pointer,
-            memory_flags: self.memory_flags,
-            offset: 0,
+            pointer: Pointer {
+                value: pointer,
+                memory_flags: self.memory_flags,
+                offset: 0,
+            },
             len,
         }
     }
@@ -769,6 +781,7 @@ impl<'a> RuntimeMethod<'a> {
         context: &Context,
         function_builder: &mut FunctionBuilder,
         arguments: impl IntoIterator<Item = ir::Value>,
+        abort_block: ir::Block,
     ) {
         let data_pointer_offset: i32 = memoffset::offset_of!(RuntimeContext, runtime)
             .try_into()
@@ -801,15 +814,19 @@ impl<'a> RuntimeMethod<'a> {
                 .call_indirect(self.signature, function_pointer, &arguments);
         let results = function_builder.inst_results(inst);
         assert_eq!(results.len(), 1);
-        let abort_flag = results[0];
+        let abort_code = results[0];
 
         // check abort flag
-        // todo: propagate error through call stack to entry point and return from
-        // shader
-        const RUNTIME_ERROR_TRAP_CODE: ir::TrapCode = const { ir::TrapCode::user(1).unwrap() };
-        function_builder
-            .ins()
-            .trapnz(abort_flag, RUNTIME_ERROR_TRAP_CODE);
+        let continue_block = function_builder.create_block();
+        function_builder.ins().brif(
+            abort_code,
+            abort_block,
+            [&BlockArg::Value(abort_code)],
+            continue_block,
+            [],
+        );
+        function_builder.seal_block(continue_block);
+        function_builder.switch_to_block(continue_block);
     }
 }
 
@@ -836,12 +853,14 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
         }
     }
 
-    pub fn compile_arguments_shim(
+    pub fn load_arguments(
         &mut self,
         arguments: &[naga::FunctionArgument],
-    ) -> Result<(Vec<Value>, Vec<BindingStackLayout>), Error> {
+        argument_values: &mut Vec<ir::Value>,
+        abort_block: ir::Block,
+    ) -> Result<Vec<BindingStackLayout>, Error> {
         let mut arguments = arguments.iter();
-        let mut argument_values = vec![];
+        let mut argument_slots = vec![];
 
         let mut collect_binding_stack_layouts = CollectBindingStackLayouts {
             layouter: &self.context.layouter,
@@ -855,13 +874,13 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
         let type_layout = {
             let Some(first) = arguments.next()
             else {
-                return Ok((vec![], vec![]));
+                return Ok(vec![]);
             };
 
             let argument_type = Type::from_naga(&self.context.source, first.ty)?;
             let mut type_layout = self.context.layouter[first.ty];
             visitor.visit_function_argument(first, 0);
-            argument_values.push((argument_type, 0));
+            argument_slots.push((argument_type, 0));
 
             for argument in arguments {
                 let argument_type = Type::from_naga(&self.context.source, argument.ty)?;
@@ -873,7 +892,7 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
                 type_layout.size += len;
 
                 visitor.visit_function_argument(argument, offset);
-                argument_values.push((argument_type, offset));
+                argument_slots.push((argument_type, offset));
             }
 
             type_layout
@@ -902,29 +921,27 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
             self.context,
             &mut self.function_builder,
             [stack_slot_pointer, len],
+            abort_block,
         );
 
-        let argument_values = argument_values
-            .into_iter()
-            .map(|(ty, offset)| {
-                Value::load(
-                    self.context,
-                    &mut self.function_builder,
-                    ty,
-                    StackLocation::from(stack_slot)
-                        .with_offset(offset.try_into().expect("stack offset overflow")),
-                )
-            })
-            .collect::<Result<Vec<Value>, Error>>()?;
+        for (ty, offset) in argument_slots {
+            let value = Value::load(
+                self.context,
+                &mut self.function_builder,
+                ty,
+                StackLocation::from(stack_slot)
+                    .with_offset(offset.try_into().expect("stack offset overflow")),
+            )?;
+            argument_values.extend(value.as_ir_values());
+        }
 
-        Ok((argument_values, collect_binding_stack_layouts.layouts))
+        Ok(collect_binding_stack_layouts.layouts)
     }
 
-    pub fn compile_result_shim(
+    pub fn allocate_result(
         &mut self,
         result: &naga::FunctionResult,
-        value: Value,
-    ) -> Result<Vec<BindingStackLayout>, Error> {
+    ) -> Result<(PointerRange<u32>, Vec<BindingStackLayout>), Error> {
         let type_layout = self.context.layouter[result.ty];
 
         let mut collect_binding_stack_layouts = CollectBindingStackLayouts {
@@ -946,34 +963,44 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
                 key: None,
             });
 
-        let len = self
-            .function_builder
-            .ins()
-            .iconst(self.context.pointer_type(), i64::from(type_layout.size));
-
-        value.store(
-            self.context,
-            &mut self.function_builder,
-            StackLocation::from(stack_slot),
-        )?;
-
         let stack_slot_pointer =
             self.function_builder
                 .ins()
                 .stack_addr(self.context.pointer_type(), stack_slot, 0);
 
+        Ok((
+            PointerRange {
+                pointer: Pointer {
+                    value: stack_slot_pointer,
+                    memory_flags: ir::MemFlags::trusted(),
+                    offset: 0,
+                },
+                len: type_layout.size,
+            },
+            collect_binding_stack_layouts.layouts,
+        ))
+    }
+
+    pub fn pass_result_to_runtime(&mut self, pointer: PointerRange<u32>, abort_block: ir::Block) {
+        assert_eq!(pointer.pointer.offset, 0);
+
+        let len = self
+            .function_builder
+            .ins()
+            .iconst(self.context.pointer_type(), i64::from(pointer.len));
+
         runtime_method!(self.runtime, copy_outputs_from).call(
             self.context,
             &mut self.function_builder,
-            [stack_slot_pointer, len],
+            [pointer.pointer.value, len],
+            abort_block,
         );
-
-        Ok(collect_binding_stack_layouts.layouts)
     }
 
     pub fn compile_private_data_initialization(
         &mut self,
         private_memory_stack_slot_data: ir::StackSlotData,
+        abort_block: ir::Block,
     ) -> Result<(), Error> {
         let size = private_memory_stack_slot_data.size;
 
@@ -995,6 +1022,7 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
             self.context,
             &mut self.function_builder,
             [stack_slot_pointer, size],
+            abort_block,
         );
 
         self.runtime
@@ -1078,15 +1106,12 @@ where
         Ok(())
     }
 
-    unsafe fn buffer(
-        &mut self,
-        binding: naga::ResourceBinding,
-        access: naga::StorageAccess,
-    ) -> Result<(*mut u8, usize), Self::Error> {
-        todo!("buffer: {binding:?}, {access:?}");
-        /*// todo
-        let buffer = &mut [];
-        Ok((buffer.as_mut_ptr(), buffer.len()))*/
+    fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
+        todo!("buffer: {binding:?}");
+    }
+
+    fn buffer_mut(&mut self, binding: naga::ResourceBinding) -> Result<&mut [u8], Self::Error> {
+        todo!("buffer_mut: {binding:?}");
     }
 }
 

@@ -19,6 +19,10 @@ impl CompileExpression for FunctionArgumentExpression {
             .index
             .try_into()
             .expect("function argument index overflow");
+
+        // note: the block_inputs ranges in the function declaration's arguments already
+        // take into account that the first 2 arguments are the context pointer and
+        // result pointer.
         let argument = &compiler.declaration.arguments[index];
         let block_params = compiler.function_builder.block_params(compiler.entry_block);
         let block_params = block_params[argument.block_inputs.clone()].iter().copied();

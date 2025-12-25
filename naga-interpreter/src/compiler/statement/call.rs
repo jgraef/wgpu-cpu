@@ -1,9 +1,19 @@
+use cranelift_codegen::ir::{
+    self,
+    InstBuilder,
+};
+
 use crate::compiler::{
     Error,
-    compiler::FuncBuilderExt,
     expression::CompileExpression,
     function::FunctionCompiler,
     statement::CompileStatement,
+    value::{
+        AsIrValues,
+        Load,
+        StackLocation,
+        Value,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -15,47 +25,73 @@ pub struct CallStatement {
 
 impl CompileStatement for CallStatement {
     fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
-        let argument_values = self
-            .arguments
-            .iter()
-            .map(|argument| argument.compile_expression(compiler))
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        /*
-        compiler.compile_call()
-        let type_layout = context.layouter[variable.ty];
-                        let stack_slot_key = ir::StackSlotKey::new(handle.index().try_into().unwrap());
-
-                        let stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
-                            kind: ir::StackSlotKind::ExplicitSlot,
-                            size: type_layout.size,
-                            align_shift: alignment_log2(type_layout.alignment),
-                            key: Some(stack_slot_key),
-                        });*/
-
         // todo: error would be nicer
         let imported_function = compiler
             .imported_functions
             .get(self.function)
             .unwrap_or_else(|| panic!("Function not imported: {:?}", self.function));
+        let function_ref = imported_function.function_ref;
 
-        let result_value = compiler.function_builder.call_shader_function(
-            compiler.context,
-            imported_function.function_ref,
-            &compiler.runtime_context,
-            argument_values,
-            imported_function.declaration.return_type,
+        let mut argument_values = Vec::with_capacity(self.arguments.len() + 2);
+
+        // first argument: runtime context
+        argument_values.push(compiler.runtime_context.pointer);
+
+        // optional second argument: result pointer
+        let result = imported_function
+            .declaration
+            .return_type
+            .as_ref()
+            .map(|result| {
+                let result_stack_slot = compiler
+                    .function_builder
+                    .create_sized_stack_slot(result.stack_slot_data.clone());
+                let result_pointer = compiler.function_builder.ins().stack_addr(
+                    compiler.context.pointer_type(),
+                    result_stack_slot,
+                    0,
+                );
+                argument_values.push(result_pointer);
+
+                (result_stack_slot, result.ty, self.result.expect("function returns a type, but expression doesn't provide a return expression"))
+            });
+
+        // remaining arguments: actual function arguments
+        for argument in &self.arguments {
+            argument_values.extend(argument.compile_expression(compiler)?.as_ir_values());
+        }
+
+        // call function
+        let inst = compiler
+            .function_builder
+            .ins()
+            .call(function_ref, &argument_values);
+
+        // check returned abort code
+        let abort_code = compiler.function_builder.inst_results(inst)[0];
+        let continue_block = compiler.function_builder.create_block();
+        compiler.function_builder.ins().brif(
+            abort_code,
+            compiler.abort_block,
+            [&ir::BlockArg::Value(abort_code)],
+            continue_block,
+            [],
         );
+        compiler.function_builder.seal_block(continue_block);
+        compiler.function_builder.switch_to_block(continue_block);
 
-        if let Some(result_handle) = &self.result {
-            if let Some(result_value) = result_value {
-                compiler
-                    .emitted_expression
-                    .insert(*result_handle, result_value);
-            }
-            else {
-                panic!("Expected function to return a value");
-            }
+        // load result value
+        if let Some((stack_slot, result_type, result_expression)) = result {
+            let result_value = Value::load(
+                &compiler.context,
+                &mut compiler.function_builder,
+                result_type,
+                StackLocation::from(stack_slot),
+            )?;
+
+            compiler
+                .emitted_expression
+                .insert(result_expression, result_value);
         }
 
         Ok(())

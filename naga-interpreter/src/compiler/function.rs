@@ -3,7 +3,10 @@ use std::{
     ops::Range,
 };
 
-use cranelift_codegen::ir;
+use cranelift_codegen::ir::{
+    self,
+    InstBuilder,
+};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{
     FuncId,
@@ -38,6 +41,11 @@ use crate::{
     },
 };
 
+/// Type of value returned by all compiled functions to indicate whether
+/// execution is aborting. This is the runtime result propagated from calls to
+/// the runtime. Thus the meaning of this value corresponds to [`RuntimeResult`]
+pub const ABORT_CODE_TYPE: ir::Type = ir::types::I8;
+
 #[derive(Clone, Debug)]
 pub struct FunctionArgument {
     /// Range of block inputs that this argument corresponds to
@@ -45,6 +53,12 @@ pub struct FunctionArgument {
 
     /// Type of argument
     pub ty: Type,
+}
+
+#[derive(Clone, Debug)]
+pub struct FunctionResult {
+    pub ty: Type,
+    pub stack_slot_data: ir::StackSlotData,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +74,7 @@ pub struct FunctionDeclaration {
     pub function_id: FuncId,
     pub signature: ir::Signature,
     pub arguments: Vec<FunctionArgument>,
-    pub return_type: Option<Type>,
+    pub return_type: Option<FunctionResult>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -85,6 +99,7 @@ pub struct FunctionCompiler<'source, 'compiler> {
     pub source_locations: Vec<naga::Span>,
     pub loop_switch_stack: LoopSwitchStack,
     pub runtime_context: RuntimeContextValue,
+    pub abort_block: ir::Block,
 }
 
 impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
@@ -108,11 +123,15 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
         let mut function_builder = FunctionBuilder::new(&mut cl_context.func, fb_context);
 
         let entry_block = function_builder.create_block();
+        let abort_block = function_builder.create_block();
+
+        // turns out cranelift doesn't care what block you create first. the first block
+        // you actually fill is the entry block. so we compile the entry block first.
         function_builder.append_block_params_for_function_params(entry_block);
         function_builder.seal_block(entry_block);
         function_builder.switch_to_block(entry_block);
 
-        // implicit first argument is the runtime context pointer
+        // implicit  argument is the runtime context pointer
         let runtime_context = {
             let block_params = function_builder.block_params(entry_block);
             let runtime_pointer = block_params[0];
@@ -157,6 +176,7 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
             source_locations: vec![],
             loop_switch_stack: Default::default(),
             runtime_context,
+            abort_block,
         })
     }
 
@@ -202,8 +222,16 @@ impl<'source, 'compiler> FunctionCompiler<'source, 'compiler> {
     }
 
     /// Finish compilation of the function
-    pub fn finish(self) {
+    pub fn finish(mut self) {
         assert!(self.loop_switch_stack.is_empty());
+
+        self.function_builder.seal_block(self.abort_block);
+        self.function_builder.set_cold_block(self.abort_block);
+        self.function_builder
+            .append_block_param(self.abort_block, ABORT_CODE_TYPE);
+        self.function_builder.switch_to_block(self.abort_block);
+        let abort_code = self.function_builder.block_params(self.abort_block)[0];
+        self.function_builder.ins().return_(&[abort_code]);
 
         self.function_builder.finalize();
     }

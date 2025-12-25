@@ -12,6 +12,6 @@ pub struct CallResultExpression {
 
 impl CompileExpression for CallResultExpression {
     fn compile_expression(&self, compiler: &mut FunctionCompiler) -> Result<Value, Error> {
-        todo!()
+        panic!("function result was not emitted");
     }
 }

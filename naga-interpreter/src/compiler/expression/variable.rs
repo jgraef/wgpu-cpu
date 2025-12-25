@@ -5,6 +5,7 @@ use crate::compiler::{
     expression::CompileExpression,
     function::FunctionCompiler,
     value::{
+        Pointer,
         PointerRange,
         PointerValue,
         PointerValueInner,
@@ -30,9 +31,11 @@ impl CompileExpression for GlobalVariableExpression {
                 PointerValue {
                     ty: global_variable.pointer_type,
                     inner: PointerValueInner::StaticPointer(PointerRange {
-                        value: base_pointer,
-                        memory_flags: MemFlags::new(),
-                        offset: offset.try_into().expect("pointer offset overflow"),
+                        pointer: Pointer {
+                            value: base_pointer,
+                            memory_flags: MemFlags::new(), // todo: what flags?
+                            offset: offset.try_into().expect("pointer offset overflow"),
+                        },
                         len,
                     }),
                 }
@@ -43,6 +46,7 @@ impl CompileExpression for GlobalVariableExpression {
                     &mut compiler.function_builder,
                     binding,
                     global_variable.address_space.access(),
+                    compiler.abort_block,
                 );
 
                 PointerValue {
