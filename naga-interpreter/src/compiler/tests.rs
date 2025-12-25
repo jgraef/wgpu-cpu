@@ -779,3 +779,46 @@ fn array_length() {
 
     assert_eq!(output, 123);
 }
+
+#[test]
+fn select() {
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var out = 0;
+            var a = 123;
+            var b = 456;
+            var c = true;
+            out = select(a, b, c);
+            return Output(vec4f(), out);
+        }
+        "#,
+    );
+    assert_eq!(output, 456);
+
+    let output = helper().exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var out = 0;
+            var a = 123;
+            var b = 456;
+            var c = false;
+            out = select(a, b, c);
+            return Output(vec4f(), out);
+        }
+        "#,
+    );
+    assert_eq!(output, 123);
+}

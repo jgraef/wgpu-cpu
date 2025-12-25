@@ -177,6 +177,15 @@ define_constant_scalar!(
     F32(f32),
 );
 
+impl ConstantScalar {
+    pub fn as_bool(&self) -> bool {
+        match self {
+            ConstantScalar::Bool(value) => *value,
+            _ => panic!("not a bool {:?}", self),
+        }
+    }
+}
+
 impl TypeOf for ConstantScalar {
     type Type = ScalarType;
 

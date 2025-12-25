@@ -39,13 +39,17 @@ impl CompileStatement for IfStatement {
         compiler.function_builder.seal_block(accept_block);
         compiler.function_builder.seal_block(reject_block);
 
-        compiler.function_builder.switch_to_block(accept_block);
-        self.accept.compile_statement(compiler)?;
-        compiler.function_builder.ins().jump(exit_block, []);
+        {
+            compiler.function_builder.switch_to_block(accept_block);
+            self.accept.compile_statement(compiler)?;
+            compiler.function_builder.ins().jump(exit_block, []);
+        }
 
-        compiler.function_builder.switch_to_block(reject_block);
-        self.reject.compile_statement(compiler)?;
-        compiler.function_builder.ins().jump(exit_block, []);
+        {
+            compiler.function_builder.switch_to_block(reject_block);
+            self.reject.compile_statement(compiler)?;
+            compiler.function_builder.ins().jump(exit_block, []);
+        }
 
         compiler.function_builder.seal_block(exit_block);
         compiler.function_builder.switch_to_block(exit_block);
