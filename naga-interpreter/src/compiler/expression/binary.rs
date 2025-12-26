@@ -1,8 +1,8 @@
 use cranelift_codegen::ir::{
     self,
+    BlockArg,
     InstBuilder,
 };
-use cranelift_frontend::FunctionBuilder;
 
 use crate::compiler::{
     Error,
@@ -12,7 +12,11 @@ use crate::compiler::{
         CompileExpression,
         EvaluateExpression,
     },
-    function::FunctionCompiler,
+    function::{
+        ABORT_CODE_TYPE,
+        AbortCode,
+        FunctionCompiler,
+    },
     types::{
         ScalarType,
         Signedness,
@@ -178,14 +182,14 @@ define_binary_traits! {
 }
 
 macro_rules! impl_binary_scalar {
-    (@impl($trait:ident, $method:ident, _, $builder:expr, $left:expr, $right:expr, $invalid:expr)) => {
+    (@impl($trait:ident, $method:ident, _, $compiler:expr, $left:expr, $right:expr, $invalid:expr)) => {
         $invalid()
     };
-    (@impl($trait:ident, $method:ident, $instr:ident, $builder:expr, $left:expr, $right:expr, $invalid:expr)) => {
-        $builder.ins().$instr($left, $right)
+    (@impl($trait:ident, $method:ident, $instr:ident, $compiler:expr, $left:expr, $right:expr, $invalid:expr)) => {
+        $compiler.function_builder.ins().$instr($left, $right)
     };
-    (@impl($trait:ident, $method:ident, {$function:ident}, $builder:expr, $left:expr, $right:expr, $invalid:expr)) => {
-        $function($builder, $left, $right)
+    (@impl($trait:ident, $method:ident, {$function:ident}, $compiler:expr, $left:expr, $right:expr, $invalid:expr)) => {
+        $function($compiler, $left, $right)?
     };
     {$($trait:ident :: $method:ident => [$bool:tt, $unsigned:tt, $signed:tt, $float:tt];)*} => {
         $(
@@ -200,16 +204,16 @@ macro_rules! impl_binary_scalar {
                     let invalid  = || -> ! { panic!("{} is not valid for {:?}", stringify!($trait), self.ty) };
                     let value = match self.ty {
                         ScalarType::Bool => {
-                            impl_binary_scalar!(@impl($trait, $method, $bool, &mut compiler.function_builder, self.value, other.value, invalid))
+                            impl_binary_scalar!(@impl($trait, $method, $bool, compiler, self.value, other.value, invalid))
                         }
                         ScalarType::Int(Signedness::Unsigned, _int_width) => {
-                            impl_binary_scalar!(@impl($trait, $method, $unsigned, &mut compiler.function_builder, self.value, other.value, invalid))
+                            impl_binary_scalar!(@impl($trait, $method, $unsigned, compiler, self.value, other.value, invalid))
                         },
                         ScalarType::Int(Signedness::Signed, _int_width) => {
-                            impl_binary_scalar!(@impl($trait, $method, $signed, &mut compiler.function_builder, self.value, other.value, invalid))
+                            impl_binary_scalar!(@impl($trait, $method, $signed, compiler, self.value, other.value, invalid))
                         },
                         ScalarType::Float(_float_width) => {
-                            impl_binary_scalar!(@impl($trait, $method, $float, &mut compiler.function_builder, self.value, other.value, invalid))
+                            impl_binary_scalar!(@impl($trait, $method, $float, compiler, self.value, other.value, invalid))
                         },
                     };
 
@@ -224,8 +228,8 @@ impl_binary_scalar! {
     CompileAdd::compile_add => [_, iadd, iadd, fadd];
     CompileSub::compile_sub => [_, isub, isub, fsub];
     CompileMul::compile_mul => [_, imul, imul, fmul];
-    CompileDiv::compile_div => [_, udiv, sdiv, fdiv];
-    CompileMod::compile_mod => [_, urem, srem, {custom_frem}];
+    CompileDiv::compile_div => [_, {checked_udiv}, {checked_sdiv}, fdiv];
+    CompileMod::compile_mod => [_, {checked_urem}, {checked_srem}, {custom_frem}];
     CompileBitAnd::compile_bit_and => [_, band, band, _];
     CompileBitXor::compile_bit_xor => [_, bxor, bxor, _];
     CompileBitOr::compile_bit_or => [_, bor, bor, _];
@@ -235,15 +239,134 @@ impl_binary_scalar! {
     CompileShr::compile_shr => [_, ushr, sshr, _];
 }
 
-fn custom_frem(builder: &mut FunctionBuilder, left: ir::Value, right: ir::Value) -> ir::Value {
+fn custom_frem(
+    compiler: &mut FunctionCompiler,
+    left: ir::Value,
+    right: ir::Value,
+) -> Result<ir::Value, Error> {
     // https://www.w3.org/TR/WGSL/#arithmetic-expr
     // > If T is a floating point type, the result is equal to:
     // > e1 - e2 * trunc(e1 / e2).
 
-    let x = builder.ins().fdiv(left, right);
-    let x = builder.ins().trunc(x);
-    let x = builder.ins().fmul(right, x);
-    builder.ins().fsub(left, x)
+    let x = compiler.function_builder.ins().fdiv(left, right);
+    let x = compiler.function_builder.ins().trunc(x);
+    let x = compiler.function_builder.ins().fmul(right, x);
+    let value = compiler.function_builder.ins().fsub(left, x);
+    Ok(value)
+}
+
+macro_rules! impl_checked_if_right_is_zero {
+    ($name:ident => $inst:ident) => {
+        fn $name(
+            compiler: &mut FunctionCompiler,
+            left: ir::Value,
+            right: ir::Value,
+        ) -> Result<ir::Value, Error> {
+            let invalid =
+                compiler
+                    .function_builder
+                    .ins()
+                    .icmp_imm(ir::condcodes::IntCC::Equal, right, 0);
+
+            let continue_block = compiler.function_builder.create_block();
+            let abort_code = compiler
+                .function_builder
+                .ins()
+                .iconst(ABORT_CODE_TYPE, AbortCode::DivisionByZero);
+            compiler.function_builder.ins().brif(
+                right,
+                continue_block,
+                [],
+                compiler.abort_block,
+                [&BlockArg::Value(abort_code)],
+            );
+            compiler.function_builder.seal_block(continue_block);
+            compiler.function_builder.switch_to_block(continue_block);
+
+            let value = compiler.function_builder.ins().$inst(left, right);
+            Ok(value)
+        }
+    };
+}
+
+impl_checked_if_right_is_zero!(checked_udiv => udiv);
+impl_checked_if_right_is_zero!(checked_urem => urem);
+impl_checked_if_right_is_zero!(checked_srem => srem);
+
+fn checked_sdiv(
+    compiler: &mut FunctionCompiler,
+    left: ir::Value,
+    right: ir::Value,
+) -> Result<ir::Value, Error> {
+    {
+        // https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/trait.InstBuilder.html#method.sdiv
+        // jumps to abort block if left = -2^(B-1) and right = -1
+        let ty = compiler.function_builder.func.dfg.value_type(right);
+        let b = ty.bits();
+
+        let continue_block = compiler.function_builder.create_block();
+
+        let invalid_left = compiler.function_builder.ins().icmp_imm(
+            ir::condcodes::IntCC::Equal,
+            left,
+            -(1 << (i64::from(b) - 1)),
+        );
+
+        let invalid_right =
+            compiler
+                .function_builder
+                .ins()
+                .icmp_imm(ir::condcodes::IntCC::Equal, right, -1);
+
+        let invalid = compiler
+            .function_builder
+            .ins()
+            .band(invalid_left, invalid_right);
+
+        let abort_code = compiler
+            .function_builder
+            .ins()
+            .iconst(ABORT_CODE_TYPE, AbortCode::Overflow);
+        compiler.function_builder.ins().brif(
+            invalid,
+            compiler.abort_block,
+            [&BlockArg::Value(abort_code)],
+            continue_block,
+            [],
+        );
+
+        compiler.function_builder.seal_block(continue_block);
+        compiler.function_builder.switch_to_block(continue_block);
+    }
+
+    {
+        // check if division by 0
+
+        let continue_block = compiler.function_builder.create_block();
+
+        let invalid =
+            compiler
+                .function_builder
+                .ins()
+                .icmp_imm(ir::condcodes::IntCC::Equal, right, 0);
+        let abort_code = compiler
+            .function_builder
+            .ins()
+            .iconst(ABORT_CODE_TYPE, AbortCode::DivisionByZero);
+        compiler.function_builder.ins().brif(
+            invalid,
+            compiler.abort_block,
+            [&BlockArg::Value(abort_code)],
+            continue_block,
+            [],
+        );
+
+        compiler.function_builder.seal_block(continue_block);
+        compiler.function_builder.switch_to_block(continue_block);
+    }
+
+    let value = compiler.function_builder.ins().sdiv(left, right);
+    Ok(value)
 }
 
 macro_rules! impl_comparisions {

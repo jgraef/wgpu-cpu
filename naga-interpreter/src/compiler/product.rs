@@ -9,15 +9,17 @@ use crate::{
         ShaderOutput,
     },
     compiler::{
-        runtime::{
+        function::{
+            AbortCode,
             AbortPayload,
+        },
+        runtime::{
             BindingStackLayout,
             DefaultRuntime,
             DefaultRuntimeError,
             Runtime,
             RuntimeContext,
             RuntimeData,
-            RuntimeResult,
         },
         variable::PrivateMemoryLayout,
     },
@@ -156,7 +158,7 @@ impl<'a> EntryPoint<'a> {
             let mut runtime_context_data = RuntimeData::new(runtime);
             let mut runtime_context = RuntimeContext::new(&mut runtime_context_data);
 
-            let result_code = unsafe {
+            let abort_code = unsafe {
                 // SAFETY: We just created the context struct and it's valid until the end of
                 // the scope. Thus it's safe to call the function with this as
                 // argument. The function itself is safe because `EntryPoint`s
@@ -166,7 +168,7 @@ impl<'a> EntryPoint<'a> {
 
                 let function = std::mem::transmute::<
                     _,
-                    unsafe extern "C" fn(*const RuntimeContext) -> RuntimeResult,
+                    unsafe extern "C" fn(*const RuntimeContext) -> AbortCode,
                 >(self.function_pointer);
 
                 // note: the order of these arguments must be synchronized with the compiled
@@ -174,19 +176,23 @@ impl<'a> EntryPoint<'a> {
                 function(&mut runtime_context as *mut _)
             };
 
-            if let Some(payload) = runtime_context_data.abort_payload {
-                assert_eq!(result_code, RuntimeResult::Abort);
-                match payload {
-                    AbortPayload::Panic(payload) => std::panic::resume_unwind(payload),
-                    AbortPayload::RuntimeError(runtime_error) => {
-                        Err(EntryPointError::RuntimeError(runtime_error))
-                    }
-                    AbortPayload::Kill => Err(EntryPointError::Killed),
+            match (abort_code, runtime_context_data.abort_payload) {
+                (AbortCode::Ok, None) => Ok(()),
+                (AbortCode::RuntimePanic, Some(AbortPayload::RuntimePanic(payload))) => {
+                    std::panic::resume_unwind(payload);
                 }
-            }
-            else {
-                assert_eq!(result_code, RuntimeResult::Ok);
-                Ok(())
+                (AbortCode::RuntimeError, Some(AbortPayload::RuntimeError(error))) => {
+                    Err(EntryPointError::RuntimeError(error))
+                }
+                (AbortCode::Kill, None) => Err(EntryPointError::Killed),
+                (AbortCode::PointerOutOfBounds, None) => Err(EntryPointError::PointerOutOfBounds),
+                (AbortCode::DivisionByZero, None) => Err(EntryPointError::DivisionByZero),
+                (AbortCode::Overflow, None) => Err(EntryPointError::Overflow),
+                (abort_code, abort_payload) => {
+                    panic!(
+                        "Mismatch between abort code and payload: code={abort_code:?}, payload={abort_payload:?}"
+                    )
+                }
             }
         }
     }
@@ -220,7 +226,17 @@ pub enum EntryPointError<R> {
     #[error(transparent)]
     RuntimeError(#[from] R),
 
+    #[error("Shader killed")]
     Killed,
+
+    #[error("Pointer out of bounds")]
+    PointerOutOfBounds,
+
+    #[error("Division by zero")]
+    DivisionByZero,
+
+    #[error("Integer overflow")]
+    Overflow,
 }
 
 #[cfg(test)]

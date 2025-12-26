@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     fmt::Debug,
     ops::Range,
 };
@@ -45,6 +46,48 @@ use crate::{
 /// execution is aborting. This is the runtime result propagated from calls to
 /// the runtime. Thus the meaning of this value corresponds to [`RuntimeResult`]
 pub const ABORT_CODE_TYPE: ir::Type = ir::types::I8;
+
+/// Abort code returned by all compiled functions telling the caller if the
+/// shader execution should be aborted.
+///
+/// This is also returned by calls to the runtime. If the [`Runtime`]
+/// implementation panics or returns an error, this will also abort the shader.
+///
+/// # Note
+///
+/// It's important that the `Ok` case is 0, since generated code will branch on
+/// that condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AbortCode {
+    Ok = 0,
+    RuntimePanic = 1,
+    RuntimeError = 2,
+    Kill = 3,
+    PointerOutOfBounds = 4,
+    DivisionByZero = 5,
+    Overflow = 6,
+}
+
+impl From<AbortCode> for ir::immediates::Imm64 {
+    fn from(value: AbortCode) -> Self {
+        i64::from(value as u8).into()
+    }
+}
+
+/// Payload propagated to the entry point call site when the shader aborts
+/// execution.
+///
+/// This is stored in [`RuntimeData`] when the [`Runtime`] implementation
+/// returns an [`Err`] or panics.
+#[derive(derive_more::Debug)]
+pub enum AbortPayload<E> {
+    /// Call to a [`Runtime`] method returned an error.
+    RuntimeError(#[debug(skip)] E),
+
+    /// Call to a [`Runtime`] method panicked.
+    RuntimePanic(#[debug(skip)] Box<dyn Any + Send + 'static>),
+}
 
 #[derive(Clone, Debug)]
 pub struct FunctionArgument {

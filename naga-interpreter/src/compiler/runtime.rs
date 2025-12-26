@@ -1,5 +1,4 @@
 use std::{
-    any::Any,
     fmt::Debug,
     marker::PhantomData,
     panic::AssertUnwindSafe,
@@ -7,8 +6,7 @@ use std::{
 
 use cranelift_codegen::ir::{
     self,
-    BlockArg,
-    InstBuilder,
+    InstBuilder as _,
 };
 use cranelift_frontend::FunctionBuilder;
 
@@ -22,7 +20,11 @@ use crate::{
     compiler::{
         Error,
         compiler::Context,
-        function::ABORT_CODE_TYPE,
+        function::{
+            ABORT_CODE_TYPE,
+            AbortCode,
+            AbortPayload,
+        },
         types::Type,
         util::alignment_log2,
         value::{
@@ -136,39 +138,6 @@ where
     }
 }
 
-/// Result code returned by a runtime API method to the shader.
-///
-/// Implementors of [`Runtime`] can ignore this, because this is returned by the
-/// code calling into the [`Runtime`] implementation.
-///
-/// # Note
-///
-/// This must be synchronized with the code generated in
-/// [`RuntimeMethod::call`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i8)]
-pub enum RuntimeResult {
-    Abort = 1,
-    Ok = 0,
-}
-
-/// Payload propagated to the entry point call site when the shader aborts
-/// execution.
-///
-/// This is stored in [`RuntimeData`] when the [`Runtime`] implementation
-/// returns an [`Err`] or panics.
-#[derive(derive_more::Debug)]
-pub enum AbortPayload<E> {
-    /// Call to a [`Runtime`] method returned an error.
-    RuntimeError(E),
-
-    /// Call to a [`Runtime`] method panicked.
-    Panic(#[debug(skip)] Box<dyn Any + Send + 'static>),
-
-    /// The shader executed a [`Kill statement`](naga::Statement::Kill)
-    Kill,
-}
-
 /// All of the runtime data.
 ///
 /// This contains the runtime itself and a place to store an [`AbortPayload`].
@@ -209,24 +178,21 @@ where
     ///
     /// This is used by the implementations for the methods in the
     /// [`RuntimeVtable`].
-    pub fn with_runtime(
-        &mut self,
-        mut f: impl FnMut(&mut R) -> Result<(), R::Error>,
-    ) -> RuntimeResult {
+    pub fn with_runtime(&mut self, mut f: impl FnMut(&mut R) -> Result<(), R::Error>) -> AbortCode {
         // rust can't unwind when called from external code, so we have to handle this
         // ourselves. any panics and errors in the runtime implementation will
         // be catched here and stored in the RuntimeData. then a RuntimeResult is
         // returned to indicate to the caller (RuntimeMethod::call) to abort the shader
         // program.
         match std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut self.runtime))) {
-            Ok(Ok(())) => RuntimeResult::Ok,
+            Ok(Ok(())) => AbortCode::Ok,
             Ok(Err(runtime_error)) => {
                 self.abort_payload = Some(AbortPayload::RuntimeError(runtime_error));
-                RuntimeResult::Abort
+                AbortCode::RuntimeError
             }
             Err(panic) => {
-                self.abort_payload = Some(AbortPayload::Panic(panic));
-                RuntimeResult::Abort
+                self.abort_payload = Some(AbortPayload::RuntimePanic(panic));
+                AbortCode::RuntimePanic
             }
         }
     }
@@ -306,7 +272,7 @@ pub struct RuntimeVtable {
     ///
     /// The [`Runtime`] implementation is responsible for knowing the correct
     /// layout of the arguments on the stack. (see [`BindingStackLayout`]).
-    pub copy_inputs_to: unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> RuntimeResult,
+    pub copy_inputs_to: unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> AbortCode,
 
     /// Copy shader return value from stack.
     ///
@@ -320,8 +286,7 @@ pub struct RuntimeVtable {
     ///
     /// The [`Runtime`] implementation is responsible for knowing the correct
     /// layout of the return value on the stack. (see [`BindingStackLayout`]).
-    pub copy_outputs_from:
-        unsafe extern "C" fn(*mut DynRuntimeData, *const u8, usize) -> RuntimeResult,
+    pub copy_outputs_from: unsafe extern "C" fn(*mut DynRuntimeData, *const u8, usize) -> AbortCode,
 
     /// Initialize the global variables.
     ///
@@ -332,17 +297,7 @@ pub struct RuntimeVtable {
     /// layout of the global variables. (see
     /// [`GlobalVariableLayout`](super::variable::GlobalVariableLayout)).
     pub initialize_global_variables:
-        unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> RuntimeResult,
-
-    /// Terminates shader execution
-    ///
-    /// This is called by the shader for [`Kill
-    /// statements`](naga::Statement::Kill).
-    ///
-    /// This API method doesn't call into the [`Runtime`] implementation, but
-    /// only sets the abort payload and returns a [`RuntimeResult`] telling the
-    /// shader to abort execution.
-    pub kill: unsafe extern "C" fn(*mut DynRuntimeData) -> RuntimeResult,
+        unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> AbortCode,
 
     pub buffer: unsafe extern "C" fn(
         *mut DynRuntimeData,
@@ -351,7 +306,7 @@ pub struct RuntimeVtable {
         access: u32,
         pointer_out: &mut *const u8,
         len_out: &mut usize,
-    ) -> RuntimeResult,
+    ) -> AbortCode,
 }
 
 impl RuntimeVtable {
@@ -369,7 +324,7 @@ impl RuntimeVtable {
             data: *mut DynRuntimeData,
             target: *mut u8,
             len: usize,
-        ) -> RuntimeResult
+        ) -> AbortCode
         where
             R: Runtime,
         {
@@ -393,7 +348,7 @@ impl RuntimeVtable {
             data: *mut DynRuntimeData,
             source: *const u8,
             len: usize,
-        ) -> RuntimeResult
+        ) -> AbortCode
         where
             R: Runtime,
         {
@@ -417,7 +372,7 @@ impl RuntimeVtable {
             data: *mut DynRuntimeData,
             target: *mut u8,
             len: usize,
-        ) -> RuntimeResult
+        ) -> AbortCode
         where
             R: Runtime,
         {
@@ -437,20 +392,6 @@ impl RuntimeVtable {
             data.with_runtime(|runtime| runtime.initialize_global_variables(target))
         }
 
-        unsafe extern "C" fn kill<R>(data: *mut DynRuntimeData) -> RuntimeResult
-        where
-            R: Runtime,
-        {
-            let data = unsafe {
-                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
-                // that corresponds to a valid `&mut RuntimeData<R>`
-                RuntimeData::<R>::from_pointer_mut(data)
-            };
-
-            data.abort_payload = Some(AbortPayload::Kill);
-            RuntimeResult::Abort
-        }
-
         unsafe extern "C" fn buffer<R>(
             data: *mut DynRuntimeData,
             group: u32,
@@ -458,7 +399,7 @@ impl RuntimeVtable {
             access: u32,
             pointer_out: &mut *const u8,
             len_out: &mut usize,
-        ) -> RuntimeResult
+        ) -> AbortCode
         where
             R: Runtime,
         {
@@ -495,7 +436,6 @@ impl RuntimeVtable {
             copy_inputs_to: copy_inputs_to::<R>,
             copy_outputs_from: copy_outputs_from::<R>,
             initialize_global_variables: initialize_global_variables::<R>,
-            kill: kill::<R>,
             buffer: buffer::<R>,
         }
     }
@@ -676,17 +616,6 @@ impl RuntimeContextValue {
             .store(self.memory_flags, pointer, self.pointer, offset);
     }
 
-    /// Generates a call to the kill runtime API method which kills shader
-    /// execution.
-    pub fn kill(
-        &self,
-        context: &Context,
-        function_builder: &mut FunctionBuilder,
-        abort_block: ir::Block,
-    ) {
-        runtime_method!(self, kill).call(context, function_builder, [], abort_block);
-    }
-
     pub fn buffer(
         &self,
         context: &Context,
@@ -821,7 +750,7 @@ impl<'a> RuntimeMethod<'a> {
         function_builder.ins().brif(
             abort_code,
             abort_block,
-            [&BlockArg::Value(abort_code)],
+            [&ir::BlockArg::Value(abort_code)],
             continue_block,
             [],
         );

@@ -535,7 +535,6 @@ fn insert_lane_into_i32x2_bug() {
 }
 
 #[test]
-#[ignore = "traps"]
 fn trap_divide_by_zero() {
     let source = r#"
         struct Output {
@@ -545,14 +544,28 @@ fn trap_divide_by_zero() {
 
         @vertex
         fn main() -> Output {
-            var a = 123;
-            var b = 0;
-            var c = a / b;
+            var a: i32 = 123;
+            var b: i32 = 0;
+            var c: i32 = a / b;
             return Output(vec4f(), c);
         }
         "#;
 
-    let _output = helper().exec::<i32>(source);
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+
+    let mut validator = naga::valid::Validator::new(Default::default(), Default::default());
+    let info = validator.validate(&module).unwrap();
+
+    let module = compile_jit(&module, &info).unwrap();
+    let entry_point = module.entry_point(EntryPointIndex::from(0));
+    let result = entry_point.run(NullShaderIo, NullShaderIo);
+
+    match result {
+        Err(EntryPointError::DivisionByZero) => {
+            // expected result
+        }
+        unexpected => panic!("Unexpected result: {unexpected:?}"),
+    }
 }
 
 #[test]
@@ -631,13 +644,10 @@ fn kill() {
     let result = entry_point.run(NullShaderIo, NullShaderIo);
 
     match result {
-        Ok(()) => panic!("Expected shader invocation to be killed"),
-        Err(EntryPointError::RuntimeError(runtime_error)) => {
-            panic!("Unexpected runtime error: {runtime_error:?}")
-        }
         Err(EntryPointError::Killed) => {
             // expected result
         }
+        unexpected => panic!("Unexpected result: {unexpected:?}"),
     }
 }
 

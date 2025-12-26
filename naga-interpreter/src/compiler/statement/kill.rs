@@ -1,11 +1,16 @@
 use cranelift_codegen::ir::{
     self,
-    InstBuilder,
+    InstBuilder as _,
 };
 
 use crate::compiler::{
     Error,
-    function::FunctionCompiler,
+    compiler::FuncBuilderExt,
+    function::{
+        ABORT_CODE_TYPE,
+        AbortCode,
+        FunctionCompiler,
+    },
     statement::CompileStatement,
 };
 
@@ -16,21 +21,16 @@ impl CompileStatement for KillStatement {
     fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
         assert!(!compiler.loop_switch_stack.is_continuing());
 
-        // emits a call into the runtime kill method which sets the abort payload and
-        // then returns through the normal abort mechanism.
-        compiler.runtime_context.kill(
-            &compiler.context,
-            &mut compiler.function_builder,
-            compiler.abort_block,
-        );
+        let abort_code = compiler
+            .function_builder
+            .ins()
+            .iconst(ABORT_CODE_TYPE, AbortCode::Kill);
+        compiler
+            .function_builder
+            .ins()
+            .jump(compiler.abort_block, [&ir::BlockArg::Value(abort_code)]);
 
-        // the abort mechanism is conditional though and cranelift codegen doesn't know
-        // that the kill function we called always returns a value that will cause a
-        // jump to the abort block afterwards. but we need to terminate this block, so
-        // we'll trap. this trap should never be hit because the normal abort
-        // mechanism always takes over.
-        const KILL_TRAP_CODE: ir::TrapCode = const { ir::TrapCode::user(2).unwrap() };
-        compiler.function_builder.ins().trap(KILL_TRAP_CODE);
+        compiler.function_builder.switch_to_void_block();
 
         Ok(())
     }
