@@ -912,7 +912,6 @@ fn access_global_variable_array_in_bounds_static() {
 }
 
 #[test]
-#[ignore = "dynamic indexing not implemented yet"]
 fn access_global_variable_array_in_bounds_dynamic() {
     let output = exec::<i32>(
         r#"
@@ -937,7 +936,7 @@ fn access_global_variable_array_in_bounds_dynamic() {
 }
 
 #[test]
-#[ignore = "dynamic indexing not implemented yet"]
+#[ignore = "traps"]
 fn access_global_variable_array_out_of_bounds_dynamic() {
     // todo: get result or panic and check it
 
@@ -1083,4 +1082,27 @@ fn select() {
         "#,
     );
     assert_eq!(output, 123);
+}
+
+#[test]
+fn vector_access_dynamic() {
+    let output = exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var v: vec4i = vec4i(12, 23, 34, 45);
+            var s: i32 = 0;
+            for (var i = 0; i < 4; i += 1) {
+                s += (i + 1) * v[i];
+            }
+            return Output(vec4f(), s);
+        }
+        "#,
+    );
+    assert_eq!(output, 340);
 }

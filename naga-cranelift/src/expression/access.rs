@@ -10,7 +10,10 @@ use crate::{
         EvaluateExpression,
     },
     function::FunctionCompiler,
-    simd::MatrixIrType,
+    simd::{
+        MatrixIrType,
+        VectorIrType,
+    },
     types::{
         PointerType,
         PointerTypeBase,
@@ -128,7 +131,66 @@ impl CompileAccess<ScalarValue> for VectorValue {
         compiler: &mut FunctionCompiler,
         index: &ScalarValue,
     ) -> Result<ScalarValue, Error> {
-        todo!("dynamic vector access")
+        let mut index = index.value;
+
+        let value = match compiler.context.simd_context[self.ty] {
+            VectorIrType::Plain { ty } => {
+                let v0_or_v1 =
+                    compiler
+                        .function_builder
+                        .ins()
+                        .select(index, self.values[1], self.values[0]);
+                index = compiler.function_builder.ins().ushr_imm(index, 1);
+                match self.ty.size {
+                    naga::VectorSize::Bi => v0_or_v1,
+                    naga::VectorSize::Tri => {
+                        compiler
+                            .function_builder
+                            .ins()
+                            .select(index, self.values[2], v0_or_v1)
+                    }
+                    naga::VectorSize::Quad => {
+                        let v2_or_v3 = compiler.function_builder.ins().select(
+                            index,
+                            self.values[3],
+                            self.values[2],
+                        );
+                        compiler
+                            .function_builder
+                            .ins()
+                            .select(index, v2_or_v3, v0_or_v1)
+                    }
+                }
+            }
+            VectorIrType::Vector { ty } => {
+                let value = self.values[0];
+                let v0 = compiler.function_builder.ins().extractlane(value, 0);
+                let v1 = compiler.function_builder.ins().extractlane(value, 1);
+                let v0_or_v1 = compiler.function_builder.ins().select(index, v1, v0);
+                index = compiler.function_builder.ins().ushr_imm(index, 1);
+                match self.ty.size {
+                    naga::VectorSize::Bi => v0_or_v1,
+                    naga::VectorSize::Tri => {
+                        let v2 = compiler.function_builder.ins().extractlane(value, 2);
+                        compiler.function_builder.ins().select(index, v2, v0_or_v1)
+                    }
+                    naga::VectorSize::Quad => {
+                        let v2 = compiler.function_builder.ins().extractlane(value, 2);
+                        let v3 = compiler.function_builder.ins().extractlane(value, 3);
+                        let v2_or_v3 = compiler.function_builder.ins().select(index, v2, v3);
+                        compiler
+                            .function_builder
+                            .ins()
+                            .select(index, v2_or_v3, v0_or_v1)
+                    }
+                }
+            }
+        };
+
+        Ok(ScalarValue {
+            ty: self.ty.scalar,
+            value,
+        })
     }
 }
 
@@ -246,7 +308,9 @@ impl CompileAccess<u32> for PointerValue {
                 (base_type, offset)
             }
             Type::Matrix(matrix_type) => {
-                let offset = u32::from(matrix_type.column_stride()) * *index;
+                let offset = u32::from(matrix_type.column_stride())
+                    * u32::from(matrix_type.scalar.byte_width())
+                    * *index;
                 let base_type = PointerTypeBase::VectorPointer(matrix_type.column_vector());
                 (base_type, offset)
             }
@@ -282,7 +346,43 @@ impl CompileAccess<ScalarValue> for PointerValue {
         compiler: &mut FunctionCompiler,
         index: &ScalarValue,
     ) -> Result<Value, Error> {
-        todo!("dynamic pointer access")
+        let base_type = self.ty.base_type(compiler.context);
+        let index = index.value;
+
+        let (stride, new_base_type) = match base_type {
+            Type::Vector(vector_type) => {
+                let stride = i64::from(vector_type.scalar.byte_width());
+                let new_base_type = PointerTypeBase::ScalarPointer(vector_type.scalar);
+                (stride, new_base_type)
+            }
+            Type::Matrix(matrix_type) => {
+                let stride = i64::from(matrix_type.column_stride())
+                    * i64::from(matrix_type.scalar.byte_width());
+                let new_base_type = PointerTypeBase::VectorPointer(matrix_type.column_vector());
+                (stride, new_base_type)
+            }
+            Type::Array(array_type) => {
+                let stride = i64::from(array_type.stride);
+                let new_base_type = PointerTypeBase::Pointer(array_type.base_type);
+                (stride, new_base_type)
+            }
+            _ => {
+                panic!(
+                    "Invalid to dynamically access index into pointer: {:?}",
+                    self.ty
+                )
+            }
+        };
+
+        let offset = compiler.function_builder.ins().imul_imm(index, stride);
+        let value = self.with_dynamic_offset(
+            compiler.context,
+            &mut compiler.function_builder,
+            offset,
+            new_base_type,
+        );
+
+        Ok(value.into())
     }
 }
 

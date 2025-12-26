@@ -18,6 +18,7 @@ use crate::{
         IntWidth,
         MatrixType,
         PointerType,
+        PointerTypeBase,
         ScalarType,
         Signedness,
         StructType,
@@ -112,6 +113,20 @@ impl PointerRange<u32> {
             );
         }
     }
+
+    pub fn as_dynamic(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+    ) -> PointerRange<ir::Value> {
+        let len = function_builder
+            .ins()
+            .iconst(context.pointer_type(), i64::from(self.len));
+        PointerRange {
+            pointer: self.pointer,
+            len,
+        }
+    }
 }
 
 impl PointerRange<ir::Value> {
@@ -130,12 +145,64 @@ impl PointerRange<ir::Value> {
             .ins()
             .trapz(in_bounds, POINTER_OUT_OF_BOUNDS_TRAP_CODE);
     }
+
+    pub fn with_dynamic_offset(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        offset: ir::Value,
+    ) -> Self {
+        let offset = function_builder
+            .ins()
+            .uextend(context.pointer_type(), offset);
+        let (len, overflow) = function_builder.ins().ssub_overflow(self.len, offset);
+        // todo: abort shader execution with proper abort code
+        function_builder
+            .ins()
+            .trapnz(overflow, POINTER_OUT_OF_BOUNDS_TRAP_CODE);
+        let value = function_builder.ins().iadd(self.pointer.value, offset);
+        Self {
+            pointer: Pointer {
+                value,
+                memory_flags: self.pointer.memory_flags,
+                offset: self.pointer.offset,
+            },
+            len,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct StackLocation {
     pub stack_slot: ir::StackSlot,
     pub offset: u32,
+}
+
+impl StackLocation {
+    pub fn as_pointer_range(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+    ) -> PointerRange<u32> {
+        let value = function_builder
+            .ins()
+            .stack_addr(context.pointer_type(), self.stack_slot, 0);
+
+        let data = function_builder
+            .func
+            .sized_stack_slots
+            .get(self.stack_slot)
+            .expect("stack slot data not found");
+
+        PointerRange {
+            pointer: Pointer {
+                value,
+                memory_flags: ir::MemFlags::trusted(),
+                offset: self.offset,
+            },
+            len: data.size,
+        }
+    }
 }
 
 impl From<ir::StackSlot> for StackLocation {
@@ -485,6 +552,38 @@ impl PointerValue {
         Self {
             ty,
             inner: PointerValueInner::StackLocation(stack_location.into()),
+        }
+    }
+
+    pub fn with_dynamic_offset(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        offset: ir::Value,
+        new_base_type: PointerTypeBase,
+    ) -> Self {
+        let pointer = match self.inner {
+            PointerValueInner::StaticPointer(pointer_range) => {
+                pointer_range.as_dynamic(context, function_builder)
+            }
+            PointerValueInner::DynamicPointer(pointer_range) => pointer_range,
+            PointerValueInner::StackLocation(stack_location) => {
+                stack_location
+                    .as_pointer_range(context, function_builder)
+                    .as_dynamic(context, function_builder)
+            }
+        };
+
+        Self {
+            ty: PointerType {
+                base_type: new_base_type,
+                address_space: self.ty.address_space,
+            },
+            inner: PointerValueInner::DynamicPointer(pointer.with_dynamic_offset(
+                context,
+                function_builder,
+                offset,
+            )),
         }
     }
 }
