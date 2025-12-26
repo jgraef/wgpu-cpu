@@ -44,7 +44,7 @@ impl Instance {
 }
 
 impl InstanceInterface for Instance {
-    fn new(instance_descriptor: &InstanceDescriptor) -> Self
+    fn new(instance_descriptor: InstanceDescriptor) -> Self
     where
         Self: Sized,
     {

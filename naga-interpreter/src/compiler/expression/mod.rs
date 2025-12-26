@@ -8,6 +8,7 @@ mod binary;
 mod call_result;
 mod compose;
 mod constant;
+mod cooperative;
 mod derivative;
 mod function_argument;
 mod image;
@@ -34,6 +35,7 @@ pub use binary::*;
 pub use call_result::*;
 pub use compose::*;
 pub use constant::*;
+pub use cooperative::*;
 use cranelift_codegen::{
     entity::EntityRef,
     ir,
@@ -142,6 +144,8 @@ define_expression!(
     RayQueryGetIntersection(RayQueryGetIntersectionExpression),
     SubgroupBallotResult(SubgroupBallotResultExpression),
     SubgroupOperationResult(SubgroupOperationResultExpression),
+    CooperativeLoad(CooperativeLoadExpression),
+    CooperativeMultiplyAdd(CooperativeMultiplyAddExpression),
 );
 
 impl From<naga::Expression> for Expression {
@@ -296,6 +300,22 @@ impl From<naga::Expression> for Expression {
             SubgroupBallotResult => Self::SubgroupBallotResult(SubgroupBallotResultExpression {}),
             SubgroupOperationResult { ty } => {
                 Self::SubgroupOperationResult(SubgroupOperationResultExpression { ty })
+            }
+            CooperativeLoad {
+                columns,
+                rows,
+                role,
+                data,
+            } => {
+                Self::CooperativeLoad(CooperativeLoadExpression {
+                    columns,
+                    rows,
+                    role,
+                    data,
+                })
+            }
+            CooperativeMultiplyAdd { a, b, c } => {
+                Self::CooperativeMultiplyAdd(CooperativeMultiplyAddExpression { a, b, c })
             }
         }
     }

@@ -22,3 +22,15 @@ impl CompileStatement for StoreStatement {
         pointer.deref_store(compiler.context, &mut compiler.function_builder, &value)
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct CooperativeStoreStatement {
+    pub target: naga::Handle<naga::Expression>,
+    pub data: naga::CooperativeData,
+}
+
+impl CompileStatement for CooperativeStoreStatement {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+        todo!("compile cooperative store statement");
+    }
+}

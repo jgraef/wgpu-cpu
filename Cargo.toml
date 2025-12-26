@@ -3,6 +3,6 @@ resolver = "2"
 members = ["naga-interpreter", "wgpu-cpu", "wgpu-cpu-tests"]
 
 [patch.crates-io]
-wgpu = { path = "../wgpu/wgpu" }
-naga = { path = "../wgpu/naga" }
+wgpu = { git = "https://github.com/jgraef/wgpu.git", branch = "switch/cpu-renderer" }
+naga = { git = "https://github.com/jgraef/wgpu.git", branch = "switch/cpu-renderer" }
 approx = { git = "https://github.com/jgraef/approx.git", branch = "array" }

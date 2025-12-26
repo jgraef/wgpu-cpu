@@ -101,6 +101,7 @@ define_statement!(
     SubgroupBallot(SubgroupBallotStatement),
     SubgroupGather(SubgroupGatherStatement),
     SubgroupCollectiveOperation(SubgroupCollectiveOperationStatement),
+    CooperativeStore(CooperativeStoreStatement),
 );
 
 pub trait CompileStatement {
@@ -257,6 +258,13 @@ impl From<&naga::Statement> for Statement {
                     collective_operation: *collective_op,
                     argument: *argument,
                     result: *result,
+                }
+                .into()
+            }
+            CooperativeStore { target, data } => {
+                CooperativeStoreStatement {
+                    target: *target,
+                    data: *data,
                 }
                 .into()
             }

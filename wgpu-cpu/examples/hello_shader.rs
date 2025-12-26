@@ -104,7 +104,7 @@ impl App {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("hello_triangle pipeline layout"),
             bind_group_layouts: &[],
-            immediates_ranges: &[],
+            immediate_size: 0,
         });
 
         Ok(Self {

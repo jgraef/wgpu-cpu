@@ -21,7 +21,7 @@ fn colored_triangle_helper(
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("hello_triangle pipeline layout"),
         bind_group_layouts: &[],
-        immediates_ranges: &[],
+        immediate_size: 0,
     });
 
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;

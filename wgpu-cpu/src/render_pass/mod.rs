@@ -110,7 +110,7 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
             .push(RenderPassSubCommand::SetVertexBuffer { buffer_slice, slot });
     }
 
-    fn set_immediates(&mut self, stages: wgpu::ShaderStages, offset: u32, data: &[u8]) {
+    fn set_immediates(&mut self, offset: u32, data: &[u8]) {
         todo!()
     }
 

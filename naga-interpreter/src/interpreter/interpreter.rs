@@ -309,6 +309,7 @@ where
                 argument,
                 result,
             } => todo!(),
+            Statement::CooperativeStore { target, data } => todo!(),
         }
 
         ControlFlow::Continue(())
@@ -503,6 +504,13 @@ where
             Expression::RayQueryGetIntersection { query, committed } => todo!(),
             Expression::SubgroupBallotResult => todo!(),
             Expression::SubgroupOperationResult { ty } => todo!(),
+            Expression::CooperativeLoad {
+                columns,
+                rows,
+                role,
+                data,
+            } => todo!(),
+            Expression::CooperativeMultiplyAdd { a, b, c } => todo!(),
         }
     }
 
@@ -617,6 +625,12 @@ where
             TypeInner::AccelerationStructure { vertex_return } => todo!(),
             TypeInner::RayQuery { vertex_return } => todo!(),
             TypeInner::BindingArray { base, size } => todo!(),
+            TypeInner::CooperativeMatrix {
+                columns,
+                rows,
+                scalar,
+                role,
+            } => todo!(),
         }
     }
 

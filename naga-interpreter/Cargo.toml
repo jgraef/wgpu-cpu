@@ -15,13 +15,13 @@ derive_more = { version = "2.1.0", features = ["debug", "from", "into"] }
 either = "1.15.0"
 half = { version = "2.7.1", features = ["bytemuck"] }
 memoffset = "0.9.1"
-naga = "27.0.0"
+naga = "28.0.0"
 thiserror = "2.0.17"
 tracing = "0.1.43"
 
 [dev-dependencies]
 approx = "0.5.1"
-naga = { version = "27.0.0", features = ["wgsl-in"] }
+naga = { version = "28.0.0", features = ["wgsl-in"] }
 
 [features]
 interpreter = []

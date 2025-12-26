@@ -313,6 +313,12 @@ where
             TypeInner::AccelerationStructure { vertex_return } => todo!(),
             TypeInner::RayQuery { vertex_return } => todo!(),
             TypeInner::BindingArray { base, size } => todo!(),
+            TypeInner::CooperativeMatrix {
+                columns,
+                rows,
+                scalar,
+                role,
+            } => todo!(),
         }
 
         write!(f, " ({ty:?} @ {:?})", self.variable.slice)?;

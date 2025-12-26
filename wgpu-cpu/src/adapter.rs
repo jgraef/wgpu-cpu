@@ -98,6 +98,10 @@ impl wgpu::custom::AdapterInterface for Adapter {
     fn get_presentation_timestamp(&self) -> wgpu::PresentationTimestamp {
         todo!()
     }
+
+    fn cooperative_matrix_properties(&self) -> Vec<wgpu::wgt::CooperativeMatrixProperties> {
+        todo!()
+    }
 }
 
 fn check_features(required_features: &wgpu::Features) -> Result<(), wgpu::RequestDeviceError> {

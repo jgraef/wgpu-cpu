@@ -31,7 +31,7 @@ impl wgpu::custom::PipelineLayoutInterface for PipelineLayout {}
 pub struct PipelineLayoutDescriptor {
     pub label: Option<String>,
     pub bind_group_layouts: Vec<BindGroupLayout>,
-    pub immediates_ranges: Vec<wgpu::ImmediateRange>,
+    pub immediate_size: u32,
 }
 
 impl PipelineLayoutDescriptor {
@@ -43,7 +43,7 @@ impl PipelineLayoutDescriptor {
                 .iter()
                 .map(|layout| layout.as_custom::<BindGroupLayout>().unwrap().clone())
                 .collect(),
-            immediates_ranges: layout.immediates_ranges.to_vec(),
+            immediate_size: layout.immediate_size,
         }
     }
 }

@@ -617,27 +617,25 @@ impl Type {
         source: &naga::Module,
         handle: naga::Handle<naga::Type>,
     ) -> Result<Self, InvalidType> {
+        use naga::TypeInner::*;
+
         let ty = &source.types[handle];
         let output = match &ty.inner {
-            naga::TypeInner::Scalar(scalar) => ScalarType::from_naga(*scalar)?.into(),
-            naga::TypeInner::Vector { size, scalar } => {
-                VectorType::from_naga(*scalar, *size)?.into()
-            }
-            naga::TypeInner::Matrix {
+            Scalar(scalar) => ScalarType::from_naga(*scalar)?.into(),
+            Vector { size, scalar } => VectorType::from_naga(*scalar, *size)?.into(),
+            Matrix {
                 columns,
                 rows,
                 scalar,
             } => MatrixType::from_naga(*scalar, *columns, *rows)?.into(),
-            naga::TypeInner::Atomic(_scalar) => todo!("atomic scalar"),
-            naga::TypeInner::Pointer { base, space } => {
-                PointerType::from_naga(*base, *space)?.into()
-            }
-            naga::TypeInner::ValuePointer {
+            Atomic(_scalar) => todo!("atomic scalar"),
+            Pointer { base, space } => PointerType::from_naga(*base, *space)?.into(),
+            ValuePointer {
                 size,
                 scalar,
                 space,
             } => PointerType::from_naga_value(*scalar, *size, *space)?.into(),
-            naga::TypeInner::Array { base, size, stride } => {
+            Array { base, size, stride } => {
                 let size = match size.resolve(source.to_ctx()) {
                     Ok(naga::proc::IndexableLength::Known(n)) => Some(n),
                     Ok(naga::proc::IndexableLength::Dynamic) => None,
@@ -649,21 +647,27 @@ impl Type {
                     stride: *stride,
                 })
             }
-            naga::TypeInner::Struct {
+            Struct {
                 members: _,
                 span: _,
             } => Self::Struct(StructType { handle }),
-            naga::TypeInner::Image {
+            Image {
                 dim: _,
                 arrayed: _,
                 class: _,
             } => todo!("image type"),
-            naga::TypeInner::Sampler { comparison: _ } => todo!("sampler type"),
-            naga::TypeInner::AccelerationStructure { vertex_return: _ } => {
+            Sampler { comparison: _ } => todo!("sampler type"),
+            AccelerationStructure { vertex_return: _ } => {
                 todo!("acceleration structure type")
             }
-            naga::TypeInner::RayQuery { vertex_return: _ } => todo!("ray query type"),
-            naga::TypeInner::BindingArray { base: _, size: _ } => todo!("binding array type"),
+            RayQuery { vertex_return: _ } => todo!("ray query type"),
+            BindingArray { base: _, size: _ } => todo!("binding array type"),
+            CooperativeMatrix {
+                columns: _,
+                rows: _,
+                scalar: _,
+                role: _,
+            } => todo!("cooperative matrix type"),
         };
 
         Ok(output)

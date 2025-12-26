@@ -17,7 +17,8 @@ derive_more = { version = "2.1.0", features = [
 ] }
 image = { version = "0.25.9", optional = true }
 itertools = "0.14.0"
-naga = { version = "27.0.0", features = ["wgsl-in"] }
+# we need to enable one of a few out features to enable `naga::back::pipeline_constants::process_overrides`
+naga = { version = "28.0.0", features = ["wgsl-in", "glsl-out"] }
 naga-interpreter = { version = "0.1.0", path = "../naga-interpreter", features = [
     "interpreter",
     "compiler",
@@ -30,7 +31,7 @@ parking_lot = { version = "0.12.5", features = ["arc_lock", "send_guard"] }
 softbuffer = { version = "0.4.6", optional = true }
 thiserror = "2.0.17"
 tracing = "0.1.43"
-wgpu = { version = "27.0.0", default-features = false, features = [
+wgpu = { version = "28.0.0", default-features = false, features = [
     "custom",
     "wgsl",
 ] }
