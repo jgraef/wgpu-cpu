@@ -18,14 +18,11 @@ use wgpu::{
     },
 };
 
-use crate::{
-    adapter::Adapter,
-    shader::ShaderBackend,
-};
+use crate::adapter::Adapter;
 
 #[derive(Clone, Debug, Default)]
 pub struct InstanceConfig {
-    pub shader_backend: ShaderBackend,
+    // todo
 }
 
 #[derive(Debug)]

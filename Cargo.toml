@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["naga-interpreter", "wgpu-cpu", "wgpu-cpu-tests"]
+members = ["naga-cranelift", "wgpu-cpu", "wgpu-cpu-tests"]
 
 [patch.crates-io]
 wgpu = { git = "https://github.com/jgraef/wgpu.git", branch = "switch/cpu-renderer" }

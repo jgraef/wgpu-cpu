@@ -1,0 +1,23 @@
+[package]
+name = "naga-cranelift"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrayvec = "0.7.6"
+bytemuck = "1.24.0"
+cranelift-codegen = "0.126.1"
+cranelift-frontend = "0.126.1"
+cranelift-jit = "0.126.1"
+cranelift-module = "0.126.1"
+cranelift-native = "0.126.1"
+derive_more = { version = "2.1.0", features = ["debug", "from", "into"] }
+half = { version = "2.7.1", features = ["bytemuck"] }
+memoffset = "0.9.1"
+naga = "28.0.0"
+thiserror = "2.0.17"
+tracing = "0.1.43"
+
+[dev-dependencies]
+approx = "0.5.1"
+naga = { version = "28.0.0", features = ["wgsl-in"] }

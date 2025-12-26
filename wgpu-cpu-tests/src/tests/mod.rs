@@ -16,10 +16,7 @@ use image::{
     ImageReader,
     RgbaImage,
 };
-use wgpu_cpu::{
-    Config,
-    ShaderBackend,
-};
+use wgpu_cpu::Config;
 
 use crate::util::{
     check_eq_image,
@@ -28,29 +25,10 @@ use crate::util::{
 
 mod colored_triangle;
 
-pub const ALL_SHADER_BACKENDS: &[ShaderBackend] = &[
-    wgpu_cpu::ShaderBackend::Interpreter,
-    wgpu_cpu::ShaderBackend::Compiler,
-];
-
 #[derive(Debug)]
 pub struct TestFunction {
     pub name: &'static str,
     pub renderer: fn(wgpu::Device, wgpu::Queue) -> RgbaImage,
-    pub shader_backends: &'static [ShaderBackend],
-}
-
-impl TestFunction {
-    pub fn shader_backends(&self) -> impl Iterator<Item = ShaderBackend> {
-        if self.shader_backends.is_empty() {
-            ALL_SHADER_BACKENDS
-        }
-        else {
-            self.shader_backends
-        }
-        .into_iter()
-        .copied()
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,35 +42,18 @@ impl<'files> Test<'files> {
         self.test.name
     }
 
-    pub fn run(&self, test_config: &TestConfig) -> Result<TestResults, Error> {
-        let reference = self.files.load_reference(self.test.name)?;
-        let mut test_results = vec![];
-
-        let shader_backends = self
-            .test
-            .shader_backends()
-            .filter(|backend| test_config.shader_backends.contains(backend));
-
-        for shader_backend in shader_backends {
-            let config = Config { shader_backend };
-            let test_result = self.run_with(&reference, config)?;
-            test_results.push((format!("{shader_backend:?}"), test_result));
-        }
-
-        Ok(test_results)
-    }
-
-    pub fn run_with(&self, reference: &RgbaImage, config: Config) -> Result<TestResult, Error> {
+    pub fn run(&self) -> Result<TestResult, Error> {
         let render_result = catch_unwind(|| {
-            let (device, queue) = create_device_and_queue(config.clone());
+            let (device, queue) = create_device_and_queue(Default::default());
             (self.test.renderer)(device, queue)
         });
 
         let test_result = match render_result {
             Ok(rendered) => {
-                self.files
-                    .save_output(self.test.name, config.shader_backend, &rendered)?;
-                if let Err(error) = check_eq_image(reference, &rendered) {
+                self.files.save_output(self.test.name, &rendered)?;
+
+                let reference = self.files.load_reference(self.test.name)?;
+                if let Err(error) = check_eq_image(&reference, &rendered) {
                     TestResult::ImageTestFailed(error)
                 }
                 else {
@@ -150,8 +111,6 @@ impl TestResult {
     }
 }
 
-pub type TestResults = Vec<(String, TestResult)>;
-
 #[derive(Debug, clap::Args)]
 pub struct TestFiles {
     /// Path to reference files.
@@ -191,14 +150,8 @@ impl TestFiles {
         Ok(())
     }
 
-    fn save_output(
-        &self,
-        test_name: &str,
-        backend: ShaderBackend,
-        output: &RgbaImage,
-    ) -> Result<(), Error> {
+    fn save_output(&self, test_name: &str, output: &RgbaImage) -> Result<(), Error> {
         let mut path = self.output.clone();
-        path.push(output_directory(backend));
         std::fs::create_dir_all(&path)?;
         path.push(format!("{}.png", test_name));
 
@@ -206,13 +159,6 @@ impl TestFiles {
             .save(&path)
             .map_err(|error| eyre!("Could not save output: {}: {error}", path.display()))?;
         Ok(())
-    }
-}
-
-fn output_directory(backend: ShaderBackend) -> &'static str {
-    match backend {
-        ShaderBackend::Interpreter => "interpreter",
-        ShaderBackend::Compiler => "compiler",
     }
 }
 
@@ -224,7 +170,6 @@ macro_rules! test {
         inventory::submit! {crate::tests::TestFunction {
             name: stringify!($func),
             renderer: $func,
-            shader_backends: &[],
         }}
     };
 }
@@ -283,9 +228,4 @@ impl Tests {
 
         Ok(())
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct TestConfig {
-    pub shader_backends: Vec<ShaderBackend>,
 }

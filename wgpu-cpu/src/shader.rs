@@ -1,24 +1,19 @@
 use std::sync::Arc;
 
-use naga_interpreter::{
+use naga_cranelift::{
+    CompiledModule,
     bindings::{
         BindingLocation,
-        ShaderInput,
-        ShaderOutput,
-        UserDefinedInterStageBuffer,
         UserDefinedInterStageLayout,
     },
-    entry_point::{
-        EntryPointIndex,
-        EntryPointNotFound,
-        InterStageLayout,
-    },
-    memory::{
-        ReadMemory,
-        WriteMemory,
-    },
+    compile_jit,
 };
 use parking_lot::Mutex;
+
+use crate::shader::memory::{
+    ReadMemory,
+    WriteMemory,
+};
 
 #[derive(Clone, Debug)]
 pub struct ShaderModule {
@@ -30,12 +25,10 @@ struct Inner {
     module: naga::Module,
     info: naga::valid::ModuleInfo,
     compilation_info: wgpu::CompilationInfo,
-    backend: ShaderBackend,
 }
 
 impl ShaderModule {
     pub fn new(
-        backend: ShaderBackend,
         shader_source: wgpu::ShaderSource,
         shader_bound_checks: wgpu::ShaderRuntimeChecks,
     ) -> Result<Self, Error> {
@@ -52,7 +45,6 @@ impl ShaderModule {
                 module,
                 info,
                 compilation_info: wgpu::CompilationInfo { messages: vec![] },
-                backend,
             }),
         })
     }
@@ -60,7 +52,7 @@ impl ShaderModule {
     pub fn for_pipeline(
         &self,
         pipeline_compilation_options: &wgpu::PipelineCompilationOptions,
-    ) -> Result<PipelineShaderModule, Error> {
+    ) -> Result<CompiledModule, Error> {
         let constants = pipeline_compilation_options
             .constants
             .iter()
@@ -76,21 +68,7 @@ impl ShaderModule {
 
         // todo: get necessary info for early depth test here and store it
 
-        let module = match self.inner.backend {
-            ShaderBackend::Interpreter => {
-                PipelineShaderModule::Interpreted {
-                    module: naga_interpreter::interpreter::InterpretedModule::new(
-                        module.into_owned(),
-                        info.into_owned(),
-                    )?,
-                }
-            }
-            ShaderBackend::Compiler => {
-                PipelineShaderModule::Compiled {
-                    module: naga_interpreter::compiler::compile_jit(&module, &info)?,
-                }
-            }
-        };
+        let module = compile_jit(&module, &info)?;
 
         Ok(module)
     }
@@ -120,69 +98,7 @@ pub enum Error {
     PipelineConstants(#[from] naga::back::pipeline_constants::PipelineConstantError),
 
     #[error(transparent)]
-    Interpreter(#[from] naga_interpreter::interpreter::Error),
-
-    #[error(transparent)]
-    Compiler(#[from] naga_interpreter::compiler::Error),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum ShaderBackend {
-    #[default]
-    Interpreter,
-    Compiler,
-}
-
-#[derive(Clone, Debug)]
-pub enum PipelineShaderModule {
-    Interpreted {
-        module: naga_interpreter::interpreter::InterpretedModule,
-    },
-    Compiled {
-        module: naga_interpreter::compiler::CompiledModule,
-    },
-}
-
-impl naga_interpreter::backend::Module for PipelineShaderModule {
-    fn find_entry_point(
-        &self,
-        name: Option<&str>,
-        stage: naga::ShaderStage,
-    ) -> Result<EntryPointIndex, EntryPointNotFound> {
-        match self {
-            PipelineShaderModule::Interpreted { module } => module.find_entry_point(name, stage),
-            PipelineShaderModule::Compiled { module } => module.find_entry_point(name, stage),
-        }
-    }
-
-    fn run_entry_point<I, O>(&self, index: EntryPointIndex, input: I, output: O)
-    where
-        I: ShaderInput,
-        O: ShaderOutput,
-    {
-        match self {
-            PipelineShaderModule::Interpreted { module } => {
-                module.run_entry_point(index, input, output)
-            }
-            PipelineShaderModule::Compiled { module } => {
-                module.run_entry_point(index, input, output)
-            }
-        }
-    }
-
-    fn inter_stage_layout(&self, entry_point: EntryPointIndex) -> Option<&InterStageLayout> {
-        match self {
-            PipelineShaderModule::Interpreted { module } => module.inter_stage_layout(entry_point),
-            PipelineShaderModule::Compiled { module } => module.inter_stage_layout(entry_point),
-        }
-    }
-
-    fn early_depth_test(&self, entry_point: EntryPointIndex) -> Option<naga::EarlyDepthTest> {
-        match self {
-            PipelineShaderModule::Interpreted { module } => module.early_depth_test(entry_point),
-            PipelineShaderModule::Compiled { module } => module.early_depth_test(entry_point),
-        }
-    }
+    Compiler(#[from] naga_cranelift::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +126,33 @@ impl UserDefinedIoBufferPool {
                 free: self.free.clone(),
             },
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UserDefinedInterStageBuffer {
+    data: Vec<u8>,
+    layout: UserDefinedInterStageLayout,
+}
+
+impl UserDefinedInterStageBuffer {
+    pub fn new(layout: UserDefinedInterStageLayout) -> Self {
+        let data = vec![0; layout.size() as usize];
+        Self { data, layout }
+    }
+}
+
+impl ReadMemory<BindingLocation> for UserDefinedInterStageBuffer {
+    fn read(&self, address: BindingLocation) -> &[u8] {
+        let layout = self.layout[address];
+        &self.data[layout.range()]
+    }
+}
+
+impl WriteMemory<BindingLocation> for UserDefinedInterStageBuffer {
+    fn write(&mut self, address: BindingLocation) -> &mut [u8] {
+        let layout = self.layout[address];
+        &mut self.data[layout.range()]
     }
 }
 
@@ -259,5 +202,90 @@ pub struct UserDefinedInterStagePoolBuffer {
 impl ReadMemory<BindingLocation> for UserDefinedInterStagePoolBuffer {
     fn read(&self, address: BindingLocation) -> &[u8] {
         self.inner.buffer.read(address)
+    }
+}
+
+pub mod memory {
+    // do we need this? should we move this? this is leftover from when we still had
+    // an interpreter
+
+    use std::fmt::Debug;
+
+    pub trait ReadMemory<A> {
+        fn read(&self, address: A) -> &[u8];
+    }
+
+    impl<T, A> ReadMemory<A> for &T
+    where
+        T: ReadMemory<A>,
+    {
+        fn read(&self, address: A) -> &[u8] {
+            T::read(self, address)
+        }
+    }
+
+    impl<T, A> ReadMemory<A> for &mut T
+    where
+        T: ReadMemory<A>,
+    {
+        fn read(&self, address: A) -> &[u8] {
+            T::read(self, address)
+        }
+    }
+
+    pub trait WriteMemory<A> {
+        fn write(&mut self, address: A) -> &mut [u8];
+    }
+
+    impl<T, A> WriteMemory<A> for &mut T
+    where
+        T: WriteMemory<A>,
+    {
+        fn write(&mut self, address: A) -> &mut [u8] {
+            T::write(self, address)
+        }
+    }
+
+    pub trait ReadWriteMemory<A>: ReadMemory<A> + WriteMemory<A> {
+        fn copy(&mut self, source: A, target: A);
+    }
+
+    impl<T, A> ReadWriteMemory<A> for &mut T
+    where
+        T: ReadWriteMemory<A>,
+    {
+        fn copy(&mut self, source: A, target: A) {
+            T::copy(self, source, target)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct NullMemory;
+
+    impl<A> ReadMemory<A> for NullMemory
+    where
+        A: Debug,
+    {
+        fn read(&self, address: A) -> &[u8] {
+            panic!("Attempt to read from NullMemory: {address:?}");
+        }
+    }
+
+    impl<A> WriteMemory<A> for NullMemory
+    where
+        A: Debug,
+    {
+        fn write(&mut self, address: A) -> &mut [u8] {
+            panic!("Attempt to write to NullMemory: {address:?}",);
+        }
+    }
+
+    impl<A> ReadWriteMemory<A> for NullMemory
+    where
+        A: Debug,
+    {
+        fn copy(&mut self, source: A, target: A) {
+            panic!("Attempt to copy in NullMemory: From {source:?} to {target:?}");
+        }
     }
 }

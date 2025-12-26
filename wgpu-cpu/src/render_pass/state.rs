@@ -3,9 +3,9 @@ use std::{
     ops::Range,
 };
 
-use naga_interpreter::{
-    backend::Module,
-    entry_point::InterStageLayout,
+use naga_cranelift::{
+    bindings::InterStageLayout,
+    product::EntryPointError,
 };
 use nalgebra::{
     Point2,
@@ -156,10 +156,8 @@ impl<'pass> State<'pass> {
 
         // todo: we should probably just store one layout for inter-stage variables and
         // verify at pipeline creation that vertex/fragment layouts match
-        let vertex_output_layout = match &vertex_state
-            .module
-            .inter_stage_layout(vertex_state.entry_point_index)
-        {
+        let entry_point = vertex_state.module.entry_point(vertex_state.entry_point);
+        let vertex_output_layout = match &entry_point.inter_stage_layout() {
             Some(InterStageLayout::Vertex { output }) => output,
             Some(_) => panic!("user defined io layouts for entry point are not for vertex stage"),
             None => panic!("no user defined io layouts available for entry point"),
@@ -489,8 +487,11 @@ impl<'pass> RenderState<'pass> {
 
             // process vertices
             let vertices = vertex_indices.map(|item| {
+                // todo: propagate error and skip whole primitive if a vertex fails
                 item.process(|vertex| {
-                    vertex_processing.process(pipeline_state, instance_index, vertex)
+                    vertex_processing
+                        .process(pipeline_state, instance_index, vertex)
+                        .expect("vertex processing failed")
                 })
             });
 
@@ -563,11 +564,23 @@ impl<'pass> RenderState<'pass> {
                             }
 
                             // run fragment shader
-                            fragment_state.module.run_entry_point(
-                                fragment_state.entry_point_index,
-                                &input,
-                                &mut output,
-                            );
+                            let entry_point = fragment_state
+                                .module
+                                .entry_point(fragment_state.entry_point);
+
+                            match entry_point.run(&input, &mut output) {
+                                Ok(()) => {}
+                                Err(EntryPointError::Killed) => {
+                                    // the fragment shader ran discard. it won't
+                                    // have written to its color/depth
+                                    // attachments, so we don't have to do
+                                    // anything here
+                                }
+                                result => {
+                                    // some other error. for now we'll panic
+                                    result.expect("fragment shader failed");
+                                }
+                            }
                         }
                     }
                 }

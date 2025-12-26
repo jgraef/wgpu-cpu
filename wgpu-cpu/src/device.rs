@@ -89,12 +89,7 @@ impl wgpu::custom::DeviceInterface for Device {
         shader_bound_checks: wgpu::ShaderRuntimeChecks,
     ) -> wgpu::custom::DispatchShaderModule {
         wgpu::custom::DispatchShaderModule::custom(
-            ShaderModule::new(
-                self.inner.instance_config.shader_backend,
-                desc.source,
-                shader_bound_checks,
-            )
-            .unwrap(),
+            ShaderModule::new(desc.source, shader_bound_checks).unwrap(),
         )
     }
 

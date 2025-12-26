@@ -19,10 +19,7 @@ image = { version = "0.25.9", optional = true }
 itertools = "0.14.0"
 # we need to enable one of a few out features to enable `naga::back::pipeline_constants::process_overrides`
 naga = { version = "28.0.0", features = ["wgsl-in", "glsl-out"] }
-naga-interpreter = { version = "0.1.0", path = "../naga-interpreter", features = [
-    "interpreter",
-    "compiler",
-] }
+naga-cranelift = { version = "0.1.0", path = "../naga-cranelift" }
 nalgebra = { version = "0.34.1", default-features = false, features = [
     "bytemuck",
 ] }

@@ -4,15 +4,18 @@ use naga::{
     ShaderStage,
     Type,
 };
-use naga_interpreter::{
-    backend::Module,
+use naga_cranelift::{
+    CompiledModule,
     bindings::{
         BindingLocation,
         ShaderInput,
         ShaderOutput,
     },
-    entry_point::EntryPointIndex,
-    memory::WriteMemory,
+    product::{
+        EntryPointError,
+        EntryPointIndex,
+    },
+    runtime::DefaultRuntimeError,
 };
 
 use crate::{
@@ -28,17 +31,16 @@ use crate::{
     },
     shader::{
         Error,
-        PipelineShaderModule,
         ShaderModule,
         UserDefinedInterStagePoolBuffer,
+        memory::WriteMemory,
     },
 };
 
 #[derive(Debug)]
 pub struct VertexState {
-    pub module: PipelineShaderModule,
-    pub entry_point_name: Option<String>,
-    pub entry_point_index: EntryPointIndex,
+    pub module: CompiledModule,
+    pub entry_point: EntryPointIndex,
     pub vertex_buffer_layouts: Vec<VertexBufferLayout>,
     pub vertex_buffer_locations: Vec<Option<VertexBufferLocation>>,
 }
@@ -49,7 +51,7 @@ impl VertexState {
 
         let module = module.for_pipeline(&vertex.compilation_options)?;
 
-        let entry_point_index = module
+        let entry_point = module
             .find_entry_point(vertex.entry_point.as_deref(), ShaderStage::Vertex)
             .unwrap();
 
@@ -82,9 +84,7 @@ impl VertexState {
 
         Ok(Self {
             module,
-            entry_point_name: vertex.entry_point.map(ToOwned::to_owned),
-            entry_point_index,
-
+            entry_point,
             vertex_buffer_layouts,
             vertex_buffer_locations,
         })
@@ -242,7 +242,7 @@ impl<User> AsMut<ClipPosition> for VertexOutput<User> {
 pub struct VertexProcessingState<'pipeline, 'state> {
     vertex_locations: &'pipeline [Option<VertexBufferLocation>],
     vertex_buffers: Vec<VertexBufferInput<'state>>,
-    module: PipelineShaderModule,
+    module: CompiledModule,
     entry_point: EntryPointIndex,
 }
 
@@ -271,7 +271,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
             vertex_locations: &vertex_state.vertex_buffer_locations,
             vertex_buffers,
             module: vertex_state.module.clone(),
-            entry_point: vertex_state.entry_point_index,
+            entry_point: vertex_state.entry_point,
         }
     }
 
@@ -280,7 +280,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
         pipeline_state: &RenderPipelineState,
         instance_index: u32,
         vertex_index: u32,
-    ) -> VertexOutput<UserDefinedInterStagePoolBuffer> {
+    ) -> Result<VertexOutput<UserDefinedInterStagePoolBuffer>, VertexProcessingError> {
         // create vertex output. this allocates buffers for the user-defined vertex
         // output.
         let mut vertex_output = VertexOutput {
@@ -289,8 +289,8 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
         };
 
         // run vertex shaders
-        self.module.run_entry_point(
-            self.entry_point,
+        let entry_point = self.module.entry_point(self.entry_point);
+        entry_point.run(
             VertexInput {
                 vertex_index,
                 instance_index,
@@ -298,11 +298,18 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
                 vertex_locations: &self.vertex_locations,
             },
             &mut vertex_output,
-        );
+        )?;
 
-        VertexOutput {
+        Ok(VertexOutput {
             clip_position: vertex_output.clip_position,
             inter_stage_variables: vertex_output.inter_stage_variables.read_only(),
-        }
+        })
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct VertexProcessingError {
+    #[from]
+    pub inner: EntryPointError<DefaultRuntimeError>,
 }

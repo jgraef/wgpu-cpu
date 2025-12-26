@@ -6,15 +6,14 @@ use naga::{
     Type,
     VectorSize,
 };
-use naga_interpreter::{
-    backend::Module,
+use naga_cranelift::{
+    CompiledModule,
     bindings::{
         BindingLocation,
         ShaderInput,
         ShaderOutput,
     },
-    entry_point::EntryPointIndex,
-    memory::ReadMemory,
+    product::EntryPointIndex,
 };
 use nalgebra::{
     Point2,
@@ -31,8 +30,8 @@ use crate::{
     },
     shader::{
         Error,
-        PipelineShaderModule,
         ShaderModule,
+        memory::ReadMemory,
     },
     texture::{
         TextureInfo,
@@ -44,9 +43,8 @@ use crate::{
 
 #[derive(Debug)]
 pub struct FragmentState {
-    pub module: PipelineShaderModule,
-    pub entry_point_name: Option<String>,
-    pub entry_point_index: EntryPointIndex,
+    pub module: CompiledModule,
+    pub entry_point: EntryPointIndex,
     pub targets: Vec<Option<wgpu::ColorTargetState>>,
 }
 
@@ -55,20 +53,20 @@ impl FragmentState {
         let module = fragment.module.as_custom::<ShaderModule>().unwrap().clone();
         let module = module.for_pipeline(&fragment.compilation_options)?;
 
-        let entry_point_index = module
+        let entry_point = module
             .find_entry_point(fragment.entry_point.as_deref(), ShaderStage::Fragment)
             .unwrap();
 
         Ok(Self {
             module,
-            entry_point_name: fragment.entry_point.map(ToOwned::to_owned),
-            entry_point_index,
+            entry_point,
             targets: fragment.targets.to_vec(),
         })
     }
 
     pub fn early_depth_test(&self, evaluate: impl FnOnce() -> bool) -> bool {
-        match self.module.early_depth_test(self.entry_point_index) {
+        let entry_point = self.module.entry_point(self.entry_point);
+        match entry_point.early_depth_test() {
             None => true,
             Some(naga::EarlyDepthTest::Force) => evaluate(),
             Some(naga::EarlyDepthTest::Allow { conservative }) => todo!("EarlyDepthTest::Allow"),

@@ -19,10 +19,7 @@ mod util;
 pub use image::dump_texture;
 
 use crate::instance::Instance;
-pub use crate::{
-    instance::InstanceConfig as Config,
-    shader::ShaderBackend,
-};
+pub use crate::instance::InstanceConfig as Config;
 
 pub fn instance(config: Config) -> wgpu::Instance {
     wgpu::Instance::from_custom(Instance::new(config))
