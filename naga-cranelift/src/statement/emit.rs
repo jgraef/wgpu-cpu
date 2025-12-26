@@ -2,7 +2,10 @@ use crate::{
     Error,
     expression::CompileExpression,
     function::FunctionCompiler,
-    statement::CompileStatement,
+    statement::{
+        CompileStatement,
+        ControlFlow,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -11,11 +14,12 @@ pub struct EmitStatement {
 }
 
 impl CompileStatement for EmitStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         for expression in self.expressions.clone() {
             // all compiled expressions are automatically stored as emitted.
             expression.compile_expression(compiler)?;
         }
-        Ok(())
+
+        Ok(ControlFlow::Continue)
     }
 }

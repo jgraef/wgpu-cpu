@@ -407,13 +407,8 @@ fn invalid_binding(binding: &Binding) -> ! {
     panic!("Binding not supported: {binding:?}");
 }
 
-fn bytes_of_bool_as_u32(b: bool) -> &'static [u8] {
-    if b {
-        bytemuck::bytes_of(&1u32)
-    }
-    else {
-        bytemuck::bytes_of(&0u32)
-    }
+fn bytes_of_bool_as_u8(b: bool) -> &'static [u8] {
+    if b { &[1] } else { &[0] }
 }
 
 fn evaluate_compare_function<T>(

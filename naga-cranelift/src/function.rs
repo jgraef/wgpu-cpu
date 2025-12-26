@@ -396,7 +396,11 @@ where
     function_compiler.initialize_local_variables()?;
     function_compiler.import_functions(function_declarations, output)?;
     let body = BlockStatement::from(&function.body);
-    body.compile_statement(&mut function_compiler)?;
+    let function_body_control_flow = body.compile_statement(&mut function_compiler)?;
+    assert!(
+        function_body_control_flow.is_diverged(),
+        "function body control flow must diverge"
+    );
     function_compiler.finish();
 
     output.define_function(declaration.function_id, cl_context)?;

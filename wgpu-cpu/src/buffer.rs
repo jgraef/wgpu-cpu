@@ -1,8 +1,10 @@
 use std::{
     ops::{
+        Bound,
         Deref,
         DerefMut,
         Range,
+        RangeBounds,
     },
     sync::Arc,
 };
@@ -53,7 +55,7 @@ impl Buffer {
     }
 
     #[track_caller]
-    pub fn slice(&self, range: Range<usize>) -> BufferSlice {
+    pub fn slice(&self, range: impl RangeBounds<usize>) -> BufferSlice {
         BufferSlice {
             buffer: self.clone(),
             range: sub_range(0..self.size, range),
@@ -452,19 +454,30 @@ impl wgpu::custom::BufferMappedRangeInterface for BufferMappedRange {
 }
 
 #[track_caller]
-fn sub_range(range: Range<usize>, sub_range: Range<usize>) -> Range<usize> {
-    let start = range.start + sub_range.start;
+fn sub_range(range: Range<usize>, sub_range: impl RangeBounds<usize>) -> Range<usize> {
+    let start = match sub_range.start_bound() {
+        Bound::Included(index) => range.start + index,
+        Bound::Excluded(index) => range.start + index + 1,
+        Bound::Unbounded => range.start,
+    };
+    let end = match sub_range.end_bound() {
+        Bound::Included(index) => range.start + index + 1,
+        Bound::Excluded(index) => range.start + index,
+        Bound::Unbounded => range.end,
+    };
+
     assert!(
         start <= range.end,
         "New range start exceeds original range end: {start} < {}",
         range.end
     );
-    let end = start + sub_range.end - sub_range.start;
+
     assert!(
         end <= range.end,
         "New range end exceeds original range end: {end} < {}",
         range.end
     );
+
     start..end
 }
 

@@ -613,20 +613,3 @@ where
         layout.private_memory_layout
     }
 }
-
-pub trait FuncBuilderExt {
-    fn switch_to_void_block(&mut self);
-}
-
-impl<'a> FuncBuilderExt for FunctionBuilder<'a> {
-    fn switch_to_void_block(&mut self) {
-        // todo: return early from compiling a block with ControlFlow instead.
-        let void_block = self.create_block();
-        self.seal_block(void_block);
-        self.set_cold_block(void_block); // very cold lol
-        self.switch_to_block(void_block);
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct FunctionCallResult(pub ir::Value);

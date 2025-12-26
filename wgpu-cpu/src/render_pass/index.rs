@@ -1,4 +1,7 @@
-use std::marker::PhantomData;
+use std::{
+    any::type_name,
+    marker::PhantomData,
+};
 
 use bytemuck::Pod;
 
@@ -110,10 +113,96 @@ pub struct IndexBufferBinding {
 
 impl IndexBufferBinding {
     pub fn begin<Index>(&self, base_vertex: i32) -> IndirectIndices<'_, Index> {
+        tracing::debug!(
+            index_type = type_name::<Index>(),
+            base_vertex,
+            "begin index resolution"
+        );
+
         IndirectIndices {
             base_vertex,
             index_buffer_guard: self.buffer_slice.read(),
             _phantom: PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytemuck::Pod;
+
+    use crate::{
+        buffer::Buffer,
+        render_pass::index::{
+            DirectIndices,
+            IndexBufferBinding,
+            IndexResolution,
+            IndirectIndices,
+        },
+    };
+
+    #[test]
+    fn direct_indices() {
+        let direct_indices = DirectIndices;
+
+        for i in 0..10 {
+            let index = direct_indices.resolve(i);
+            assert_eq!(index, i);
+        }
+    }
+
+    fn make_index_buffer<T>(values: &[T]) -> Buffer
+    where
+        T: Pod,
+    {
+        let index_buffer = Buffer::new(std::mem::size_of::<T>() * values.len(), None);
+
+        {
+            let mut index_buffer_guard = index_buffer.write();
+            let index_buffer_slice = bytemuck::cast_slice_mut::<_, T>(&mut *index_buffer_guard);
+            for (i, value) in values.iter().enumerate() {
+                index_buffer_slice[i] = values[i];
+            }
+        }
+
+        index_buffer
+    }
+
+    #[test]
+    fn indirect_u16_without_stops() {
+        let indices: Vec<u16> = vec![2, 4, 9, 0, 8, 3, 1, 5, 6, 7];
+        let index_buffer = make_index_buffer(&indices);
+
+        let index_buffer_binding = IndexBufferBinding {
+            buffer_slice: index_buffer.slice(..),
+            index_format: wgpu::IndexFormat::Uint16,
+        };
+
+        let indirect_indices = index_buffer_binding.begin(10);
+
+        for i in 0..10 {
+            let index =
+                <IndirectIndices<u16> as IndexResolution<false>>::resolve(&indirect_indices, i);
+            assert_eq!(index, 10 + u32::from(indices[i as usize]));
+        }
+    }
+
+    #[test]
+    fn indirect_u32_without_stops() {
+        let indices: Vec<u32> = vec![2, 4, 9, 0, 8, 3, 1, 5, 6, 7];
+        let index_buffer = make_index_buffer(&indices);
+
+        let index_buffer_binding = IndexBufferBinding {
+            buffer_slice: index_buffer.slice(..),
+            index_format: wgpu::IndexFormat::Uint32,
+        };
+
+        let indirect_indices = index_buffer_binding.begin(10);
+
+        for i in 0..10 {
+            let index =
+                <IndirectIndices<u32> as IndexResolution<false>>::resolve(&indirect_indices, i);
+            assert_eq!(index, 10 + indices[i as usize]);
         }
     }
 }

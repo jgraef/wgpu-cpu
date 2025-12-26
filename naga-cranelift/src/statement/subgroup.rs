@@ -1,7 +1,10 @@
 use crate::{
     Error,
     function::FunctionCompiler,
-    statement::CompileStatement,
+    statement::{
+        CompileStatement,
+        ControlFlow,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -11,7 +14,7 @@ pub struct SubgroupBallotStatement {
 }
 
 impl CompileStatement for SubgroupBallotStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         todo!()
     }
 }
@@ -24,7 +27,7 @@ pub struct SubgroupGatherStatement {
 }
 
 impl CompileStatement for SubgroupGatherStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         todo!()
     }
 }
@@ -38,7 +41,7 @@ pub struct SubgroupCollectiveOperationStatement {
 }
 
 impl CompileStatement for SubgroupCollectiveOperationStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         todo!()
     }
 }

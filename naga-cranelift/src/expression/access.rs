@@ -103,7 +103,7 @@ impl CompileAccess<u32> for VectorValue {
 
         let index = u8::try_from(*index).expect("vector index overflow");
         let value_index = index / vectorization.lanes;
-        let lane_index = index / vectorization.lanes;
+        let lane_index = index % vectorization.lanes;
         let mut value = self.values[usize::from(value_index)];
 
         if vectorization.ty.is_vector() {

@@ -80,9 +80,8 @@ pub fn main() -> Result<(), Error> {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let num_triangles = mesh.indices.len() / 3;
         tracing::info!(
-            ?num_triangles,
+            num_triangles = mesh.indices.len() / 3,
             num_indices = mesh.indices.len(),
             num_vertices = mesh.positions.len()
         );
@@ -90,7 +89,7 @@ pub fn main() -> Result<(), Error> {
         Mesh {
             index_buffer,
             vertex_buffer,
-            num_indices: num_triangles as u32,
+            num_indices: mesh.indices.len().try_into().unwrap(),
         }
     };
 
@@ -123,6 +122,7 @@ pub fn main() -> Result<(), Error> {
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
             cull_mode: Some(wgpu::Face::Back),
+            //cull_mode: None,
             unclipped_depth: false,
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,

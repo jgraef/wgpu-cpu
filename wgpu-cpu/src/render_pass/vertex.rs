@@ -299,6 +299,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
             },
             &mut vertex_output,
         )?;
+        //tracing::debug!(?vertex_index, clip_position = ?vertex_output.clip_position);
 
         Ok(VertexOutput {
             clip_position: vertex_output.clip_position,

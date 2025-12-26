@@ -131,7 +131,7 @@ impl ToTargetRaster {
 
         // this matrix maps vectors produced by the pipeline to raster coordinates. the
         // result only needs to be cast to u32 to get a pixel coordinate.
-        let mut to_raster = Matrix2x4::default();
+        let mut to_raster = Matrix2x4::zeros();
 
         // shift by half the target size
         to_raster[(0, 3)] = 0.5 * size_f32.x;

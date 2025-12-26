@@ -5,20 +5,22 @@ use cranelift_codegen::ir::{
 
 use crate::{
     Error,
-    compiler::FuncBuilderExt,
     function::{
         ABORT_CODE_TYPE,
         AbortCode,
         FunctionCompiler,
     },
-    statement::CompileStatement,
+    statement::{
+        CompileStatement,
+        ControlFlow,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
 pub struct KillStatement;
 
 impl CompileStatement for KillStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         assert!(!compiler.loop_switch_stack.is_continuing());
 
         let abort_code = compiler
@@ -30,8 +32,6 @@ impl CompileStatement for KillStatement {
             .ins()
             .jump(compiler.abort_block, [&ir::BlockArg::Value(abort_code)]);
 
-        compiler.function_builder.switch_to_void_block();
-
-        Ok(())
+        Ok(ControlFlow::Diverged)
     }
 }

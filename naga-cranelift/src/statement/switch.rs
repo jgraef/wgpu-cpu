@@ -10,6 +10,7 @@ use crate::{
     statement::{
         BlockStatement,
         CompileStatement,
+        ControlFlow,
     },
     value::{
         AsIrValue,
@@ -24,7 +25,7 @@ pub struct SwitchStatement {
 }
 
 impl CompileStatement for SwitchStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         // todo: could use br_table
 
         let selector_value: ScalarValue = self.selector.compile_expression(compiler)?.try_into()?;
@@ -36,6 +37,7 @@ impl CompileStatement for SwitchStatement {
         let mut default_block = None;
 
         compiler.loop_switch_stack.push_switch(exit_block);
+        let mut control_flow = ControlFlow::Diverged;
 
         for case in &self.cases {
             let case_block = fall_through_block
@@ -74,17 +76,18 @@ impl CompileStatement for SwitchStatement {
             }
 
             compiler.function_builder.switch_to_block(case_block);
-            case.body.compile_statement(compiler)?;
-
-            let successor_block = if case.fall_through {
-                let next = compiler.function_builder.create_block();
-                fall_through_block = Some(next);
-                next
+            if case.body.compile_statement(compiler)?.is_continuing() {
+                let successor_block = if case.fall_through {
+                    let next = compiler.function_builder.create_block();
+                    fall_through_block = Some(next);
+                    next
+                }
+                else {
+                    control_flow = ControlFlow::Continue;
+                    exit_block
+                };
+                compiler.function_builder.ins().jump(successor_block, []);
             }
-            else {
-                exit_block
-            };
-            compiler.function_builder.ins().jump(successor_block, []);
 
             compiler.function_builder.switch_to_block(switch_block);
         }
@@ -98,7 +101,7 @@ impl CompileStatement for SwitchStatement {
         compiler.function_builder.seal_block(default_block);
         compiler.function_builder.seal_block(exit_block);
 
-        Ok(())
+        Ok(control_flow)
     }
 }
 

@@ -7,7 +7,10 @@ use crate::{
     Error,
     expression::CompileExpression,
     function::FunctionCompiler,
-    statement::CompileStatement,
+    statement::{
+        CompileStatement,
+        ControlFlow,
+    },
     value::{
         AsIrValues,
         Load,
@@ -24,7 +27,7 @@ pub struct CallStatement {
 }
 
 impl CompileStatement for CallStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         // todo: error would be nicer
         let imported_function = compiler
             .imported_functions
@@ -94,6 +97,6 @@ impl CompileStatement for CallStatement {
                 .insert(result_expression, result_value);
         }
 
-        Ok(())
+        Ok(ControlFlow::Continue)
     }
 }

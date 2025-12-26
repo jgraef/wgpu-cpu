@@ -1106,3 +1106,112 @@ fn vector_access_dynamic() {
     );
     assert_eq!(output, 340);
 }
+
+#[test]
+fn vector_access_static() {
+    let output = exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var v: vec4i = vec4i(12, 23, 34, 45);
+            var s: i32 = v.x + 2 * v.y + 3 * v.z + 4 * v.w;
+            return Output(vec4f(), s);
+        }
+        "#,
+    );
+    assert_eq!(output, 340);
+}
+
+#[test]
+fn vectorized_function_argument() {
+    let output = exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        fn do_stuff(input: vec4i) -> i32 {
+            return input.y;
+        }
+
+        @vertex
+        fn main() -> Output {
+            let output = do_stuff(vec4i(1, 2, 3, 4));
+            return Output(
+                vec4f(),
+                output,
+            );
+        }
+        "#,
+    );
+
+    assert_eq!(output, 2);
+}
+
+#[test]
+fn return_if_else_diverging() {
+    let output = exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        fn do_stuff(x: i32) -> i32 {
+            if x == 1234 {
+                return 45;
+            }
+            else {
+                return 67;
+            }
+        }
+
+        @vertex
+        fn main() -> Output {
+            let output = do_stuff(1234);
+            return Output(
+                vec4f(),
+                output,
+            );
+        }
+        "#,
+    );
+
+    assert_eq!(output, 45);
+}
+
+#[test]
+fn return_from_loop_body_diverging() {
+    let output = exec::<i32>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: i32,
+        }
+
+        fn do_stuff() -> i32 {
+            loop {
+                return 45;
+            }
+            return 123;
+        }
+
+        @vertex
+        fn main() -> Output {
+            let output = do_stuff();
+            return Output(
+                vec4f(),
+                output,
+            );
+        }
+        "#,
+    );
+
+    assert_eq!(output, 45);
+}

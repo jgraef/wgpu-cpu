@@ -24,7 +24,7 @@ use nalgebra::{
 
 use crate::{
     render_pass::{
-        bytes_of_bool_as_u32,
+        bytes_of_bool_as_u8,
         evaluate_compare_function,
         invalid_binding,
     },
@@ -95,7 +95,7 @@ where
             Binding::BuiltIn(builtin) => {
                 let source = match builtin {
                     BuiltIn::Position { invariant } => bytemuck::bytes_of(&self.position),
-                    BuiltIn::FrontFacing => bytes_of_bool_as_u32(self.front_facing),
+                    BuiltIn::FrontFacing => bytes_of_bool_as_u8(self.front_facing),
                     BuiltIn::PrimitiveIndex => bytemuck::bytes_of(&self.primitive_index),
                     BuiltIn::SampleIndex => bytemuck::bytes_of(&self.sample_index),
                     BuiltIn::SampleMask => bytemuck::bytes_of(&self.sample_mask),

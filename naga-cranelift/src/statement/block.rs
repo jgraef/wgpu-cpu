@@ -3,6 +3,7 @@ use crate::{
     function::FunctionCompiler,
     statement::{
         CompileStatement,
+        ControlFlow,
         Statement,
     },
 };
@@ -26,11 +27,15 @@ impl From<&naga::Block> for BlockStatement {
 }
 
 impl CompileStatement for BlockStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         for (statement, span) in &self.statements {
             compiler.set_source_span(*span);
-            statement.compile_statement(compiler)?;
+
+            if statement.compile_statement(compiler)?.is_diverged() {
+                return Ok(ControlFlow::Diverged);
+            }
         }
-        Ok(())
+
+        Ok(ControlFlow::Continue)
     }
 }

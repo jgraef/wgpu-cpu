@@ -7,6 +7,7 @@ use crate::{
     statement::{
         BlockStatement,
         CompileStatement,
+        ControlFlow,
     },
     value::{
         AsIrValue,
@@ -22,7 +23,7 @@ pub struct IfStatement {
 }
 
 impl CompileStatement for IfStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         let condition_value: ScalarValue =
             self.condition.compile_expression(compiler)?.try_into()?;
         let condition_value = condition_value.as_ir_value();
@@ -39,21 +40,27 @@ impl CompileStatement for IfStatement {
         compiler.function_builder.seal_block(accept_block);
         compiler.function_builder.seal_block(reject_block);
 
+        let mut control_flow = ControlFlow::Diverged;
+
         {
             compiler.function_builder.switch_to_block(accept_block);
-            self.accept.compile_statement(compiler)?;
-            compiler.function_builder.ins().jump(exit_block, []);
+            if self.accept.compile_statement(compiler)?.is_continuing() {
+                compiler.function_builder.ins().jump(exit_block, []);
+                control_flow = ControlFlow::Continue;
+            }
         }
 
         {
             compiler.function_builder.switch_to_block(reject_block);
-            self.reject.compile_statement(compiler)?;
-            compiler.function_builder.ins().jump(exit_block, []);
+            if self.reject.compile_statement(compiler)?.is_continuing() {
+                compiler.function_builder.ins().jump(exit_block, []);
+                control_flow = ControlFlow::Continue;
+            }
         }
 
         compiler.function_builder.seal_block(exit_block);
         compiler.function_builder.switch_to_block(exit_block);
 
-        Ok(())
+        Ok(control_flow)
     }
 }

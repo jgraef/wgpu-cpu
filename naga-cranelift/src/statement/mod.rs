@@ -37,6 +37,27 @@ pub use subgroup::*;
 pub use switch::*;
 pub use work_group::*;
 
+#[derive(Clone, Copy, Debug)]
+#[must_use]
+pub enum ControlFlow {
+    Continue,
+    Diverged,
+}
+
+impl ControlFlow {
+    pub fn is_continuing(&self) -> bool {
+        matches!(self, Self::Continue)
+    }
+
+    pub fn is_diverged(&self) -> bool {
+        matches!(self, Self::Diverged)
+    }
+}
+
+pub trait CompileStatement {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error>;
+}
+
 macro_rules! define_statement {
     ($($variant:ident($ty:ty),)*) => {
         #[derive(Clone, Debug)]
@@ -45,16 +66,14 @@ macro_rules! define_statement {
         }
 
         impl CompileStatement for Statement {
-
-
             fn compile_statement(
                 &self,
                 compiler: &mut FunctionCompiler,
-            ) -> Result<(), Error> {
-                match self {
+            ) -> Result<ControlFlow, Error> {
+                let control_flow = match self {
                     $(Self::$variant(statement) => CompileStatement::compile_statement(statement, compiler)?,)*
-                }
-                Ok(())
+                };
+                Ok(control_flow)
             }
         }
 
@@ -103,10 +122,6 @@ define_statement!(
     SubgroupCollectiveOperation(SubgroupCollectiveOperationStatement),
     CooperativeStore(CooperativeStoreStatement),
 );
-
-pub trait CompileStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error>;
-}
 
 impl From<&naga::Statement> for Statement {
     fn from(value: &naga::Statement) -> Self {

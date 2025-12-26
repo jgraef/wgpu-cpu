@@ -92,14 +92,14 @@ macro_rules! define_binary_traits {
             )?
         )*
     };
-    (@impl_auto($trait:ident, $method:ident, Value, [$($variant:ident),*])) => {
+    (@impl_auto($trait:ident, $method:ident, Value, [$(($left:ident, $right:ident)),*])) => {
         impl $trait for Value {
             type Output = Self;
 
             fn $method(&self, compiler: &mut FunctionCompiler, other: &Self) -> Result<Self::Output, Error> {
                 let output = match (self, other) {
                     $(
-                        (Self::$variant(left), Self::$variant(right)) => $trait::$method(left, compiler, right)?.into(),
+                        (Self::$left(left), Self::$right(right)) => $trait::$method(left, compiler, right)?.into(),
                     )*
                     _ => panic!("{} not implemented for {:?}", stringify!($trait), self.type_of()),
                 };
@@ -122,63 +122,171 @@ macro_rules! define_binary_traits {
 
 define_binary_traits! {
     CompileAdd::compile_add
-        auto Value [Scalar, Vector, Matrix]
+        auto Value [
+            (Scalar, Scalar),
+            (Vector, Vector),
+            (Matrix, Matrix)
+        ]
         auto map [VectorValue, MatrixValue];
 
     CompileSub::compile_sub
-        auto Value [Scalar, Vector, Matrix]
+        auto Value [
+            (Scalar, Scalar),
+            (Vector, Vector),
+            (Matrix, Matrix)
+        ]
         auto map [VectorValue, MatrixValue];
 
     CompileMul::compile_mul
-        auto Value [Scalar, Vector]
+        auto Value [
+            (Scalar, Scalar),
+            (Vector, Vector),
+            (Matrix, Matrix),
+            (Scalar, Vector),
+            (Vector, Scalar),
+            (Scalar, Matrix),
+            (Matrix, Scalar),
+            (Vector, Matrix),
+            (Matrix, Vector)
+        ]
         auto map [VectorValue];
 
     CompileDiv::compile_div
-        auto Value [Scalar, Vector]
+        auto Value [
+            (Scalar, Scalar),
+            (Vector, Vector)
+        ]
         auto map [VectorValue];
 
     CompileMod::compile_mod
-        auto Value [Scalar, Vector]
+        auto Value [
+            (Scalar, Scalar),
+            (Vector, Vector)
+        ]
         auto map [VectorValue];
 
     CompileEq::compile_eq
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileNeq::compile_neq
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileLt::compile_lt
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileLe::compile_le
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileGt::compile_gt
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileGe::compile_ge
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileBitAnd::compile_bit_and
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileBitXor::compile_bit_xor
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileBitOr::compile_bit_or
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileLogOr::compile_log_or
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileLogAnd::compile_log_and
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileShl::compile_shl
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
 
     CompileShr::compile_shr
-        auto Value [Scalar];
+        auto Value [(Scalar, Scalar)];
+}
+
+impl CompileMul<MatrixValue> for ScalarValue {
+    type Output = MatrixValue;
+
+    fn compile_mul(
+        &self,
+        compiler: &mut FunctionCompiler,
+        other: &MatrixValue,
+    ) -> Result<Self::Output, Error> {
+        todo!("scalar * matrix")
+    }
+}
+
+impl CompileMul<ScalarValue> for MatrixValue {
+    type Output = MatrixValue;
+
+    fn compile_mul(
+        &self,
+        compiler: &mut FunctionCompiler,
+        other: &ScalarValue,
+    ) -> Result<Self::Output, Error> {
+        todo!("matrix * scalar")
+    }
+}
+
+impl CompileMul<MatrixValue> for MatrixValue {
+    type Output = MatrixValue;
+
+    fn compile_mul(
+        &self,
+        compiler: &mut FunctionCompiler,
+        other: &MatrixValue,
+    ) -> Result<Self::Output, Error> {
+        todo!("matrix * matrix")
+    }
+}
+
+impl CompileMul<MatrixValue> for VectorValue {
+    type Output = VectorValue;
+
+    fn compile_mul(
+        &self,
+        compiler: &mut FunctionCompiler,
+        other: &MatrixValue,
+    ) -> Result<Self::Output, Error> {
+        todo!("vector * matrix")
+    }
+}
+
+impl CompileMul<VectorValue> for MatrixValue {
+    type Output = VectorValue;
+
+    fn compile_mul(
+        &self,
+        compiler: &mut FunctionCompiler,
+        other: &VectorValue,
+    ) -> Result<Self::Output, Error> {
+        todo!("matrix * vector")
+    }
+}
+
+impl CompileMul<VectorValue> for ScalarValue {
+    type Output = VectorValue;
+
+    fn compile_mul(
+        &self,
+        compiler: &mut FunctionCompiler,
+        other: &VectorValue,
+    ) -> Result<Self::Output, Error> {
+        other.compile_mul(compiler, self)
+    }
+}
+
+impl CompileMul<ScalarValue> for VectorValue {
+    type Output = VectorValue;
+
+    fn compile_mul(
+        &self,
+        compiler: &mut FunctionCompiler,
+        other: &ScalarValue,
+    ) -> Result<Self::Output, Error> {
+        todo!("vector * scalar");
+    }
 }
 
 macro_rules! impl_binary_scalar {

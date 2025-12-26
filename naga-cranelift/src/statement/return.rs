@@ -5,13 +5,15 @@ use cranelift_codegen::ir::{
 
 use crate::{
     Error,
-    compiler::FuncBuilderExt,
     expression::CompileExpression,
     function::{
         ABORT_CODE_TYPE,
         FunctionCompiler,
     },
-    statement::CompileStatement,
+    statement::{
+        CompileStatement,
+        ControlFlow,
+    },
     value::{
         Pointer,
         Store,
@@ -24,7 +26,7 @@ pub struct ReturnStatement {
 }
 
 impl CompileStatement for ReturnStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         // note: should we instead generate an exit block that returns the result in
         // FunctionCompiler::new (like we do for the abort block)? then we'd just need
         // to jump to it from here.
@@ -45,8 +47,7 @@ impl CompileStatement for ReturnStatement {
 
         let abort_code = compiler.function_builder.ins().iconst(ABORT_CODE_TYPE, 0);
         compiler.function_builder.ins().return_(&[abort_code]);
-        compiler.function_builder.switch_to_void_block();
 
-        Ok(())
+        Ok(ControlFlow::Diverged)
     }
 }

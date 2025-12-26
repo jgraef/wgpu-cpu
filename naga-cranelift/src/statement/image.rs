@@ -1,7 +1,10 @@
 use crate::{
     Error,
     function::FunctionCompiler,
-    statement::CompileStatement,
+    statement::{
+        CompileStatement,
+        ControlFlow,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -13,7 +16,7 @@ pub struct ImageStoreStatement {
 }
 
 impl CompileStatement for ImageStoreStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         todo!()
     }
 }
@@ -28,7 +31,7 @@ pub struct ImageAtomicStatement {
 }
 
 impl CompileStatement for ImageAtomicStatement {
-    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<(), Error> {
+    fn compile_statement(&self, compiler: &mut FunctionCompiler) -> Result<ControlFlow, Error> {
         todo!()
     }
 }

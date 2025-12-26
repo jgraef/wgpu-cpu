@@ -320,7 +320,20 @@ impl DrawCall {
                 $index_buffer_binding:expr,
                 $base_vertex:expr
             ) => {
-                panic!("List can't be separated");
+                if primitive.strip_index_format.is_some() {
+                    panic!("List can't be separated");
+                }
+
+                let indirect_indices = $index_buffer_binding.begin::<$index>($base_vertex);
+                draw!(
+                    $instances,
+                    $indices,
+                    indirect_indices,
+                    $primitive,
+                    List,
+                    $rasterizer,
+                    false
+                );
             };
         }
 
@@ -355,8 +368,8 @@ impl DrawCall {
                         match index_format {
                             wgpu::IndexFormat::Uint16 => {
                                 draw_indexed!(
-                                    indices,
                                     instances,
+                                    indices,
                                     $primitive,
                                     $assembly,
                                     $rasterizer,
@@ -367,8 +380,8 @@ impl DrawCall {
                             }
                             wgpu::IndexFormat::Uint32 => {
                                 draw_indexed!(
-                                    indices,
                                     instances,
+                                    indices,
                                     $primitive,
                                     $assembly,
                                     $rasterizer,
@@ -477,6 +490,9 @@ impl<'pass> RenderState<'pass> {
         Rasterizer::Interpolation: Interpolate<PRIMITIVE_SIZE>,
     {
         let pipeline = &pipeline_state.pipeline;
+        let clipper = NoClipper;
+        let mut primitives_drawn = 0;
+        let mut vertices_processed = 0;
 
         for instance_index in instances {
             // resolve indices
@@ -488,6 +504,7 @@ impl<'pass> RenderState<'pass> {
             // process vertices
             let vertices = vertex_indices.map(|item| {
                 // todo: propagate error and skip whole primitive if a vertex fails
+                vertices_processed += 1;
                 item.process(|vertex| {
                     vertex_processing
                         .process(pipeline_state, instance_index, vertex)
@@ -527,6 +544,14 @@ impl<'pass> RenderState<'pass> {
                         for rasterization_point in
                             rasterizer.rasterize(Primitive::new(primitive.clip_positions(), ()))
                         {
+                            /*let interpolated_position =
+                            rasterization_point.interpolation.interpolate(
+                                rasterization_point
+                                    .primitive_vertices
+                                    .clip_positions()
+                                    .map(|clip_position| clip_position.0),
+                            );*/
+
                             let sample_index = rasterization_point
                                 .destination
                                 .sample_index
@@ -535,7 +560,8 @@ impl<'pass> RenderState<'pass> {
 
                             let input = FragmentInput {
                                 //position: fragment.position,
-                                position: Default::default(), // todo
+                                position: Default::default(), // todo: NDC
+                                //position: interpolated_position,
                                 front_facing,
                                 primitive_index: primitive_index as u32,
                                 sample_index,
@@ -582,15 +608,20 @@ impl<'pass> RenderState<'pass> {
                                 }
                             }
                         }
+
+                        primitives_drawn += 1;
                     }
                 }
             }
             else {
                 // no fragment state bound. just consume the iterator so that the vertex shaders
                 // run
+                tracing::debug!("No fragment state");
                 primitives.for_each(|_| ());
             }
         }
+
+        tracing::debug!(?primitives_drawn, ?vertices_processed);
     }
 }
 
