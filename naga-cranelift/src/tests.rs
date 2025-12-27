@@ -1247,6 +1247,61 @@ fn matrix_vector_product() {
 }
 
 #[test]
+fn matrix_scalar_product() {
+    let output = exec::<[f32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4f,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var left = mat4x4f(
+                vec4f(1, 1, 1, 1),
+                vec4f(0, 2, 0, 2),
+                vec4f(3, 2, 1, 0),
+                vec4f(1, 2, 3, 4),
+            );
+            var right: f32 = 2;
+            let output = left * right;
+            return Output(
+                vec4f(),
+                output[3],
+            );
+        }
+        "#,
+    );
+
+    assert_abs_diff_eq!(output, [2.0, 4.0, 6.0, 8.0,]);
+}
+
+#[test]
+fn vector_scalar_product() {
+    let output = exec::<[f32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4f,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var left = vec4f(3, 2, 1, 0);
+            var right: f32 = 2;
+            let output = left * right;
+            return Output(
+                vec4f(),
+                output,
+            );
+        }
+        "#,
+    );
+
+    assert_abs_diff_eq!(output, [6.0, 4.0, 2.0, 0.0]);
+}
+
+#[test]
 fn global_matrix_init() {
     let output = exec::<[f32; 4]>(
         r#"

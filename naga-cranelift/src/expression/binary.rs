@@ -217,7 +217,7 @@ impl CompileMul<MatrixValue> for ScalarValue {
         compiler: &mut FunctionCompiler,
         other: &MatrixValue,
     ) -> Result<Self::Output, Error> {
-        todo!("scalar * matrix")
+        other.compile_mul(compiler, self)
     }
 }
 
@@ -229,7 +229,17 @@ impl CompileMul<ScalarValue> for MatrixValue {
         compiler: &mut FunctionCompiler,
         other: &ScalarValue,
     ) -> Result<Self::Output, Error> {
-        todo!("matrix * scalar")
+        let scalar_value = match compiler.context.simd_context[self.ty] {
+            MatrixIrType::Plain { ty } => *other,
+            MatrixIrType::ColumnVector { ty } | MatrixIrType::FullVector { ty } => {
+                ScalarValue {
+                    ty: other.ty,
+                    value: compiler.function_builder.ins().splat(ty, other.value),
+                }
+            }
+        };
+
+        self.try_map_as_scalars(|vector_value| vector_value.compile_mul(compiler, &scalar_value))
     }
 }
 
@@ -350,7 +360,17 @@ impl CompileMul<ScalarValue> for VectorValue {
         compiler: &mut FunctionCompiler,
         other: &ScalarValue,
     ) -> Result<Self::Output, Error> {
-        todo!("vector * scalar");
+        let scalar_value = match compiler.context.simd_context[self.ty] {
+            VectorIrType::Plain { ty } => *other,
+            VectorIrType::Vector { ty } => {
+                ScalarValue {
+                    ty: other.ty,
+                    value: compiler.function_builder.ins().splat(ty, other.value),
+                }
+            }
+        };
+
+        self.try_map_as_scalars(|vector_value| vector_value.compile_mul(compiler, &scalar_value))
     }
 }
 

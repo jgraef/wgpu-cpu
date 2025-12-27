@@ -195,7 +195,7 @@ pub fn main() -> Result<(), Error> {
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
+            front_face: wgpu::FrontFace::Cw,
             cull_mode: Some(wgpu::Face::Back),
             //cull_mode: None,
             unclipped_depth: false,
