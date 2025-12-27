@@ -27,13 +27,7 @@ var<uniform> camera: Camera;
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
-    var position = camera.matrix * input.vertex_position;
-
-    // the renderer doesn't do perspective division at the moment, so we do it manually
-    position.x /= position.w;
-    position.y /= position.w;
-    position.z /= position.w;
-    position.w = 1.0;
+    let position = camera.matrix * input.vertex_position;
 
     return VertexOutput(
         position,

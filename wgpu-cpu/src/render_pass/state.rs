@@ -3,13 +3,7 @@ use std::{
     ops::Range,
 };
 
-use naga_cranelift::{
-    bindings::{
-        InterStageLayout,
-        NullBinding,
-    },
-    product::EntryPointError,
-};
+use naga_cranelift::bindings::InterStageLayout;
 use nalgebra::{
     Point2,
     Vector2,
@@ -24,15 +18,12 @@ use crate::{
         binding::AcquiredBindingResources,
         clipper::{
             Clip,
-            ClipPosition,
-            Clipped,
             NoClipper,
         },
         fragment::{
             AcquiredColorAttachment,
             AcquiredDepthStencilAttachment,
-            FragmentInput,
-            FragmentOutput,
+            FragmentProcessingState,
         },
         index::{
             DirectIndices,
@@ -66,7 +57,14 @@ use crate::{
 pub struct State<'pass> {
     pub index_buffer_binding: Option<IndexBufferBinding>,
     pub pipeline_state: Option<RenderPipelineState>,
-    pub render_state: RenderState<'pass>,
+
+    pub occlusion_query_index: u32,
+    pub viewport: Viewport,
+    pub scissor_rect: ScissorRect,
+    pub blend_constant: wgpu::Color,
+    pub stencil_reference: StencilValue,
+    pub color_attachments: Vec<Option<AcquiredColorAttachment<'pass>>>,
+    pub depth_stencil_attachment: Option<AcquiredDepthStencilAttachment<'pass>>,
 
     // todo: should we lock the vertex buffers when we get them?
     pub vertex_buffers: Vec<Option<BufferSlice>>,
@@ -121,40 +119,38 @@ impl<'pass> State<'pass> {
         Self {
             index_buffer_binding: None,
             pipeline_state: None,
-            render_state: RenderState {
-                occlusion_query_index: 0,
-                viewport: Viewport::new(framebuffer_size),
-                scissor_rect: ScissorRect::new(framebuffer_size),
-                blend_constant: Default::default(), // what does this default to?
-                stencil_reference: 0,
-                color_attachments,
-                depth_stencil_attachment,
-            },
+            occlusion_query_index: 0,
+            viewport: Viewport::new(framebuffer_size),
+            scissor_rect: ScissorRect::new(framebuffer_size),
+            blend_constant: Default::default(), // what does this default to?
+            stencil_reference: 0,
+            color_attachments,
+            depth_stencil_attachment,
             vertex_buffers: vec![],
             bind_groups: vec![],
         }
     }
 
     pub fn load(&mut self) {
-        for color_attachment in &mut self.render_state.color_attachments {
+        for color_attachment in &mut self.color_attachments {
             if let Some(color_attachment) = color_attachment {
                 color_attachment.load();
             }
         }
 
-        if let Some(depth_stencil_attachment) = &mut self.render_state.depth_stencil_attachment {
+        if let Some(depth_stencil_attachment) = &mut self.depth_stencil_attachment {
             depth_stencil_attachment.load();
         }
     }
 
     pub fn store(&mut self) {
-        for color_attachment in &mut self.render_state.color_attachments {
+        for color_attachment in &mut self.color_attachments {
             if let Some(color_attachment) = color_attachment {
                 color_attachment.store();
             }
         }
 
-        if let Some(depth_stencil_attachment) = &mut self.render_state.depth_stencil_attachment {
+        if let Some(depth_stencil_attachment) = &mut self.depth_stencil_attachment {
             depth_stencil_attachment.store();
         }
     }
@@ -208,19 +204,19 @@ impl<'pass> State<'pass> {
     }
 
     pub fn set_blend_constant(&mut self, color: wgpu::Color) {
-        self.render_state.blend_constant = color;
+        self.blend_constant = color;
     }
 
     pub fn set_scissor_rect(&mut self, scissor_rect: ScissorRect) {
-        self.render_state.scissor_rect = scissor_rect;
+        self.scissor_rect = scissor_rect;
     }
 
     pub fn set_viewport(&mut self, viewport: Viewport) {
-        self.render_state.viewport = viewport;
+        self.viewport = viewport;
     }
 
     pub fn set_stencil_reference(&mut self, stencil_reference: StencilValue) {
-        self.render_state.stencil_reference = stencil_reference;
+        self.stencil_reference = stencil_reference;
     }
 }
 
@@ -246,14 +242,16 @@ impl DrawCall {
             panic!("No pipeline bound");
         };
 
-        let framebuffer_size = state.render_state.scissor_rect.size;
+        let framebuffer_size = state.scissor_rect.size;
         let clipper = NoClipper;
 
         let binding_resources = AcquiredBindingResources::new(&state.bind_groups);
-        let vertex_processing_state = VertexProcessingState::new(
-            &pipeline_state.pipeline,
-            &state.vertex_buffers,
-            binding_resources,
+        let vertex_processing_state =
+            VertexProcessingState::new(pipeline_state, &state.vertex_buffers, binding_resources);
+        let fragment_processing_state = FragmentProcessingState::new(
+            pipeline_state,
+            &mut state.color_attachments,
+            state.depth_stencil_attachment.as_mut(),
         );
 
         let primitive = &pipeline_state.pipeline.descriptor.primitive;
@@ -271,18 +269,17 @@ impl DrawCall {
                 $rasterizer:ty,
                 $is_separated:expr
             ) => {
-                state
-                    .render_state
-                    .draw::<$primitive, $is_separated, _, _, _>(
-                        pipeline_state,
-                        $instances,
-                        $indices,
-                        $index,
-                        vertex_processing_state,
-                        $assembly::<$primitive>,
-                        clipper,
-                        <$rasterizer>::new(framebuffer_size),
-                    );
+                draw::<$primitive, $is_separated, _, _, _>(
+                    pipeline_state,
+                    $instances,
+                    $indices,
+                    $index,
+                    vertex_processing_state,
+                    $assembly::<$primitive>,
+                    clipper,
+                    <$rasterizer>::new(framebuffer_size),
+                    fragment_processing_state,
+                );
             };
         }
 
@@ -477,178 +474,107 @@ pub struct RenderPipelineState {
 
 type VertexOutput = crate::render_pass::vertex::VertexOutput<UserDefinedInterStagePoolBuffer>;
 
-/// https://gpuweb.github.io/gpuweb/#renderstate
-#[derive(Debug)]
-pub struct RenderState<'pass> {
-    pub occlusion_query_index: u32,
-    pub viewport: Viewport,
-    pub scissor_rect: ScissorRect,
-    pub blend_constant: wgpu::Color,
-    pub stencil_reference: StencilValue,
-    pub color_attachments: Vec<Option<AcquiredColorAttachment<'pass>>>,
-    pub depth_stencil_attachment: Option<AcquiredDepthStencilAttachment<'pass>>,
-}
+pub fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Rasterizer>(
+    pipeline_state: &RenderPipelineState,
+    instances: Range<u32>,
+    indices: Range<u32>,
+    index_resolution: Index,
+    mut vertex_processing: VertexProcessingState,
+    primitive_assembly: Assembly,
+    clipper: impl Clip<PRIMITIVE_SIZE>,
+    rasterizer: Rasterizer,
+    mut fragment_processing: Option<FragmentProcessingState>,
+) where
+    Index: IndexResolution<SEP>,
+    Index::Item: ProcessItem<Inner = u32>,
+    Assembly: Assemble<
+            VertexOutput,
+            PRIMITIVE_SIZE,
+            SEP,
+            Item = <Index::Item as ProcessItem>::Processed<VertexOutput>,
+        >,
+    Assembly::Face: AsFrontFace,
+    Rasterizer: Rasterize<PRIMITIVE_SIZE>,
+    Rasterizer::Interpolation: Interpolate<PRIMITIVE_SIZE>,
+{
+    let pipeline = &pipeline_state.pipeline;
+    let clipper = NoClipper;
+    let mut primitives_drawn = 0;
+    let mut vertices_processed = 0;
 
-impl<'pass> RenderState<'pass> {
-    fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Rasterizer>(
-        &mut self,
-        pipeline_state: &RenderPipelineState,
-        instances: Range<u32>,
-        indices: Range<u32>,
-        index_resolution: Index,
-        mut vertex_processing: VertexProcessingState,
-        primitive_assembly: Assembly,
-        clipper: impl Clip<PRIMITIVE_SIZE>,
-        rasterizer: Rasterizer,
-    ) where
-        Index: IndexResolution<SEP>,
-        Index::Item: ProcessItem<Inner = u32>,
-        Assembly: Assemble<
-                VertexOutput,
-                PRIMITIVE_SIZE,
-                SEP,
-                Item = <Index::Item as ProcessItem>::Processed<VertexOutput>,
-            >,
-        Assembly::Face: AsFrontFace,
-        Rasterizer: Rasterize<Primitive<ClipPosition, PRIMITIVE_SIZE>>,
-        Rasterizer::Interpolation: Interpolate<PRIMITIVE_SIZE>,
-    {
-        let pipeline = &pipeline_state.pipeline;
-        let clipper = NoClipper;
-        let mut primitives_drawn = 0;
-        let mut vertices_processed = 0;
+    for instance_index in instances {
+        // resolve indices
+        let vertex_indices = indices
+            .clone()
+            .into_iter()
+            .map(|index| index_resolution.resolve(index));
 
-        for instance_index in instances {
-            // resolve indices
-            let vertex_indices = indices
-                .clone()
-                .into_iter()
-                .map(|index| index_resolution.resolve(index));
+        // process vertices
+        let vertices = vertex_indices.map(|item| {
+            // todo: propagate error and skip whole primitive if a vertex fails
+            vertices_processed += 1;
+            item.process(|vertex| {
+                vertex_processing
+                    .process(instance_index, vertex)
+                    .expect("vertex processing failed")
+            })
+        });
 
-            // process vertices
-            let vertices = vertex_indices.map(|item| {
-                // todo: propagate error and skip whole primitive if a vertex fails
-                vertices_processed += 1;
-                item.process(|vertex| {
-                    vertex_processing
-                        .process(pipeline_state, instance_index, vertex)
-                        .expect("vertex processing failed")
-                })
-            });
+        // assemble primitives
+        let primitives = primitive_assembly.assemble(vertices).into_iter();
 
-            // assemble primitives
-            let primitives = primitive_assembly.assemble(vertices).into_iter();
+        if let Some(fragment_processing) = &mut fragment_processing {
+            for (primitive_index, primitive) in primitives.enumerate() {
+                for primitive in clipper.clip(primitive) {
+                    //tracing::debug!(primitive = ?primitive.clip_positions());
 
-            if let Some(fragment_state) = &mut pipeline.descriptor.fragment.as_ref() {
-                for (primitive_index, primitive) in primitives.enumerate() {
-                    for primitive in clipper.clip(primitive) {
-                        //tracing::debug!(primitive = ?primitive.clip_positions());
+                    let (front_facing, cull_face) =
+                        primitive
+                            .try_front_face()
+                            .map_or((true, false), |front_face| {
+                                let front_facing =
+                                    front_face == pipeline.descriptor.primitive.front_face;
 
-                        let (front_facing, cull_face) =
-                            primitive
-                                .try_front_face()
-                                .map_or((true, false), |front_face| {
-                                    let front_facing =
-                                        front_face == pipeline.descriptor.primitive.front_face;
+                                let cull_face = match pipeline.descriptor.primitive.cull_mode {
+                                    Some(wgpu::Face::Front) => front_facing,
+                                    Some(wgpu::Face::Back) => !front_facing,
+                                    None => false,
+                                };
 
-                                    let cull_face = match pipeline.descriptor.primitive.cull_mode {
-                                        Some(wgpu::Face::Front) => front_facing,
-                                        Some(wgpu::Face::Back) => !front_facing,
-                                        None => false,
-                                    };
+                                (front_facing, cull_face)
+                            });
 
-                                    (front_facing, cull_face)
-                                });
-
-                        if cull_face {
-                            tracing::trace!(primitive = ?primitive.clip_positions(), "culled");
-                            continue;
-                        }
-
-                        //let front_facing = rasterization_point.front_face;
-
-                        for rasterization_point in
-                            rasterizer.rasterize(Primitive::new(primitive.clip_positions(), ()))
-                        {
-                            /*let interpolated_position =
-                            rasterization_point.interpolation.interpolate(
-                                rasterization_point
-                                    .primitive_vertices
-                                    .clip_positions()
-                                    .map(|clip_position| clip_position.0),
-                            );*/
-
-                            let sample_index = rasterization_point
-                                .destination
-                                .sample_index
-                                .map_or(0, |sample_index| sample_index.get().into());
-                            let sample_mask = rasterization_point.coverage_mask;
-
-                            let input = FragmentInput {
-                                //position: fragment.position,
-                                position: Default::default(), // todo: NDC
-                                //position: interpolated_position,
-                                front_facing,
-                                primitive_index: primitive_index as u32,
-                                sample_index,
-                                sample_mask,
-                                interpolation_coefficients: rasterization_point.interpolation,
-                                inter_stage_variables: primitive
-                                    .each_vertex_ref::<Clipped<VertexOutput>>()
-                                    .map(|vertex_output| {
-                                        vertex_output.unclipped.inter_stage_variables.clone()
-                                    }),
-                            };
-
-                            let mut output = FragmentOutput {
-                                position: rasterization_point.destination.position,
-                                frag_depth: rasterization_point.depth,
-                                sample_mask,
-                                color_attachments: &mut self.color_attachments,
-                                depth_stencil_attachment: self.depth_stencil_attachment.as_mut(),
-                                depth_stencil_state: pipeline.descriptor.depth_stencil.as_ref(),
-                            };
-
-                            // perform early depth test
-                            if !fragment_state.early_depth_test(|| output.depth_test()) {
-                                // early depth test rejected
-                                continue;
-                            }
-
-                            // run fragment shader
-                            let entry_point = fragment_state
-                                .module
-                                .entry_point(fragment_state.entry_point);
-
-                            match entry_point.run(&input, &mut output, NullBinding) {
-                                Ok(()) => {}
-                                Err(EntryPointError::Killed) => {
-                                    // the fragment shader ran discard. it won't
-                                    // have written to its color/depth
-                                    // attachments, so we don't have to do
-                                    // anything here
-                                }
-                                result => {
-                                    // some other error. for now we'll panic
-                                    result.expect("fragment shader failed");
-                                }
-                            }
-                        }
-
-                        primitives_drawn += 1;
+                    if cull_face {
+                        tracing::trace!(primitive = ?primitive.clip_positions(), "culled");
+                        continue;
                     }
+
+                    for rasterizer_output in
+                        rasterizer.rasterize(Primitive::new(primitive.clip_positions(), ()))
+                    {
+                        fragment_processing.process(
+                            &primitive,
+                            front_facing,
+                            primitive_index
+                                .try_into()
+                                .expect("primitive index overflow"),
+                            rasterizer_output,
+                        );
+                    }
+
+                    primitives_drawn += 1;
                 }
             }
-            else {
-                // no fragment state bound. just consume the iterator so that the vertex shaders
-                // run
-                tracing::debug!("No fragment state");
-                primitives.for_each(|_| ());
-            }
         }
-
-        tracing::debug!(?primitives_drawn, ?vertices_processed);
+        else {
+            // no fragment state bound. just consume the iterator so that the vertex shaders
+            // run
+            tracing::debug!("No fragment state");
+            primitives.for_each(|_| ());
+        }
     }
+
+    tracing::debug!(?primitives_drawn, ?vertices_processed);
 }
 
 /// https://gpuweb.github.io/gpuweb/#renderstate

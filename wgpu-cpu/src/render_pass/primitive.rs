@@ -54,7 +54,7 @@ impl ProcessItem for u32 {
 
 pub type Point<Vertex> = Primitive<Vertex, 1>;
 pub type Line<Vertex> = Primitive<Vertex, 2>;
-pub type Tri<Vertex> = Primitive<Vertex, 3>;
+pub type Tri<Vertex> = Primitive<Vertex, 3, TriFace>;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Primitive<Vertex, const NUM_VERTICES: usize, Face = ()> {

@@ -10,10 +10,14 @@ use naga_cranelift::{
     CompiledModule,
     bindings::{
         BindingLocation,
+        NullBinding,
         ShaderInput,
         ShaderOutput,
     },
-    product::EntryPointIndex,
+    product::{
+        EntryPointError,
+        EntryPointIndex,
+    },
 };
 use nalgebra::{
     Point2,
@@ -25,12 +29,23 @@ use nalgebra::{
 use crate::{
     render_pass::{
         bytes_of_bool_as_u8,
+        clipper::{
+            ClipPosition,
+            Clipped,
+        },
         evaluate_compare_function,
         invalid_binding,
+        primitive::{
+            AsFrontFace,
+            Primitive,
+        },
+        raster::RasterizerOutput,
+        state::RenderPipelineState,
     },
     shader::{
         Error,
         ShaderModule,
+        UserDefinedInterStagePoolBuffer,
         memory::ReadMemory,
     },
     texture::{
@@ -70,6 +85,104 @@ impl FragmentState {
             None => true,
             Some(naga::EarlyDepthTest::Force) => evaluate(),
             Some(naga::EarlyDepthTest::Allow { conservative }) => todo!("EarlyDepthTest::Allow"),
+        }
+    }
+}
+
+type VertexOutput = crate::render_pass::vertex::VertexOutput<UserDefinedInterStagePoolBuffer>;
+
+#[derive(Debug)]
+pub struct FragmentProcessingState<'pass, 'state> {
+    pub front_face: wgpu::FrontFace,
+    pub cull_mode: Option<wgpu::Face>,
+    pub depth_stencil_state: Option<&'state wgpu::DepthStencilState>,
+    pub color_attachments: &'state mut [Option<AcquiredColorAttachment<'pass>>],
+    pub depth_stencil_attachment: Option<&'state mut AcquiredDepthStencilAttachment<'pass>>,
+    pub fragment_state: &'state FragmentState,
+}
+
+impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
+    pub fn new(
+        pipeline_state: &'state RenderPipelineState,
+        color_attachments: &'state mut [Option<AcquiredColorAttachment<'pass>>],
+        depth_stencil_attachment: Option<&'state mut AcquiredDepthStencilAttachment<'pass>>,
+    ) -> Option<Self> {
+        let pipeline_descriptor = &pipeline_state.pipeline.descriptor;
+        let fragment_state = pipeline_descriptor.fragment.as_ref()?;
+        let primitive_state = &pipeline_descriptor.primitive;
+
+        Some(Self {
+            front_face: primitive_state.front_face,
+            cull_mode: primitive_state.cull_mode,
+            depth_stencil_state: pipeline_descriptor.depth_stencil.as_ref(),
+            color_attachments,
+            depth_stencil_attachment,
+            fragment_state,
+        })
+    }
+}
+
+impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
+    pub fn process<const NUM_VERTICES: usize, Vertex, Face, Inter>(
+        &mut self,
+        primitive: &Primitive<Vertex, NUM_VERTICES, Face>,
+        front_facing: bool,
+        primitive_index: u32,
+        rasterizer_output: RasterizerOutput<Inter>,
+    ) where
+        Inter: Interpolate<NUM_VERTICES>,
+        Vertex: AsRef<ClipPosition> + AsRef<Clipped<VertexOutput>>,
+        Face: AsFrontFace,
+    {
+        let sample_index = rasterizer_output
+            .sample_index
+            .map_or(0, |sample_index| sample_index.get().into());
+        let sample_mask = !0; // todo
+
+        let input = FragmentInput {
+            position: rasterizer_output.fragment,
+            front_facing,
+            primitive_index,
+            sample_index,
+            sample_mask,
+            interpolation_coefficients: rasterizer_output.interpolation,
+            inter_stage_variables: primitive
+                .each_vertex_ref::<Clipped<VertexOutput>>()
+                .map(|vertex_output| vertex_output.unclipped.inter_stage_variables.clone()),
+        };
+
+        let mut output = FragmentOutput {
+            position: rasterizer_output.framebuffer,
+            frag_depth: rasterizer_output.fragment.z,
+            sample_mask,
+            color_attachments: &mut self.color_attachments,
+            depth_stencil_attachment: self.depth_stencil_attachment.as_deref_mut(),
+            depth_stencil_state: self.depth_stencil_state,
+        };
+
+        // perform early depth test
+        if !self.fragment_state.early_depth_test(|| output.depth_test()) {
+            // early depth test rejected
+            return;
+        }
+
+        // run fragment shader
+        let entry_point = self
+            .fragment_state
+            .module
+            .entry_point(self.fragment_state.entry_point);
+
+        match entry_point.run(&input, &mut output, NullBinding) {
+            Ok(()) => {}
+            Err(EntryPointError::Killed) => {
+                // the fragment shader ran discard. it won't have written to
+                // its color/depth attachments, so we don't have to do
+                // anything here.
+            }
+            result => {
+                // some other error. for now we'll panic
+                result.expect("fragment shader failed");
+            }
         }
     }
 }

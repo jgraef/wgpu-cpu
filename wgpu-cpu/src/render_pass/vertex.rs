@@ -23,7 +23,6 @@ use crate::{
         BufferReadGuard,
         BufferSlice,
     },
-    pipeline::RenderPipeline,
     render_pass::{
         binding::AcquiredBindingResources,
         clipper::ClipPosition,
@@ -34,6 +33,7 @@ use crate::{
         Error,
         ShaderModule,
         UserDefinedInterStagePoolBuffer,
+        UserDefinedIoBufferPool,
         memory::WriteMemory,
     },
 };
@@ -240,21 +240,22 @@ impl<User> AsMut<ClipPosition> for VertexOutput<User> {
 // read-only lock, so it can be shared). then we can either clone them, or just
 // construct as many as we need to run this in parallel
 #[derive(Debug)]
-pub struct VertexProcessingState<'pipeline, 'state> {
-    vertex_locations: &'pipeline [Option<VertexBufferLocation>],
+pub struct VertexProcessingState<'state> {
+    vertex_locations: &'state [Option<VertexBufferLocation>],
     vertex_buffers: Vec<VertexBufferInput<'state>>,
     binding_resources: AcquiredBindingResources<'state>,
     module: CompiledModule,
     entry_point: EntryPointIndex,
+    inter_stage_buffer_pool: &'state UserDefinedIoBufferPool,
 }
 
-impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
+impl<'state> VertexProcessingState<'state> {
     pub fn new(
-        pipeline: &'pipeline RenderPipeline,
+        pipeline_state: &'state RenderPipelineState,
         vertex_buffers: &'state [Option<BufferSlice>],
         binding_resources: AcquiredBindingResources<'state>,
     ) -> Self {
-        let vertex_state = &pipeline.descriptor.vertex;
+        let vertex_state = &pipeline_state.pipeline.descriptor.vertex;
 
         let vertex_buffers = vertex_state
             .vertex_buffer_layouts
@@ -271,6 +272,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
         tracing::debug!(?vertex_buffers, vertex_locations = ?vertex_state.vertex_buffer_locations);
 
         Self {
+            inter_stage_buffer_pool: &pipeline_state.interstage_user_pool,
             vertex_locations: &vertex_state.vertex_buffer_locations,
             vertex_buffers,
             binding_resources,
@@ -281,7 +283,6 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
 
     pub fn process(
         &mut self,
-        pipeline_state: &RenderPipelineState,
         instance_index: u32,
         vertex_index: u32,
     ) -> Result<VertexOutput<UserDefinedInterStagePoolBuffer>, VertexProcessingError> {
@@ -289,7 +290,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
         // output.
         let mut vertex_output = VertexOutput {
             clip_position: Default::default(),
-            inter_stage_variables: pipeline_state.interstage_user_pool.allocate(),
+            inter_stage_variables: self.inter_stage_buffer_pool.allocate(),
         };
 
         // run vertex shaders
