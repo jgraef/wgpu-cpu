@@ -215,16 +215,13 @@ impl From<ir::StackSlot> for StackLocation {
 }
 
 pub trait PointerOffset: Copy {
-    fn with_offset(self, offset: u32) -> Self;
-
-    fn add_offset(&mut self, offset: u32) {
-        *self = self.with_offset(offset);
-    }
+    #[must_use]
+    fn add_offset(self, offset: u32) -> Self;
 }
 
 impl PointerOffset for Pointer {
-    fn with_offset(mut self, offset: u32) -> Self {
-        self.offset = offset;
+    fn add_offset(mut self, offset: u32) -> Self {
+        self.offset += offset;
         self
     }
 }
@@ -233,22 +230,18 @@ impl<L> PointerOffset for PointerRange<L>
 where
     L: Copy,
 {
-    fn with_offset(self, offset: u32) -> Self {
+    fn add_offset(self, offset: u32) -> Self {
         Self {
-            pointer: self.pointer.with_offset(offset),
+            pointer: self.pointer.add_offset(offset),
             len: self.len,
         }
     }
 }
 
 impl PointerOffset for StackLocation {
-    fn with_offset(mut self, offset: u32) -> Self {
-        self.offset = offset;
-        self
-    }
-
-    fn add_offset(&mut self, offset: u32) {
+    fn add_offset(mut self, offset: u32) -> Self {
         self.offset += offset;
+        self
     }
 }
 
@@ -677,10 +670,10 @@ where
 }
 
 impl PointerOffset for PointerValue {
-    fn with_offset(self, offset: u32) -> Self {
+    fn add_offset(self, offset: u32) -> Self {
         Self {
             ty: self.ty,
-            inner: self.inner.with_offset(offset),
+            inner: self.inner.add_offset(offset),
         }
     }
 }
@@ -693,12 +686,12 @@ pub enum PointerValueInner {
 }
 
 impl PointerOffset for PointerValueInner {
-    fn with_offset(self, offset: u32) -> Self {
+    fn add_offset(self, offset: u32) -> Self {
         match self {
-            Self::StaticPointer(pointer) => Self::StaticPointer(pointer.with_offset(offset)),
-            Self::DynamicPointer(pointer) => Self::DynamicPointer(pointer.with_offset(offset)),
+            Self::StaticPointer(pointer) => Self::StaticPointer(pointer.add_offset(offset)),
+            Self::DynamicPointer(pointer) => Self::DynamicPointer(pointer.add_offset(offset)),
             Self::StackLocation(stack_location) => {
-                Self::StackLocation(stack_location.with_offset(offset))
+                Self::StackLocation(stack_location.add_offset(offset))
             }
         }
     }
@@ -793,7 +786,7 @@ where
 
         let values = std::iter::from_fn(|| {
             let value = ir::Value::load(context, function_builder, vectorized.ty, pointer);
-            pointer.add_offset(stride);
+            pointer = pointer.add_offset(stride);
             Some(value)
         })
         .take(vectorized.count.into())
@@ -819,7 +812,7 @@ where
 
         for value in self.as_ir_values() {
             value.store(context, function_builder, pointer)?;
-            pointer.add_offset(stride);
+            pointer = pointer.add_offset(stride);
         }
 
         Ok(())
@@ -915,7 +908,7 @@ where
 
         let values = std::iter::from_fn(|| {
             let value = ir::Value::load(context, function_builder, vectorized.ty, pointer);
-            pointer.add_offset(stride);
+            pointer = pointer.add_offset(stride);
             Some(value)
         })
         .take(vectorized.count.into())
@@ -941,7 +934,7 @@ where
 
         for value in self.as_ir_values() {
             value.store(context, function_builder, pointer)?;
-            pointer.add_offset(stride);
+            pointer = pointer.add_offset(stride);
         }
 
         Ok(())
@@ -1013,7 +1006,7 @@ where
                     context,
                     function_builder,
                     member_type,
-                    pointer.with_offset(member.offset),
+                    pointer.add_offset(member.offset),
                 )
             })
             .collect::<Result<_, Error>>()?;
@@ -1034,11 +1027,7 @@ where
         pointer: P,
     ) -> Result<(), Error> {
         for (member, member_value) in self.ty.members(context.source).iter().zip(&self.members) {
-            member_value.store(
-                context,
-                function_builder,
-                pointer.with_offset(member.offset),
-            )?;
+            member_value.store(context, function_builder, pointer.add_offset(member.offset))?;
         }
 
         Ok(())
@@ -1097,7 +1086,7 @@ where
         let values = (0..count)
             .map(|_i| {
                 let value = Value::load(context, function_builder, base_type, pointer)?;
-                pointer.add_offset(ty.stride);
+                pointer = pointer.add_offset(ty.stride);
                 Ok(value)
             })
             .collect::<Result<Vec<Value>, Error>>()?;
@@ -1119,7 +1108,7 @@ where
     ) -> Result<(), Error> {
         for value in &self.values {
             value.store(context, function_builder, pointer)?;
-            pointer.add_offset(self.ty.stride);
+            pointer = pointer.add_offset(self.ty.stride);
         }
 
         Ok(())

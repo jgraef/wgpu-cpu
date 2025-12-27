@@ -15,6 +15,10 @@ use parking_lot::{
 };
 
 use crate::{
+    bind_group::{
+        BindGroup,
+        BindGroupLayout,
+    },
     buffer::Buffer,
     command::{
         Command,
@@ -104,14 +108,14 @@ impl wgpu::custom::DeviceInterface for Device {
         &self,
         desc: &wgpu::BindGroupLayoutDescriptor<'_>,
     ) -> wgpu::custom::DispatchBindGroupLayout {
-        todo!()
+        wgpu::custom::DispatchBindGroupLayout::custom(BindGroupLayout::new(desc))
     }
 
     fn create_bind_group(
         &self,
         desc: &wgpu::BindGroupDescriptor<'_>,
     ) -> wgpu::custom::DispatchBindGroup {
-        todo!()
+        wgpu::custom::DispatchBindGroup::custom(BindGroup::new(desc))
     }
 
     fn create_pipeline_layout(

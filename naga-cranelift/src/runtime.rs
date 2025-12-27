@@ -13,6 +13,7 @@ use cranelift_frontend::FunctionBuilder;
 use crate::{
     Error,
     bindings::{
+        BindingResources,
         IoBindingVisitor,
         ShaderInput,
         ShaderOutput,
@@ -857,7 +858,7 @@ impl<'source, 'compiler> RuntimeEntryPointBuilder<'source, 'compiler> {
                 &mut self.function_builder,
                 ty,
                 StackLocation::from(stack_slot)
-                    .with_offset(offset.try_into().expect("stack offset overflow")),
+                    .add_offset(offset.try_into().expect("stack offset overflow")),
             )?;
             argument_values.extend(value.as_ir_values());
         }
@@ -965,21 +966,25 @@ pub enum DefaultRuntimeError {
 }
 
 #[derive(Debug)]
-pub struct DefaultRuntime<'layout, I, O> {
+pub struct DefaultRuntime<'layout, I, O, B> {
     pub input: I,
     pub input_layout: &'layout [BindingStackLayout],
+
     pub output: O,
     pub output_layout: &'layout [BindingStackLayout],
+
+    pub binding_resources: B,
 
     pub private_memory_layout: &'layout PrivateMemoryLayout,
 }
 
-impl<'layout, I, O> DefaultRuntime<'layout, I, O> {
+impl<'layout, I, O, B> DefaultRuntime<'layout, I, O, B> {
     pub fn new(
         input: I,
         input_layout: &'layout [BindingStackLayout],
         output: O,
         output_layout: &'layout [BindingStackLayout],
+        binding_resources: B,
         private_memory_layout: &'layout PrivateMemoryLayout,
     ) -> Self {
         Self {
@@ -987,15 +992,17 @@ impl<'layout, I, O> DefaultRuntime<'layout, I, O> {
             input_layout,
             output,
             output_layout,
+            binding_resources,
             private_memory_layout,
         }
     }
 }
 
-impl<'layout, I, O> Runtime for DefaultRuntime<'layout, I, O>
+impl<'layout, I, O, B> Runtime for DefaultRuntime<'layout, I, O, B>
 where
     I: ShaderInput,
     O: ShaderOutput,
+    B: BindingResources,
 {
     type Error = DefaultRuntimeError;
 
@@ -1033,7 +1040,8 @@ where
     }
 
     fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
-        todo!("buffer: {binding:?}");
+        let buffer = self.binding_resources.read(binding);
+        Ok(buffer)
     }
 
     fn buffer_mut(&mut self, binding: naga::ResourceBinding) -> Result<&mut [u8], Self::Error> {

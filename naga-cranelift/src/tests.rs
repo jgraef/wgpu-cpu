@@ -95,7 +95,7 @@ fn vertex_triangle() {
     let mut output = VertexOutput::default();
     for i in 0..3 {
         entry_point
-            .run(VertexInput { vertex_index: i }, &mut output)
+            .run(VertexInput { vertex_index: i }, &mut output, NullBinding)
             .unwrap();
     }
 
@@ -145,7 +145,7 @@ where
     };
     module
         .entry_point(EntryPointIndex::from(0))
-        .run(NullBinding, &mut output)?;
+        .run(NullBinding, &mut output, NullBinding)?;
 
     Ok(output.output)
 }
@@ -1214,4 +1214,65 @@ fn return_from_loop_body_diverging() {
     );
 
     assert_eq!(output, 45);
+}
+
+#[test]
+fn matrix_vector_product() {
+    let output = exec::<[f32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4f,
+        }
+
+        @vertex
+        fn main() -> Output {
+            var left = mat4x4f(
+                vec4f(1, 1, 1, 1),
+                vec4f(0, 2, 0, 2),
+                vec4f(3, 2, 1, 0),
+                vec4f(1, 2, 3, 4),
+            );
+            var right = vec4f(1, 2, 3, 4);
+            let output = left * right;
+            return Output(
+                vec4f(),
+                output,
+            );
+        }
+        "#,
+    );
+
+    assert_abs_diff_eq!(output, [14.0, 19.0, 16.0, 21.0]);
+}
+
+#[test]
+fn global_matrix_init() {
+    let output = exec::<[f32; 4]>(
+        r#"
+        struct Output {
+            @builtin(position) p: vec4f,
+            @location(0) output: vec4f,
+        }
+
+        var<private> matrix: mat4x4f = mat4x4f(
+            vec4f(1, 1, 1, 1),
+            vec4f(0, 2, 0, 2),
+            vec4f(3, 2, 1, 0),
+            vec4f(1, 2, 3, 4),
+        );
+
+        @vertex
+        fn main() -> Output {
+            var right = vec4f(1, 2, 3, 4);
+            let output = matrix * right;
+            return Output(
+                vec4f(),
+                output,
+            );
+        }
+        "#,
+    );
+
+    assert_abs_diff_eq!(output, [14.0, 19.0, 16.0, 21.0]);
 }

@@ -1,3 +1,4 @@
+pub mod binding;
 pub mod clipper;
 pub mod fragment;
 pub mod index;
@@ -19,6 +20,7 @@ use nalgebra::{
 };
 
 use crate::{
+    bind_group::BindGroup,
     buffer::BufferSlice,
     command::{
         Command,
@@ -81,7 +83,13 @@ impl wgpu::custom::RenderPassInterface for RenderPassEncoder {
         bind_group: Option<&wgpu::custom::DispatchBindGroup>,
         offsets: &[wgpu::DynamicOffset],
     ) {
-        todo!()
+        let bind_group =
+            bind_group.map(|bind_group| bind_group.as_custom::<BindGroup>().unwrap().clone());
+        self.commands.push(RenderPassSubCommand::SetBindGroup {
+            index,
+            bind_group,
+            offsets: offsets.to_vec(),
+        });
     }
 
     fn set_index_buffer(
@@ -354,6 +362,13 @@ impl RenderPassCommand {
                 RenderPassSubCommand::SetVertexBuffer { buffer_slice, slot } => {
                     state.set_vertex_buffer(buffer_slice, slot);
                 }
+                RenderPassSubCommand::SetBindGroup {
+                    index,
+                    bind_group,
+                    offsets,
+                } => {
+                    state.set_bind_group(index, bind_group, offsets);
+                }
                 RenderPassSubCommand::SetBlendConstant { color } => {
                     state.set_blend_constant(color);
                 }
@@ -382,7 +397,7 @@ impl RenderPassCommand {
 #[derive(derive_more::Debug)]
 pub enum RenderPassSubCommand {
     SetPipeline {
-        #[debug(skip)]
+        #[debug("RenderPipeline {{ ... }}")]
         pipeline: RenderPipeline,
     },
     SetIndexBuffer {
@@ -392,6 +407,11 @@ pub enum RenderPassSubCommand {
     SetVertexBuffer {
         buffer_slice: BufferSlice,
         slot: u32,
+    },
+    SetBindGroup {
+        index: u32,
+        bind_group: Option<BindGroup>,
+        offsets: Vec<wgpu::DynamicOffset>,
     },
     SetBlendConstant {
         color: wgpu::Color,

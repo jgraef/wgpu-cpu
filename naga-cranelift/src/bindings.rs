@@ -40,6 +40,10 @@ where
     }
 }
 
+pub trait BindingResources {
+    fn read(&self, binding: naga::ResourceBinding) -> &[u8];
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NullBinding;
 
@@ -54,6 +58,13 @@ impl ShaderOutput for NullBinding {
     fn read_from(&mut self, binding: &naga::Binding, ty: &naga::Type, source: &[u8]) {
         let _ = (binding, ty, source);
         // nop
+    }
+}
+
+impl BindingResources for NullBinding {
+    fn read(&self, binding: naga::ResourceBinding) -> &[u8] {
+        let _ = binding;
+        &[]
     }
 }
 

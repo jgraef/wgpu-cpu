@@ -333,7 +333,7 @@ impl CompileAccess<u32> for PointerValue {
                 base_type,
                 address_space: self.ty.address_space,
             },
-            inner: self.inner.with_offset(offset),
+            inner: self.inner.add_offset(offset),
         })
     }
 }

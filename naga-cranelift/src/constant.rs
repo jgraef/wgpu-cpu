@@ -392,7 +392,23 @@ impl CompileConstant for ConstantMatrix {
 
 impl WriteConstant for ConstantMatrix {
     fn write_into(&self, context: &Context, destination: &mut [u8]) {
-        todo!("write constant matrix")
+        let ty = self.type_of();
+        let scalar_size = usize::from(ty.scalar.byte_width());
+        let column_stride = usize::from(ty.column_stride()) * scalar_size;
+
+        let mut offset = 0;
+
+        let mut i: usize = 0;
+        for _ in 0..u8::from(self.columns) {
+            let mut row_offset = offset;
+            for _ in 0..u8::from(self.rows) {
+                self.data
+                    .write_into(i, context, &mut destination[row_offset..][..scalar_size]);
+                row_offset += scalar_size;
+                i += 1;
+            }
+            offset += column_stride;
+        }
     }
 }
 
@@ -412,7 +428,11 @@ impl EvaluateCompose<ConstantVector> for ConstantMatrix {
         ty: MatrixType,
         components: Vec<ConstantVector>,
     ) -> Result<Self, Error> {
-        todo!("compose constant matrix from vectors");
+        Ok(Self {
+            columns: ty.columns,
+            rows: ty.rows,
+            data: ConstantVectorData::merged(ty.scalar, components.iter().map(|value| &value.data)),
+        })
     }
 }
 
@@ -503,6 +523,46 @@ impl<const N: usize> ConstantVectorData<N> {
                 )
             }
         }
+    }
+
+    pub fn merged<'a, const M: usize>(
+        scalar_type: ScalarType,
+        components: impl Iterator<Item = &'a ConstantVectorData<M>>,
+    ) -> ConstantVectorData<N> {
+        let mut output = match scalar_type {
+            ScalarType::Bool => ConstantVectorData::Bool(ArrayVec::new()),
+            ScalarType::Int(Signedness::Unsigned, IntWidth::I32) => {
+                ConstantVectorData::U32(ArrayVec::new())
+            }
+            ScalarType::Int(Signedness::Signed, IntWidth::I32) => {
+                ConstantVectorData::I32(ArrayVec::new())
+            }
+            ScalarType::Float(FloatWidth::F16) => ConstantVectorData::F16(ArrayVec::new()),
+            ScalarType::Float(FloatWidth::F32) => ConstantVectorData::F32(ArrayVec::new()),
+        };
+
+        for component in components {
+            match (&mut output, component) {
+                (ConstantVectorData::Bool(accu), ConstantVectorData::Bool(values)) => {
+                    accu.extend(values.iter().copied())
+                }
+                (ConstantVectorData::U32(accu), ConstantVectorData::U32(values)) => {
+                    accu.extend(values.iter().copied())
+                }
+                (ConstantVectorData::I32(accu), ConstantVectorData::I32(values)) => {
+                    accu.extend(values.iter().copied())
+                }
+                (ConstantVectorData::F16(accu), ConstantVectorData::F16(values)) => {
+                    accu.extend(values.iter().copied())
+                }
+                (ConstantVectorData::F32(accu), ConstantVectorData::F32(values)) => {
+                    accu.extend(values.iter().copied())
+                }
+                _ => unreachable!("invalid"),
+            }
+        }
+
+        output
     }
 }
 

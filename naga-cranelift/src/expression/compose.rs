@@ -16,7 +16,10 @@ use crate::{
         EvaluateExpression,
     },
     function::FunctionCompiler,
-    simd::VectorIrType,
+    simd::{
+        MatrixIrType,
+        VectorIrType,
+    },
     types::{
         ArrayType,
         MatrixType,
@@ -71,7 +74,7 @@ impl EvaluateExpression for ComposeExpression {
 
 pub trait CompileCompose<Inner>: Sized + TypeOf {
     fn compile_compose(
-        function_compiler: &mut FunctionCompiler,
+        compiler: &mut FunctionCompiler,
         ty: Self::Type,
         components: Vec<Inner>,
     ) -> Result<Self, Error>;
@@ -79,11 +82,11 @@ pub trait CompileCompose<Inner>: Sized + TypeOf {
 
 impl CompileCompose<ScalarValue> for VectorValue {
     fn compile_compose(
-        function_compiler: &mut FunctionCompiler,
+        compiler: &mut FunctionCompiler,
         ty: VectorType,
         components: Vec<ScalarValue>,
     ) -> Result<Self, Error> {
-        let vectorization = function_compiler.context.simd_context[ty];
+        let vectorization = compiler.context.simd_context[ty];
 
         let values = match vectorization {
             VectorIrType::Plain { ty: _ } => {
@@ -101,21 +104,18 @@ impl CompileCompose<ScalarValue> for VectorValue {
 
                 const CRANELIFT_LOWERING_WORKAROUND: bool = false;
                 let value = if components.len() == 2 && CRANELIFT_LOWERING_WORKAROUND {
-                    //function_compiler.function_builder.ins().uunarrow(x, y)
+                    //compiler.function_builder.ins().uunarrow(x, y)
                     todo!("workaround");
                 }
                 else {
                     let mut components = components.into_iter();
                     let first = components.next().unwrap();
 
-                    let mut vector = function_compiler
-                        .function_builder
-                        .ins()
-                        .splat(ir_ty, first.value);
+                    let mut vector = compiler.function_builder.ins().splat(ir_ty, first.value);
                     let mut lane = 1;
 
                     for component in components {
-                        vector = function_compiler.function_builder.ins().insertlane(
+                        vector = compiler.function_builder.ins().insertlane(
                             vector,
                             component.value,
                             lane as u8,
@@ -138,7 +138,7 @@ impl CompileCompose<ScalarValue> for VectorValue {
 #[allow(unused_variables)]
 impl CompileCompose<ScalarValue> for MatrixValue {
     fn compile_compose(
-        function_compiler: &mut FunctionCompiler,
+        compiler: &mut FunctionCompiler,
         ty: MatrixType,
         components: Vec<ScalarValue>,
     ) -> Result<Self, Error> {
@@ -149,21 +149,55 @@ impl CompileCompose<ScalarValue> for MatrixValue {
 #[allow(unused_variables)]
 impl CompileCompose<VectorValue> for MatrixValue {
     fn compile_compose(
-        function_compiler: &mut FunctionCompiler,
+        compiler: &mut FunctionCompiler,
         ty: MatrixType,
         components: Vec<VectorValue>,
     ) -> Result<Self, Error> {
-        todo!("compose matrix from vectors");
+        let matrix_vectorization = compiler.context.simd_context[ty];
+        let vector_vectorization = compiler.context.simd_context[components[0].ty];
+
+        let values = match (matrix_vectorization, vector_vectorization) {
+            (MatrixIrType::Plain { ty: matrix_type }, VectorIrType::Plain { ty: vector_type }) => {
+                todo!()
+            }
+            (
+                MatrixIrType::ColumnVector {
+                    ty: matrix_column_type,
+                },
+                VectorIrType::Vector { ty: vector_type },
+            ) => {
+                let columns = u8::from(ty.columns);
+                assert_eq!(components.len(), columns.into());
+                components
+                    .iter()
+                    .flat_map(|vector| {
+                        assert_eq!(ty.columns, vector.ty.size);
+                        vector.values.iter().copied()
+                    })
+                    .collect()
+            }
+            (
+                MatrixIrType::FullVector { ty: matrix_type },
+                VectorIrType::Vector { ty: vector_type },
+            ) => todo!(),
+            _ => {
+                panic!(
+                    "bug: how is this vectorization possible: matrix={matrix_vectorization:?}, vector={vector_vectorization:?}"
+                )
+            }
+        };
+
+        Ok(MatrixValue { ty, values })
     }
 }
 
 impl CompileCompose<Value> for StructValue {
     fn compile_compose(
-        function_compiler: &mut FunctionCompiler,
+        compiler: &mut FunctionCompiler,
         ty: StructType,
         components: Vec<Value>,
     ) -> Result<Self, Error> {
-        let _ = function_compiler;
+        let _ = compiler;
         Ok(Self {
             ty,
             members: components,
@@ -173,11 +207,11 @@ impl CompileCompose<Value> for StructValue {
 
 impl CompileCompose<Value> for ArrayValue {
     fn compile_compose(
-        function_compiler: &mut FunctionCompiler,
+        compiler: &mut FunctionCompiler,
         ty: ArrayType,
         components: Vec<Value>,
     ) -> Result<Self, Error> {
-        let _ = function_compiler;
+        let _ = compiler;
         Ok(Self {
             ty,
             values: components,
@@ -187,7 +221,7 @@ impl CompileCompose<Value> for ArrayValue {
 
 impl CompileCompose<Value> for Value {
     fn compile_compose(
-        function_compiler: &mut FunctionCompiler,
+        compiler: &mut FunctionCompiler,
         ty: Type,
         components: Vec<Value>,
     ) -> Result<Self, Error> {
@@ -207,7 +241,7 @@ impl CompileCompose<Value> for Value {
                         }
                     })
                     .collect();
-                VectorValue::compile_compose(function_compiler, vector_type, components)?.into()
+                VectorValue::compile_compose(compiler, vector_type, components)?.into()
             }
             Type::Matrix(matrix_type) => {
                 match &components[0] {
@@ -221,8 +255,7 @@ impl CompileCompose<Value> for Value {
                                 }
                             })
                             .collect();
-                        MatrixValue::compile_compose(function_compiler, matrix_type, components)?
-                            .into()
+                        MatrixValue::compile_compose(compiler, matrix_type, components)?.into()
                     }
                     Value::Vector(_) => {
                         let components = components
@@ -234,8 +267,7 @@ impl CompileCompose<Value> for Value {
                                 }
                             })
                             .collect();
-                        MatrixValue::compile_compose(function_compiler, matrix_type, components)?
-                            .into()
+                        MatrixValue::compile_compose(compiler, matrix_type, components)?.into()
                     }
                     _ => {
                         panic!(
@@ -246,10 +278,10 @@ impl CompileCompose<Value> for Value {
                 }
             }
             Type::Struct(struct_type) => {
-                StructValue::compile_compose(function_compiler, struct_type, components)?.into()
+                StructValue::compile_compose(compiler, struct_type, components)?.into()
             }
             Type::Array(array_type) => {
-                ArrayValue::compile_compose(function_compiler, array_type, components)?.into()
+                ArrayValue::compile_compose(compiler, array_type, components)?.into()
             }
             _ => panic!("Compose is invalid for {ty:?}"),
         };

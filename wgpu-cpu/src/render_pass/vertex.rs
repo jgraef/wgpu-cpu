@@ -25,6 +25,7 @@ use crate::{
     },
     pipeline::RenderPipeline,
     render_pass::{
+        binding::AcquiredBindingResources,
         clipper::ClipPosition,
         invalid_binding,
         state::RenderPipelineState,
@@ -242,6 +243,7 @@ impl<User> AsMut<ClipPosition> for VertexOutput<User> {
 pub struct VertexProcessingState<'pipeline, 'state> {
     vertex_locations: &'pipeline [Option<VertexBufferLocation>],
     vertex_buffers: Vec<VertexBufferInput<'state>>,
+    binding_resources: AcquiredBindingResources<'state>,
     module: CompiledModule,
     entry_point: EntryPointIndex,
 }
@@ -250,6 +252,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
     pub fn new(
         pipeline: &'pipeline RenderPipeline,
         vertex_buffers: &'state [Option<BufferSlice>],
+        binding_resources: AcquiredBindingResources<'state>,
     ) -> Self {
         let vertex_state = &pipeline.descriptor.vertex;
 
@@ -270,6 +273,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
         Self {
             vertex_locations: &vertex_state.vertex_buffer_locations,
             vertex_buffers,
+            binding_resources,
             module: vertex_state.module.clone(),
             entry_point: vertex_state.entry_point,
         }
@@ -298,6 +302,7 @@ impl<'pipeline, 'state> VertexProcessingState<'pipeline, 'state> {
                 vertex_locations: &self.vertex_locations,
             },
             &mut vertex_output,
+            &self.binding_resources,
         )?;
         //tracing::debug!(?vertex_index, clip_position = ?vertex_output.clip_position);
 

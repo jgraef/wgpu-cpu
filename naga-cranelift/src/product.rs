@@ -8,6 +8,7 @@ use cranelift_module::FuncId;
 
 use crate::{
     bindings::{
+        BindingResources,
         InterStageLayout,
         ShaderInput,
         ShaderOutput,
@@ -277,16 +278,23 @@ impl<'a> EntryPoint<'a> {
         self.function()(runtime)
     }
 
-    pub fn run<I, O>(&self, input: I, output: O) -> Result<(), EntryPointError<DefaultRuntimeError>>
+    pub fn run<I, O, B>(
+        &self,
+        input: I,
+        output: O,
+        binding_resources: B,
+    ) -> Result<(), EntryPointError<DefaultRuntimeError>>
     where
         I: ShaderInput,
         O: ShaderOutput,
+        B: BindingResources,
     {
         let runtime = DefaultRuntime::new(
             input,
             &self.inner.input_layout,
             output,
             &self.inner.output_layout,
+            binding_resources,
             &self.private_memory_layout,
         );
 

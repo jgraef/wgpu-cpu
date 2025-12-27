@@ -38,6 +38,7 @@ impl Buffer {
     }
 
     pub fn new(size: usize, map_mode: Option<wgpu::MapMode>) -> Self {
+        tracing::debug!(?size, ?map_mode, "create buffer");
         Self {
             data: Arc::new(RwLock::new(BufferData {
                 data: vec![0; size],

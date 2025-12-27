@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    f32::consts::FRAC_PI_4,
+    path::PathBuf,
+};
 
 use bytemuck::{
     Pod,
@@ -8,9 +11,15 @@ use clap::Parser;
 use color_eyre::eyre::Error;
 use dotenvy::dotenv;
 use nalgebra::{
+    Isometry3,
+    Matrix4,
+    Perspective3,
     Point3,
+    Vector2,
+    Vector3,
     Vector4,
 };
+use num_traits::Bounded;
 use wgpu::util::DeviceExt;
 
 #[derive(Debug, Parser)]
@@ -31,10 +40,12 @@ pub fn main() -> Result<(), Error> {
 
     tracing::info!(?args, "Hello Teapot!");
 
+    let image_size = Vector2::new(600, 400);
+
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let size = wgpu::Extent3d {
-        width: 512,
-        height: 512,
+        width: image_size.x,
+        height: image_size.y,
         depth_or_array_layers: 1,
     };
 
@@ -46,7 +57,7 @@ pub fn main() -> Result<(), Error> {
         Ok::<_, Error>((adapter, device, queue))
     })?;
 
-    let mesh = {
+    let (mesh, center) = {
         // https://raw.githubusercontent.com/rbarril75/Scratched-Blue-Teapot/refs/heads/master/teapot.obj
         let (models, _) = tobj::load_obj("wgpu-cpu/examples/teapot.obj", &tobj::GPU_LOAD_OPTIONS)?;
         let mesh = models.into_iter().next().unwrap().mesh;
@@ -57,17 +68,25 @@ pub fn main() -> Result<(), Error> {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let vertices = bytemuck::cast_slice::<f32, [f32; 3]>(&mesh.positions)
+        let positions = bytemuck::cast_slice::<f32, Point3<f32>>(&mesh.positions);
+
+        let mut min = Vector3::max_value();
+        let mut max = Vector3::min_value();
+        for position in positions {
+            min = min.zip_map(&position.coords, |a: f32, b: f32| a.min(b));
+            max = max.zip_map(&position.coords, |a: f32, b: f32| a.max(b));
+        }
+        let center = Point3::from(0.5 * (min + max));
+
+        let vertices = positions
             .iter()
-            .enumerate()
-            .map(|(i, position)| {
-                let i = i % 3;
+            .map(|position| {
                 Vertex {
-                    position: Point3::from(*position).to_homogeneous(),
+                    position: position.to_homogeneous(),
                     color: Vector4::new(
-                        (i == 0) as i32 as f32,
-                        (i == 1) as i32 as f32,
-                        (i == 2) as i32 as f32,
+                        (position.x - min.x) / (max.x - min.x),
+                        (position.y - min.y) / (max.y - min.y),
+                        (position.z - min.z) / (max.z - min.z),
                         1.0,
                     ),
                 }
@@ -86,18 +105,74 @@ pub fn main() -> Result<(), Error> {
             num_vertices = mesh.positions.len()
         );
 
-        Mesh {
+        let mesh = Mesh {
             index_buffer,
             vertex_buffer,
             num_indices: mesh.indices.len().try_into().unwrap(),
-        }
+        };
+
+        (mesh, center)
+    };
+
+    let camera_buffer = {
+        let projection = Perspective3::new(
+            image_size.x as f32 / image_size.y as f32,
+            FRAC_PI_4,
+            0.1,
+            50.0,
+        );
+
+        let mut matrix = projection.to_homogeneous();
+        // nalgebra assumes we're using a right-handed world coordinate system and a
+        // left-handed NDC and thus flips the z-axis. Undo this here.
+        matrix[(2, 2)] *= -1.0;
+        matrix[(3, 2)] = 1.0;
+
+        tracing::debug!(?center);
+        let transform = Isometry3::face_towards(
+            &(center + Vector3::new(0.0, 2.0, -8.0)),
+            &center,
+            &Vector3::y(),
+        );
+
+        let matrix = matrix * transform.inverse().to_homogeneous();
+
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera uniform"),
+            contents: bytemuck::bytes_of::<Matrix4<f32>>(&matrix),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
     };
 
     let shader_module = device.create_shader_module(wgpu::include_wgsl!("hello_teapot.wgsl"));
 
+    let camera_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera uniform"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+    let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("camera uniform"),
+        layout: &camera_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: camera_buffer.as_entire_binding(),
+        }],
+    });
+
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("hello_triangle pipeline layout"),
-        bind_group_layouts: &[],
+        bind_group_layouts: &[&camera_bind_group_layout],
         immediate_size: 0,
     });
 
@@ -131,6 +206,7 @@ pub fn main() -> Result<(), Error> {
             format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
+            //depth_compare: wgpu::CompareFunction::Always,
             stencil: Default::default(),
             bias: Default::default(),
         }),
@@ -201,6 +277,7 @@ pub fn main() -> Result<(), Error> {
         });
 
         render_pass.set_pipeline(&pipeline);
+        render_pass.set_bind_group(0, Some(&camera_bind_group), &[]);
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.draw_indexed(0..mesh.num_indices, 0, 0..1);

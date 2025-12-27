@@ -17,6 +17,10 @@ use crate::{
         AbortCode,
         FunctionCompiler,
     },
+    simd::{
+        MatrixIrType,
+        VectorIrType,
+    },
     types::{
         ScalarType,
         Signedness,
@@ -261,7 +265,68 @@ impl CompileMul<VectorValue> for MatrixValue {
         compiler: &mut FunctionCompiler,
         other: &VectorValue,
     ) -> Result<Self::Output, Error> {
-        todo!("matrix * vector")
+        let matrix_vectorization = compiler.context.simd_context[self.ty];
+        let vector_vectorization = compiler.context.simd_context[other.ty];
+
+        let values = match (matrix_vectorization, vector_vectorization) {
+            (MatrixIrType::Plain { ty: matrix_type }, VectorIrType::Plain { ty: vector_type }) => {
+                todo!()
+            }
+            (
+                MatrixIrType::ColumnVector {
+                    ty: matrix_column_type,
+                },
+                VectorIrType::Vector { ty: vector_type },
+            ) => {
+                assert_eq!(self.ty.columns, other.ty.size);
+
+                let columns = u8::from(self.ty.columns);
+                assert_eq!(self.values.len(), columns.into());
+                assert_eq!(other.values.len(), 1);
+
+                let mut column_sum = None;
+
+                for i in 0..columns {
+                    // todo: shuffle instead?
+                    let v_i = compiler
+                        .function_builder
+                        .ins()
+                        .extractlane(other.values[0], i);
+                    let v_i = compiler.function_builder.ins().splat(vector_type, v_i);
+
+                    // wgsl apparently only allows float matrices
+                    assert!(vector_type.lane_of().is_float());
+
+                    let x_i = compiler
+                        .function_builder
+                        .ins()
+                        .fmul(v_i, self.values[usize::from(i)]);
+
+                    if let Some(column_sum) = &mut column_sum {
+                        *column_sum = compiler.function_builder.ins().fadd(*column_sum, x_i);
+                    }
+                    else {
+                        column_sum = Some(x_i);
+                    }
+                }
+
+                [column_sum.unwrap()].into_iter().collect()
+            }
+            (
+                MatrixIrType::FullVector { ty: matrix_type },
+                VectorIrType::Vector { ty: vector_type },
+            ) => todo!(),
+            _ => {
+                panic!(
+                    "bug: how is this vectorization possible: matrix={matrix_vectorization:?}, vector={vector_vectorization:?}"
+                )
+            }
+        };
+
+        Ok(VectorValue {
+            ty: other.ty,
+            values,
+        })
     }
 }
 

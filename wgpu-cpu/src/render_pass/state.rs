@@ -4,7 +4,10 @@ use std::{
 };
 
 use naga_cranelift::{
-    bindings::InterStageLayout,
+    bindings::{
+        InterStageLayout,
+        NullBinding,
+    },
     product::EntryPointError,
 };
 use nalgebra::{
@@ -13,10 +16,12 @@ use nalgebra::{
 };
 
 use crate::{
+    bind_group::BindGroup,
     buffer::BufferSlice,
     pipeline::RenderPipeline,
     render_pass::{
         RenderPassDescriptor,
+        binding::AcquiredBindingResources,
         clipper::{
             Clip,
             ClipPosition,
@@ -65,6 +70,8 @@ pub struct State<'pass> {
 
     // todo: should we lock the vertex buffers when we get them?
     pub vertex_buffers: Vec<Option<BufferSlice>>,
+
+    pub bind_groups: Vec<Option<BindGroup>>,
 }
 
 impl<'pass> State<'pass> {
@@ -124,6 +131,7 @@ impl<'pass> State<'pass> {
                 depth_stencil_attachment,
             },
             vertex_buffers: vec![],
+            bind_groups: vec![],
         }
     }
 
@@ -183,8 +191,20 @@ impl<'pass> State<'pass> {
         if index >= self.vertex_buffers.len() {
             self.vertex_buffers.resize_with(index + 1, || None);
         }
-
         self.vertex_buffers[index] = Some(buffer_slice);
+    }
+
+    pub fn set_bind_group(
+        &mut self,
+        index: u32,
+        bind_group: Option<BindGroup>,
+        offsets: Vec<wgpu::DynamicOffset>,
+    ) {
+        let index = index as usize;
+        if index >= self.bind_groups.len() {
+            self.bind_groups.resize_with(index + 1, || None);
+        }
+        self.bind_groups[index] = bind_group;
     }
 
     pub fn set_blend_constant(&mut self, color: wgpu::Color) {
@@ -229,8 +249,12 @@ impl DrawCall {
         let framebuffer_size = state.render_state.scissor_rect.size;
         let clipper = NoClipper;
 
-        let vertex_processing_state =
-            VertexProcessingState::new(&pipeline_state.pipeline, &state.vertex_buffers);
+        let binding_resources = AcquiredBindingResources::new(&state.bind_groups);
+        let vertex_processing_state = VertexProcessingState::new(
+            &pipeline_state.pipeline,
+            &state.vertex_buffers,
+            binding_resources,
+        );
 
         let primitive = &pipeline_state.pipeline.descriptor.primitive;
         let topology = primitive.topology;
@@ -518,6 +542,8 @@ impl<'pass> RenderState<'pass> {
             if let Some(fragment_state) = &mut pipeline.descriptor.fragment.as_ref() {
                 for (primitive_index, primitive) in primitives.enumerate() {
                     for primitive in clipper.clip(primitive) {
+                        //tracing::debug!(primitive = ?primitive.clip_positions());
+
                         let (front_facing, cull_face) =
                             primitive
                                 .try_front_face()
@@ -594,7 +620,7 @@ impl<'pass> RenderState<'pass> {
                                 .module
                                 .entry_point(fragment_state.entry_point);
 
-                            match entry_point.run(&input, &mut output) {
+                            match entry_point.run(&input, &mut output, NullBinding) {
                                 Ok(()) => {}
                                 Err(EntryPointError::Killed) => {
                                     // the fragment shader ran discard. it won't
