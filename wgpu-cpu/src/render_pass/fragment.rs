@@ -131,7 +131,7 @@ impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
         rasterizer_output: RasterizerOutput<Inter>,
     ) where
         Inter: Interpolate<NUM_VERTICES>,
-        Vertex: AsRef<ClipPosition> + AsRef<Clipped<VertexOutput>>,
+        Vertex: AsRef<ClipPosition> + AsRef<Clipped<VertexOutput, Inter>>,
         Face: AsFrontFace,
     {
         let sample_index = rasterizer_output
@@ -147,7 +147,7 @@ impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
             sample_mask,
             interpolation_coefficients: rasterizer_output.interpolation,
             inter_stage_variables: primitive
-                .each_vertex_ref::<Clipped<VertexOutput>>()
+                .each_vertex_ref::<Clipped<VertexOutput, Inter>>()
                 .map(|vertex_output| vertex_output.unclipped.inter_stage_variables.clone()),
         };
 

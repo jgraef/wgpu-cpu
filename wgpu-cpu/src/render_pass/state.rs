@@ -34,7 +34,6 @@ use crate::{
             AsFrontFace,
             Assemble,
             List,
-            Primitive,
             ProcessItem,
             Strip,
         },
@@ -243,7 +242,7 @@ impl DrawCall {
         };
 
         let framebuffer_size = state.scissor_rect.size;
-        let clipper = NoClipper;
+        let clipper = NoClipper; // todo
 
         let binding_resources = AcquiredBindingResources::new(&state.bind_groups);
         let vertex_processing_state =
@@ -269,7 +268,7 @@ impl DrawCall {
                 $rasterizer:ty,
                 $is_separated:expr
             ) => {
-                draw::<$primitive, $is_separated, _, _, _>(
+                draw::<$primitive, $is_separated, _, _, _, _>(
                     pipeline_state,
                     $instances,
                     $indices,
@@ -474,14 +473,14 @@ pub struct RenderPipelineState {
 
 type VertexOutput = crate::render_pass::vertex::VertexOutput<UserDefinedInterStagePoolBuffer>;
 
-pub fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Rasterizer>(
+pub fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Clipper, Rasterizer>(
     pipeline_state: &RenderPipelineState,
     instances: Range<u32>,
     indices: Range<u32>,
     index_resolution: Index,
     mut vertex_processing: VertexProcessingState,
     primitive_assembly: Assembly,
-    clipper: impl Clip<PRIMITIVE_SIZE>,
+    mut clipper: Clipper,
     rasterizer: Rasterizer,
     mut fragment_processing: Option<FragmentProcessingState>,
 ) where
@@ -493,12 +492,13 @@ pub fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Raste
             SEP,
             Item = <Index::Item as ProcessItem>::Processed<VertexOutput>,
         >,
-    Assembly::Face: AsFrontFace,
+    Assembly::Face: AsFrontFace + Clone + 'static,
+    Clipper: Clip<PRIMITIVE_SIZE>,
+    //Clipper::Interpolation: Interpolate<PRIMITIVE_SIZE>,
     Rasterizer: Rasterize<PRIMITIVE_SIZE>,
-    Rasterizer::Interpolation: Interpolate<PRIMITIVE_SIZE>,
+    Rasterizer::Interpolation: Interpolate<PRIMITIVE_SIZE> + From<Clipper::Interpolation>,
 {
     let pipeline = &pipeline_state.pipeline;
-    let clipper = NoClipper;
     let mut primitives_drawn = 0;
     let mut vertices_processed = 0;
 
@@ -549,9 +549,10 @@ pub fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Raste
                         continue;
                     }
 
-                    for rasterizer_output in
-                        rasterizer.rasterize(Primitive::new(primitive.clip_positions(), ()))
-                    {
+                    let primitive =
+                        primitive.map_vertices(|vertex| vertex.map_interpolation(Into::into));
+
+                    for rasterizer_output in rasterizer.rasterize(&primitive) {
                         fragment_processing.process(
                             &primitive,
                             front_facing,

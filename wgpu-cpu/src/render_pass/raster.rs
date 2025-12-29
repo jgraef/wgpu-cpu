@@ -14,11 +14,13 @@ use nalgebra::{
 
 use crate::{
     render_pass::{
-        clipper::ClipPosition,
+        clipper::{
+            ClipPosition,
+            Clipped,
+        },
         primitive::Primitive,
     },
     util::{
-        ArrayExt,
         bresenham::bresenham,
         interpolation::{
             Barycentric,
@@ -81,10 +83,12 @@ pub struct RasterizerOutput<Inter> {
 pub trait Rasterize<const NUM_VERTICES: usize> {
     type Interpolation;
 
-    fn rasterize(
+    fn rasterize<Vertex, Face>(
         &self,
-        primitive: Primitive<ClipPosition, NUM_VERTICES>,
-    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>>;
+        primitive: &Primitive<Clipped<Vertex, Self::Interpolation>, NUM_VERTICES, Face>,
+    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>>
+    where
+        Vertex: AsRef<ClipPosition>;
 }
 
 impl<R, const NUM_VERTICES: usize> Rasterize<NUM_VERTICES> for &R
@@ -93,10 +97,13 @@ where
 {
     type Interpolation = R::Interpolation;
 
-    fn rasterize(
+    fn rasterize<Vertex, Face>(
         &self,
-        primitive: Primitive<ClipPosition, NUM_VERTICES>,
-    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>> {
+        primitive: &Primitive<Clipped<Vertex, Self::Interpolation>, NUM_VERTICES, Face>,
+    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>>
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
         R::rasterize(self, primitive)
     }
 }
@@ -134,27 +141,19 @@ impl ToRaster {
         let ndc = Point3::from_homogeneous(clip_position.0)?;
         let perspective_divisor = 1.0 / clip_position.0.w;
 
-        let viewport = ndc.coords.xy().component_mul(&self.scaling) + self.translation;
-        let framebuffer = viewport.try_cast::<u32>().map(Point2::from)?;
-        if framebuffer.x < self.size.x && framebuffer.y < self.size.y {
-            let fragment = Vector4::new(viewport.x, viewport.y, ndc.z, perspective_divisor);
-            Some(RasterPoint {
-                framebuffer,
-                fragment,
-            })
-        }
-        else {
-            None
-        }
-    }
+        let mut viewport = ndc.coords.xy().component_mul(&self.scaling) + self.translation;
+        viewport.x = viewport.x.max(0.0);
+        viewport.y = viewport.y.max(0.0);
 
-    pub fn to_raster_primitive<const N: usize>(
-        &self,
-        primitive: Primitive<ClipPosition, N>,
-    ) -> Option<[RasterPoint; N]> {
-        primitive
-            .vertices
-            .try_map_(|clip_position| self.to_raster(clip_position))
+        let mut framebuffer = viewport.try_cast::<u32>().unwrap_or_default();
+        framebuffer.x = framebuffer.x.min(self.size.x - 1);
+        framebuffer.y = framebuffer.y.min(self.size.y - 1);
+
+        let fragment = Vector4::new(viewport.x, viewport.y, ndc.z, perspective_divisor);
+        Some(RasterPoint {
+            framebuffer: framebuffer.into(),
+            fragment,
+        })
     }
 }
 
@@ -164,9 +163,9 @@ pub struct NullRasterizer;
 impl<const NUM_VERTICES: usize> Rasterize<NUM_VERTICES> for NullRasterizer {
     type Interpolation = NoInterpolation;
 
-    fn rasterize(
+    fn rasterize<Vertex, Face>(
         &self,
-        primitive: Primitive<ClipPosition, NUM_VERTICES>,
+        primitive: &Primitive<Clipped<Vertex, NoInterpolation>, NUM_VERTICES, Face>,
     ) -> impl IntoIterator<Item = RasterizerOutput<NoInterpolation>> {
         []
     }
@@ -188,18 +187,21 @@ impl PointRasterizer {
 impl Rasterize<1> for PointRasterizer {
     type Interpolation = NoInterpolation;
 
-    fn rasterize(
+    fn rasterize<Vertex, Face>(
         &self,
-        primitive: Primitive<ClipPosition, 1>,
-    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>> {
-        let raster = self.target.to_raster(primitive.vertices[0]);
+        primitive: &Primitive<Clipped<Vertex, NoInterpolation>, 1, Face>,
+    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>>
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
+        let raster = self.target.to_raster(*primitive.vertices[0].as_ref());
 
         raster.map(|raster| {
             RasterizerOutput {
                 framebuffer: raster.framebuffer,
                 fragment: raster.fragment,
                 sample_index: None,
-                interpolation: NoInterpolation,
+                interpolation: NoInterpolation::default(),
             }
         })
     }
@@ -221,18 +223,26 @@ impl LineRasterizer {
 impl Rasterize<2> for LineRasterizer {
     type Interpolation = Lerp;
 
-    fn rasterize(
+    fn rasterize<Vertex, Face>(
         &self,
-        primitive: Primitive<ClipPosition, 2>,
-    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>> {
-        let start = self.target.to_raster(primitive.vertices[0]);
-        let end = self.target.to_raster(primitive.vertices[1]);
+        primitive: &Primitive<Clipped<Vertex, Lerp>, 2, Face>,
+    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>>
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
+        let start = self.target.to_raster(*primitive.vertices[0].as_ref());
+        let end = self.target.to_raster(*primitive.vertices[1].as_ref());
 
         start
             .zip(end)
             .map(|(start, end)| {
                 bresenham(start.framebuffer, end.framebuffer).map(move |(framebuffer, lerp)| {
-                    let lerp = Lerp(lerp);
+                    let lerp = Lerp(lerp).interpolate(
+                        primitive
+                            .vertices
+                            .each_ref()
+                            .map(|vertex| vertex.interpolation),
+                    );
                     let fragment = lerp.interpolate([start.fragment, end.fragment]);
 
                     RasterizerOutput {
@@ -264,15 +274,16 @@ impl TriRasterizer {
 impl Rasterize<3> for TriRasterizer {
     type Interpolation = Barycentric<3>;
 
-    fn rasterize(
+    fn rasterize<Vertex, Face>(
         &self,
-        primitive: Primitive<ClipPosition, 3>,
-    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>> {
-        // todo: take TriFace with primitive as input so we don't have to recompute the
-        // area
-        let a = self.target.to_raster(primitive.vertices[0]);
-        let b = self.target.to_raster(primitive.vertices[1]);
-        let c = self.target.to_raster(primitive.vertices[2]);
+        primitive: &Primitive<Clipped<Vertex, Barycentric<3>>, 3, Face>,
+    ) -> impl IntoIterator<Item = RasterizerOutput<Self::Interpolation>>
+    where
+        Vertex: AsRef<ClipPosition>,
+    {
+        let a = self.target.to_raster(*primitive.vertices[0].as_ref());
+        let b = self.target.to_raster(*primitive.vertices[1].as_ref());
+        let c = self.target.to_raster(*primitive.vertices[2].as_ref());
 
         fn shoelace(a: Point2<f32>, b: Point2<f32>, c: Point2<f32>) -> f32 {
             // omitted factor 1/2 since it is cancelled out when calculating barycentric
@@ -287,6 +298,8 @@ impl Rasterize<3> for TriRasterizer {
                 let vp_b = b.fragment.xy().into();
                 let vp_c = c.fragment.xy().into();
 
+                // do we have to do this here? can we have the scanline iterator yield something
+                // to interpolate with?
                 let total_area = shoelace(vp_a, vp_b, vp_c);
 
                 let barycentric = move |vp_p: Point2<f32>| {
@@ -300,19 +313,23 @@ impl Rasterize<3> for TriRasterizer {
                 };
 
                 scanlines([a.framebuffer, b.framebuffer, c.framebuffer]).flat_map(move |scanline| {
-                    let primitive = primitive.clone();
-
                     scanline.into_iter().filter_map(move |framebuffer| {
                         let viewport = framebuffer.coords.cast::<f32>().into();
 
                         let barycentric = barycentric(viewport);
+                        let barycentric = barycentric.interpolate(
+                            primitive
+                                .vertices
+                                .each_ref()
+                                .map(|vertex| vertex.interpolation),
+                        );
+
                         let fragment =
                             barycentric.interpolate([a.fragment, b.fragment, c.fragment]);
 
                         Some(RasterizerOutput {
                             framebuffer,
                             fragment,
-
                             sample_index: None,
                             interpolation: barycentric,
                         })

@@ -23,6 +23,7 @@ impl<T> IteratorExt for T where T: Iterator {}
 
 pub trait ArrayExt<T, const N: usize> {
     fn try_map_<U>(self, f: impl FnMut(T) -> Option<U>) -> Option<[U; N]>;
+    fn map_with_index<U>(self, f: impl FnMut(usize, T) -> U) -> [U; N];
 }
 
 impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
@@ -37,6 +38,15 @@ impl<T, const N: usize> ArrayExt<T, N> for [T; N] {
             out.into_inner()
                 .unwrap_or_else(|_| unreachable!("output array must be full")),
         )
+    }
+
+    fn map_with_index<U>(self, mut f: impl FnMut(usize, T) -> U) -> [U; N] {
+        let mut i = 0;
+        self.map(|element| {
+            let element = f(i, element);
+            i += 1;
+            element
+        })
     }
 }
 

@@ -12,7 +12,10 @@ use bytemuck::{
 };
 use nalgebra::Vector4;
 
-use crate::render_pass::primitive::Primitive;
+use crate::{
+    render_pass::primitive::Primitive,
+    util::interpolation::Select,
+};
 
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable, derive_more::From, derive_more::Into)]
 #[repr(C)]
@@ -31,67 +34,60 @@ impl AsMut<ClipPosition> for ClipPosition {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Clipped<T> {
+pub struct Clipped<T, Inter> {
     pub unclipped: T,
     pub clipped: ClipPosition,
+    pub interpolation: Inter,
 }
 
-impl<T> AsRef<ClipPosition> for Clipped<T> {
+impl<T, Inter> Clipped<T, Inter> {
+    pub fn map_interpolation<U>(self, f: impl FnOnce(Inter) -> U) -> Clipped<T, U> {
+        Clipped {
+            unclipped: self.unclipped,
+            clipped: self.clipped,
+            interpolation: f(self.interpolation),
+        }
+    }
+}
+
+impl<T, Inter> AsRef<ClipPosition> for Clipped<T, Inter> {
     fn as_ref(&self) -> &ClipPosition {
         &self.clipped
     }
 }
 
-impl<T> AsRef<Clipped<T>> for Clipped<T> {
-    fn as_ref(&self) -> &Clipped<T> {
+impl<T, Inter> AsRef<Clipped<T, Inter>> for Clipped<T, Inter> {
+    fn as_ref(&self) -> &Clipped<T, Inter> {
         self
     }
 }
 
-impl<T> Clipped<T>
-where
-    T: AsRef<ClipPosition>,
-{
-    pub fn passhtrough(unclipped: T) -> Self {
-        let clipped = *unclipped.as_ref();
-        Self { unclipped, clipped }
-    }
-}
-
+// todo: fix lifetime bounds
 pub trait Clip<const N: usize> {
-    fn clip<Vertex, Face>(
-        &self,
-        primitive: Primitive<Vertex, N, Face>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
-    where
-        Vertex: AsRef<ClipPosition>;
-}
+    type Interpolation;
 
-impl<C, const N: usize> Clip<N> for &C
-where
-    C: Clip<N>,
-{
     fn clip<Vertex, Face>(
-        &self,
+        &mut self,
         primitive: Primitive<Vertex, N, Face>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
+    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex, Self::Interpolation>, N, Face>>
     where
-        Vertex: AsRef<ClipPosition>,
-    {
-        C::clip(self, primitive)
-    }
+        Vertex: AsRef<ClipPosition> + Clone + 'static,
+        Face: Clone + 'static;
 }
 
 impl<C, const N: usize> Clip<N> for &mut C
 where
     C: Clip<N>,
 {
+    type Interpolation = C::Interpolation;
+
     fn clip<Vertex, Face>(
-        &self,
+        &mut self,
         primitive: Primitive<Vertex, N, Face>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
+    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex, Self::Interpolation>, N, Face>>
     where
-        Vertex: AsRef<ClipPosition>,
+        Vertex: AsRef<ClipPosition> + Clone + 'static,
+        Face: Clone + 'static,
     {
         C::clip(self, primitive)
     }
@@ -101,14 +97,27 @@ where
 pub struct NoClipper;
 
 impl<const N: usize> Clip<N> for NoClipper {
+    type Interpolation = Select<N>;
+
     fn clip<Vertex, Face>(
-        &self,
+        &mut self,
         primitive: Primitive<Vertex, N, Face>,
-    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, N, Face>>
+    ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex, Select<N>>, N, Face>>
     where
-        Vertex: AsRef<ClipPosition>,
+        Vertex: AsRef<ClipPosition> + 'static,
+        Face: 'static,
     {
-        [primitive.map_vertices(Clipped::passhtrough)]
+        let mut i = 0;
+        [primitive.map_vertices(|vertex| {
+            let clipped = *vertex.as_ref();
+            let interpolation = Select::new(i);
+            i += 1;
+            Clipped {
+                unclipped: vertex,
+                clipped,
+                interpolation,
+            }
+        })]
     }
 }
 
@@ -119,8 +128,9 @@ impl<const N: usize> Clip<N> for NoClipper {
 pub struct ClipPlane(pub Vector4<f32>);
 
 impl ClipPlane {
-    pub fn clip_distance(&self, point: ClipPosition) -> f32 {
-        point.0.dot(&self.0)
+    pub fn clip_distance(&self, point: impl Into<Vector4<f32>>) -> f32 {
+        let point = point.into();
+        point.dot(&self.0)
     }
 }
 
@@ -209,7 +219,10 @@ pub mod cohen_sutherland {
             },
             primitive::Primitive,
         },
-        util::interpolation::lerp,
+        util::interpolation::{
+            Lerp,
+            lerp,
+        },
     };
 
     bitflags! {
@@ -246,7 +259,7 @@ pub mod cohen_sutherland {
     pub fn clip(
         mut points: [ClipPosition; 2],
         clip_volume: &ClipVolume,
-    ) -> Option<[ClipPosition; 2]> {
+    ) -> Option<[(ClipPosition, Lerp); 2]> {
         let clip_distances = points.map(|point| clip_volume.clip_distances(point));
         let outcodes = clip_distances.map(OutCode::from_clip_distances);
 
@@ -263,7 +276,7 @@ pub mod cohen_sutherland {
 
         if outcodes_or.is_empty() {
             // both points inside clip volume: trivial accept
-            return Some(points);
+            return Some([(points[0], Lerp(0.0)), (points[1], Lerp(1.0))]);
         }
         else if !outcodes_and.is_empty() {
             // both points share an outside zone: trivial reject
@@ -329,7 +342,7 @@ pub mod cohen_sutherland {
                 update_point(1);
             }
 
-            Some(points)
+            Some([(points[0], Lerp(alphas[0])), (points[1], Lerp(alphas[1]))])
         }
     }
 
@@ -339,10 +352,12 @@ pub mod cohen_sutherland {
     }
 
     impl Clip<2> for CohenSutherland {
+        type Interpolation = Lerp;
+
         fn clip<Vertex, Face>(
-            &self,
+            &mut self,
             primitive: Primitive<Vertex, 2, Face>,
-        ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex>, 2, Face>>
+        ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex, Lerp>, 2, Face>>
         where
             Vertex: AsRef<ClipPosition>,
         {
@@ -358,11 +373,13 @@ pub mod cohen_sutherland {
                     [
                         Clipped {
                             unclipped: a,
-                            clipped: clipped[0],
+                            clipped: clipped[0].0,
+                            interpolation: clipped[0].1,
                         },
                         Clipped {
                             unclipped: b,
-                            clipped: clipped[1],
+                            clipped: clipped[1].0,
+                            interpolation: clipped[1].1,
                         },
                     ],
                     primitive.face,
@@ -389,8 +406,8 @@ pub mod cohen_sutherland {
             let a = Vector4::new(-0.5, -0.5, 0.5, 1.0).into();
             let b = Vector4::new(0.5, 0.5, 0.5, 1.0).into();
             let out = clip([a, b], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, a.0);
-            assert_abs_diff_eq!(out[1].0, b.0);
+            assert_abs_diff_eq!(out[0].0.0, a.0);
+            assert_abs_diff_eq!(out[1].0.0, b.0);
         }
 
         #[test]
@@ -446,12 +463,12 @@ pub mod cohen_sutherland {
             let c = Vector4::new(-1.0, -0.25, 0.5, 1.0);
 
             let out = clip([a, b], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, c);
-            assert_abs_diff_eq!(out[1].0, b.0);
+            assert_abs_diff_eq!(out[0].0.0, c);
+            assert_abs_diff_eq!(out[1].0.0, b.0);
 
             let out = clip([b, a], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, b.0);
-            assert_abs_diff_eq!(out[1].0, c);
+            assert_abs_diff_eq!(out[0].0.0, b.0);
+            assert_abs_diff_eq!(out[1].0.0, c);
         }
 
         #[test]
@@ -461,12 +478,12 @@ pub mod cohen_sutherland {
             let c = Vector4::new(1.0, 0.0, 0.5, 1.0);
 
             let out = clip([a, b], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, c);
-            assert_abs_diff_eq!(out[1].0, b.0);
+            assert_abs_diff_eq!(out[0].0.0, c);
+            assert_abs_diff_eq!(out[1].0.0, b.0);
 
             let out = clip([b, a], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, b.0);
-            assert_abs_diff_eq!(out[1].0, c);
+            assert_abs_diff_eq!(out[0].0.0, b.0);
+            assert_abs_diff_eq!(out[1].0.0, c);
         }
 
         #[test]
@@ -476,12 +493,12 @@ pub mod cohen_sutherland {
             let c = Vector4::new(-0.25, -1.0, 0.5, 1.0);
 
             let out = clip([a, b], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, c);
-            assert_abs_diff_eq!(out[1].0, b.0);
+            assert_abs_diff_eq!(out[0].0.0, c);
+            assert_abs_diff_eq!(out[1].0.0, b.0);
 
             let out = clip([b, a], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, b.0);
-            assert_abs_diff_eq!(out[1].0, c);
+            assert_abs_diff_eq!(out[0].0.0, b.0);
+            assert_abs_diff_eq!(out[1].0.0, c);
         }
 
         #[test]
@@ -491,12 +508,12 @@ pub mod cohen_sutherland {
             let c = Vector4::new(0.0, 1.0, 0.5, 1.0);
 
             let out = clip([a, b], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, c);
-            assert_abs_diff_eq!(out[1].0, b.0);
+            assert_abs_diff_eq!(out[0].0.0, c);
+            assert_abs_diff_eq!(out[1].0.0, b.0);
 
             let out = clip([b, a], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, b.0);
-            assert_abs_diff_eq!(out[1].0, c);
+            assert_abs_diff_eq!(out[0].0.0, b.0);
+            assert_abs_diff_eq!(out[1].0.0, c);
         }
 
         #[test]
@@ -506,12 +523,12 @@ pub mod cohen_sutherland {
             let c = Vector4::new(0.5, 0.0, 1.0, 1.0);
 
             let out = clip([a, b], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, c);
-            assert_abs_diff_eq!(out[1].0, b.0);
+            assert_abs_diff_eq!(out[0].0.0, c);
+            assert_abs_diff_eq!(out[1].0.0, b.0);
 
             let out = clip([b, a], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, b.0);
-            assert_abs_diff_eq!(out[1].0, c);
+            assert_abs_diff_eq!(out[0].0.0, b.0);
+            assert_abs_diff_eq!(out[1].0.0, c);
         }
 
         #[test]
@@ -521,12 +538,236 @@ pub mod cohen_sutherland {
             let c = Vector4::new(0.5, 0.0, 0.0, 1.0);
 
             let out = clip([a, b], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, c);
-            assert_abs_diff_eq!(out[1].0, b.0);
+            assert_abs_diff_eq!(out[0].0.0, c);
+            assert_abs_diff_eq!(out[1].0.0, b.0);
 
             let out = clip([b, a], &ClipVolume::WEBGPU).unwrap();
-            assert_abs_diff_eq!(out[0].0, b.0);
-            assert_abs_diff_eq!(out[1].0, c);
+            assert_abs_diff_eq!(out[0].0.0, b.0);
+            assert_abs_diff_eq!(out[1].0.0, c);
+        }
+    }
+}
+
+mod tri_clip {
+    use std::{
+        collections::VecDeque,
+        ops::{
+            Add,
+            Mul,
+        },
+    };
+
+    use arrayvec::ArrayVec;
+    use nalgebra::Vector4;
+
+    use crate::{
+        render_pass::{
+            clipper::{
+                Clip,
+                ClipPlane,
+                ClipPosition,
+                ClipVolume,
+                Clipped,
+            },
+            primitive::Primitive,
+        },
+        util::interpolation::{
+            Barycentric,
+            lerp,
+        },
+    };
+
+    #[derive(Clone, Copy, Debug)]
+    struct Vertex {
+        position: Vector4<f32>,
+        barycentric: Barycentric<3>,
+    }
+
+    impl Mul<f32> for Vertex {
+        type Output = Self;
+
+        fn mul(self, rhs: f32) -> Self::Output {
+            Self {
+                position: self.position * rhs,
+                barycentric: self.barycentric * rhs,
+            }
+        }
+    }
+
+    impl Add for Vertex {
+        type Output = Self;
+
+        fn add(self, rhs: Self) -> Self::Output {
+            Self {
+                position: self.position + rhs.position,
+                barycentric: self.barycentric + rhs.barycentric,
+            }
+        }
+    }
+
+    fn clip_tri_against_plane(vertices: [Vertex; 3], plane: ClipPlane) -> ArrayVec<[Vertex; 3], 2> {
+        // https://cs418.cs.illinois.edu/website/text/clipping.html
+
+        let distances = vertices.map(|vertex| plane.clip_distance(vertex.position));
+        let num_outside = distances.iter().filter(|distance| **distance < 0.0).count();
+        let outside = distances.map(|distance| distance < 0.0);
+
+        let clip = |i: usize, j: usize| {
+            let t = distances[i] / (distances[i] - distances[j]);
+            (t, lerp(vertices[i], vertices[j], t))
+        };
+
+        match outside {
+            [true, true, true] => Default::default(),
+            [false, false, false] => std::iter::once(vertices).collect(),
+            [true, true, false] => {
+                // A outside, B outside, C inside
+                // find CA intersection -> A'
+                // find BC intersection -> B'
+                // new triangle A' B' C
+
+                let (t_ca, a_new) = clip(2, 0);
+                let (t_bc, b_new) = clip(1, 2);
+
+                let new_vertices = [a_new, b_new, vertices[2]];
+                std::iter::once(new_vertices).collect()
+            }
+            [false, true, true] => {
+                // A inside, B outside, C outside
+                // find AB intersection -> B'
+                // find CA intersection -> C'
+                // new triangle A B' C'
+
+                let (t_ab, b_new) = clip(0, 1);
+                let (t_ca, c_new) = clip(2, 0);
+
+                let new_vertices = [vertices[0], b_new, c_new];
+                std::iter::once(new_vertices).collect()
+            }
+            [true, false, true] => {
+                // A outside, B inside, C outside
+                // find AB intersection -> A'
+                // find BC intersection -> C'
+                // new triangle -> A' B C'
+
+                let (t_ab, a_new) = clip(0, 1);
+                let (t_bc, c_new) = clip(1, 2);
+
+                let new_vertices = [a_new, vertices[2], c_new];
+                std::iter::once(new_vertices).collect()
+            }
+            [true, false, false] => {
+                // A outside, B inside, C inside
+                // find AB intersection -> B'
+                // find AC intersection -> C'
+                // new quad -> B' B C C'
+                // split into triangles -> [B' B C'], [B C C']
+
+                let (t_ab, b_new) = clip(0, 1);
+                let (t_ac, c_new) = clip(0, 2);
+
+                [
+                    [b_new, vertices[1], c_new],
+                    [vertices[1], vertices[2], c_new],
+                ]
+                .into()
+            }
+            [false, true, false] => {
+                // A inside, B outside, C inside
+                // find AB intersection -> A'
+                // find BC intersection -> C'
+                // new quad -> A A' C' C
+                // split into triangles -> [A A' C'], [A C' C]
+
+                let (t_ab, a_new) = clip(0, 1);
+                let (t_bc, c_new) = clip(1, 2);
+
+                [
+                    [vertices[0], a_new, c_new],
+                    [vertices[0], c_new, vertices[2]],
+                ]
+                .into()
+            }
+            [false, false, true] => {
+                // A inside, B inside, C outside
+                // find BC intersection -> B'
+                // find AC intersection -> A'
+                // new quad -> A B B' A'
+                // split into triangles -> [A B B'], [A B' A']
+
+                let (t_bc, b_new) = clip(1, 2);
+                let (t_ac, a_new) = clip(0, 2);
+
+                [
+                    [vertices[0], vertices[1], b_new],
+                    [vertices[0], b_new, a_new],
+                ]
+                .into()
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct TriClipper {
+        queue: VecDeque<[Vertex; 3]>,
+        clip_volume: ClipVolume,
+    }
+
+    impl Clone for TriClipper {
+        fn clone(&self) -> Self {
+            Self {
+                queue: VecDeque::new(),
+                clip_volume: self.clip_volume,
+            }
+        }
+    }
+
+    impl TriClipper {
+        fn clip_tri(&mut self, vertices: [ClipPosition; 3]) -> impl Iterator<Item = [Vertex; 3]> {
+            self.queue.clear();
+
+            self.queue.push_back(std::array::from_fn::<_, 3, _>(|i| {
+                Vertex {
+                    position: vertices[i].0,
+                    barycentric: Barycentric::at_vertex(i),
+                }
+            }));
+
+            for plane in self.clip_volume.0 {
+                let num_tris_to_clip = self.queue.len();
+                for _ in 0..num_tris_to_clip {
+                    let tri = self.queue.pop_front().unwrap();
+                    self.queue.extend(clip_tri_against_plane(tri, plane));
+                }
+            }
+
+            self.queue.drain(..)
+        }
+    }
+
+    impl Clip<3> for TriClipper {
+        type Interpolation = Barycentric<3>;
+
+        fn clip<Vertex, Face>(
+            &mut self,
+            primitive: Primitive<Vertex, 3, Face>,
+        ) -> impl IntoIterator<Item = Primitive<Clipped<Vertex, Barycentric<3>>, 3, Face>>
+        where
+            Vertex: AsRef<ClipPosition> + Clone + 'static,
+            Face: Clone + 'static,
+        {
+            self.clip_tri(primitive.clip_positions()).map(move |tri| {
+                Primitive {
+                    vertices: std::array::from_fn(|i| {
+                        Clipped {
+                            unclipped: primitive.vertices[i].clone(),
+                            clipped: tri[i].position.into(),
+                            interpolation: tri[i].barycentric,
+                        }
+                    }),
+                    face: primitive.face.clone(),
+                }
+            })
         }
     }
 }
