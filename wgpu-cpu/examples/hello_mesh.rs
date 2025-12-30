@@ -309,8 +309,8 @@ impl Camera {
         let projection = Perspective3::new(
             image_size.x as f32 / image_size.y as f32,
             FRAC_PI_4,
-            0.1,
-            50.0,
+            0.001,
+            100.0,
         );
 
         let mut matrix = projection.to_homogeneous();
@@ -321,7 +321,7 @@ impl Camera {
 
         let transform = Isometry3::face_towards(
             &(mesh.center + Vector3::new(0.0, 0.0, mesh.size.max() * -1.0)),
-            &mesh.center,
+            &(mesh.center + Vector3::new(0.0, mesh.size.y * 0.25, 0.0)),
             &Vector3::y(),
         );
 

@@ -19,6 +19,10 @@ use crate::{
             Clipped,
         },
         primitive::Primitive,
+        state::{
+            ScissorRect,
+            Viewport,
+        },
     },
     util::{
         bresenham::bresenham,
@@ -117,43 +121,49 @@ pub struct RasterPoint {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ToRaster {
-    pub size: Vector2<u32>,
     pub translation: Vector2<f32>,
     pub scaling: Vector2<f32>,
+    pub scissor_bb: [Vector2<u32>; 2],
 }
 
 impl ToRaster {
-    pub fn new(target_size: Vector2<u32>) -> Self {
-        let size_f32 = target_size.cast::<f32>();
-
-        let translation = Vector2::new(0.5 * size_f32.x, 0.5 * size_f32.y);
-
-        let scaling = Vector2::new(0.5 * (size_f32.x - 1.0), -0.5 * (size_f32.y - 1.0));
+    pub fn new(viewport: Viewport, scissor_rect: ScissorRect) -> Self {
+        let translation = viewport.offset.coords + 0.5 * viewport.size;
+        let mut scaling = 0.5 * viewport.size;
+        scaling.y *= -1.0;
 
         Self {
-            size: target_size,
             translation,
             scaling,
+            scissor_bb: [
+                scissor_rect.offset.coords,
+                scissor_rect.offset.coords + scissor_rect.size,
+            ],
         }
     }
 
-    pub fn to_raster(&self, clip_position: ClipPosition) -> Option<RasterPoint> {
-        let ndc = Point3::from_homogeneous(clip_position.0)?;
+    pub fn to_raster(&self, clip_position: ClipPosition) -> RasterPoint {
+        let ndc = Point3::from_homogeneous(clip_position.0).expect("w=0");
         let perspective_divisor = 1.0 / clip_position.0.w;
 
         let mut viewport = ndc.coords.xy().component_mul(&self.scaling) + self.translation;
         viewport.x = viewport.x.max(0.0);
         viewport.y = viewport.y.max(0.0);
 
-        let mut framebuffer = viewport.try_cast::<u32>().unwrap_or_default();
-        framebuffer.x = framebuffer.x.min(self.size.x - 1);
-        framebuffer.y = framebuffer.y.min(self.size.y - 1);
-
+        let framebuffer = Point2::from(viewport.try_cast::<u32>().unwrap_or_default());
         let fragment = Vector4::new(viewport.x, viewport.y, ndc.z, perspective_divisor);
-        Some(RasterPoint {
-            framebuffer: framebuffer.into(),
+
+        RasterPoint {
+            framebuffer,
             fragment,
-        })
+        }
+    }
+
+    pub fn in_scissor_rect(&self, point: Point2<u32>) -> bool {
+        point.x >= self.scissor_bb[0].x
+            && point.x < self.scissor_bb[1].x
+            && point.y >= self.scissor_bb[0].y
+            && point.y < self.scissor_bb[1].y
     }
 }
 
@@ -177,9 +187,9 @@ pub struct PointRasterizer {
 }
 
 impl PointRasterizer {
-    pub fn new(target_size: nalgebra::Vector2<u32>) -> Self {
+    pub fn new(viewport: Viewport, scissor_rect: ScissorRect) -> Self {
         Self {
-            target: ToRaster::new(target_size),
+            target: ToRaster::new(viewport, scissor_rect),
         }
     }
 }
@@ -196,7 +206,7 @@ impl Rasterize<1> for PointRasterizer {
     {
         let raster = self.target.to_raster(*primitive.vertices[0].as_ref());
 
-        raster.map(|raster| {
+        self.target.in_scissor_rect(raster.framebuffer).then(|| {
             RasterizerOutput {
                 framebuffer: raster.framebuffer,
                 fragment: raster.fragment,
@@ -213,9 +223,9 @@ pub struct LineRasterizer {
 }
 
 impl LineRasterizer {
-    pub fn new(target_size: nalgebra::Vector2<u32>) -> Self {
+    pub fn new(viewport: Viewport, scissor_rect: ScissorRect) -> Self {
         Self {
-            target: ToRaster::new(target_size),
+            target: ToRaster::new(viewport, scissor_rect),
         }
     }
 }
@@ -233,28 +243,24 @@ impl Rasterize<2> for LineRasterizer {
         let start = self.target.to_raster(*primitive.vertices[0].as_ref());
         let end = self.target.to_raster(*primitive.vertices[1].as_ref());
 
-        start
-            .zip(end)
-            .map(|(start, end)| {
-                bresenham(start.framebuffer, end.framebuffer).map(move |(framebuffer, lerp)| {
-                    let lerp = Lerp(lerp).interpolate(
-                        primitive
-                            .vertices
-                            .each_ref()
-                            .map(|vertex| vertex.interpolation),
-                    );
-                    let fragment = lerp.interpolate([start.fragment, end.fragment]);
+        bresenham(start.framebuffer, end.framebuffer).filter_map(move |(framebuffer, lerp)| {
+            self.target.in_scissor_rect(framebuffer).then(|| {
+                let lerp = Lerp(lerp).interpolate(
+                    primitive
+                        .vertices
+                        .each_ref()
+                        .map(|vertex| vertex.interpolation),
+                );
+                let fragment = lerp.interpolate([start.fragment, end.fragment]);
 
-                    RasterizerOutput {
-                        framebuffer,
-                        fragment,
-                        sample_index: None,
-                        interpolation: lerp,
-                    }
-                })
+                RasterizerOutput {
+                    framebuffer,
+                    fragment,
+                    sample_index: None,
+                    interpolation: lerp,
+                }
             })
-            .into_iter()
-            .flatten()
+        })
     }
 }
 
@@ -264,9 +270,9 @@ pub struct TriRasterizer {
 }
 
 impl TriRasterizer {
-    pub fn new(target_size: Vector2<u32>) -> Self {
+    pub fn new(viewport: Viewport, scissor_rect: ScissorRect) -> Self {
         Self {
-            target: ToRaster::new(target_size),
+            target: ToRaster::new(viewport, scissor_rect),
         }
     }
 }
@@ -291,52 +297,49 @@ impl Rasterize<3> for TriRasterizer {
             (b.y - a.y) * (b.x + a.x) + (c.y - b.y) * (c.x + b.x) + (a.y - c.y) * (a.x + c.x)
         }
 
-        a.zip(b)
-            .zip(c)
-            .map(move |((a, b), c)| {
-                let vp_a = a.fragment.xy().into();
-                let vp_b = b.fragment.xy().into();
-                let vp_c = c.fragment.xy().into();
+        let vp_a = a.fragment.xy().into();
+        let vp_b = b.fragment.xy().into();
+        let vp_c = c.fragment.xy().into();
 
-                // do we have to do this here? can we have the scanline iterator yield something
-                // to interpolate with?
-                let total_area = shoelace(vp_a, vp_b, vp_c);
+        // do we have to do this here? can we have the scanline iterator yield something
+        // to interpolate with?
+        let total_area = shoelace(vp_a, vp_b, vp_c);
 
-                let barycentric = move |vp_p: Point2<f32>| {
-                    // https://haqr.eu/tinyrenderer/barycentric/
+        let barycentric = move |vp_p: Point2<f32>| {
+            // https://haqr.eu/tinyrenderer/barycentric/
 
-                    Barycentric::from([
-                        shoelace(vp_p, vp_b, vp_c) / total_area,
-                        shoelace(vp_p, vp_c, vp_a) / total_area,
-                        shoelace(vp_p, vp_a, vp_b) / total_area,
-                    ])
-                };
+            Barycentric::from([
+                shoelace(vp_p, vp_b, vp_c) / total_area,
+                shoelace(vp_p, vp_c, vp_a) / total_area,
+                shoelace(vp_p, vp_a, vp_b) / total_area,
+            ])
+        };
 
-                scanlines([a.framebuffer, b.framebuffer, c.framebuffer]).flat_map(move |scanline| {
-                    scanline.into_iter().filter_map(move |framebuffer| {
-                        let viewport = framebuffer.coords.cast::<f32>().into();
+        scanlines([a.framebuffer, b.framebuffer, c.framebuffer]).flat_map(move |scanline| {
+            scanline.into_iter().filter_map(move |framebuffer| {
+                if !self.target.in_scissor_rect(framebuffer) {
+                    return None;
+                }
 
-                        let barycentric = barycentric(viewport);
-                        let barycentric = barycentric.interpolate(
-                            primitive
-                                .vertices
-                                .each_ref()
-                                .map(|vertex| vertex.interpolation),
-                        );
+                let viewport = framebuffer.coords.cast::<f32>().into();
 
-                        let fragment =
-                            barycentric.interpolate([a.fragment, b.fragment, c.fragment]);
+                let barycentric = barycentric(viewport);
+                let barycentric = barycentric.interpolate(
+                    primitive
+                        .vertices
+                        .each_ref()
+                        .map(|vertex| vertex.interpolation),
+                );
 
-                        Some(RasterizerOutput {
-                            framebuffer,
-                            fragment,
-                            sample_index: None,
-                            interpolation: barycentric,
-                        })
-                    })
+                let fragment = barycentric.interpolate([a.fragment, b.fragment, c.fragment]);
+
+                Some(RasterizerOutput {
+                    framebuffer,
+                    fragment,
+                    sample_index: None,
+                    interpolation: barycentric,
                 })
             })
-            .into_iter()
-            .flatten()
+        })
     }
 }

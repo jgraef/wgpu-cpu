@@ -18,7 +18,10 @@ use crate::{
         binding::AcquiredBindingResources,
         clipper::{
             Clip,
+            ClipVolume,
+            LineClipper,
             NoClipper,
+            TriClipper,
         },
         fragment::{
             AcquiredColorAttachment,
@@ -241,8 +244,7 @@ impl DrawCall {
             panic!("No pipeline bound");
         };
 
-        let framebuffer_size = state.scissor_rect.size;
-        let clipper = NoClipper; // todo
+        let clip_volume = ClipVolume::WEBGPU;
 
         let binding_resources = AcquiredBindingResources::new(&state.bind_groups);
         let vertex_processing_state =
@@ -265,6 +267,7 @@ impl DrawCall {
                 $index:expr,
                 $primitive:expr,
                 $assembly:ident,
+                $clipper:ty,
                 $rasterizer:ty,
                 $is_separated:expr
             ) => {
@@ -275,8 +278,8 @@ impl DrawCall {
                     $index,
                     vertex_processing_state,
                     $assembly::<$primitive>,
-                    clipper,
-                    <$rasterizer>::new(framebuffer_size),
+                    <$clipper>::new(clip_volume),
+                    <$rasterizer>::new(state.viewport, state.scissor_rect),
                     fragment_processing_state,
                 );
             };
@@ -288,6 +291,7 @@ impl DrawCall {
                 $indices:expr,
                 $primitive:expr,
                 Strip,
+                $clipper:ty,
                 $rasterizer:ty,
                 $index:ty,
                 $index_buffer_binding:expr,
@@ -314,6 +318,7 @@ impl DrawCall {
                         indirect_indices,
                         $primitive,
                         Strip,
+                        $clipper,
                         $rasterizer,
                         true
                     );
@@ -325,6 +330,7 @@ impl DrawCall {
                         indirect_indices,
                         $primitive,
                         Strip,
+                        $clipper,
                         $rasterizer,
                         false
                     );
@@ -335,6 +341,7 @@ impl DrawCall {
                 $indices:expr,
                 $primitive:expr,
                 List,
+                $clipper:ty,
                 $rasterizer:ty,
                 $index:ty,
                 $index_buffer_binding:expr,
@@ -351,6 +358,7 @@ impl DrawCall {
                     indirect_indices,
                     $primitive,
                     List,
+                    $clipper,
                     $rasterizer,
                     false
                 );
@@ -358,7 +366,7 @@ impl DrawCall {
         }
 
         macro_rules! draw_topology {
-            ($primitive:expr, $assembly:ident, $rasterizer:ty) => {
+            ($primitive:expr, $assembly:ident, $clipper:ty, $rasterizer:ty) => {
                 match self {
                     DrawCall::Direct {
                         vertices,
@@ -370,6 +378,7 @@ impl DrawCall {
                             DirectIndices,
                             $primitive,
                             $assembly,
+                            $clipper,
                             $rasterizer,
                             false
                         );
@@ -392,6 +401,7 @@ impl DrawCall {
                                     indices,
                                     $primitive,
                                     $assembly,
+                                    $clipper,
                                     $rasterizer,
                                     u16,
                                     index_buffer_binding,
@@ -404,6 +414,7 @@ impl DrawCall {
                                     indices,
                                     $primitive,
                                     $assembly,
+                                    $clipper,
                                     $rasterizer,
                                     u32,
                                     index_buffer_binding,
@@ -418,7 +429,7 @@ impl DrawCall {
 
         match (topology, polygon_mode) {
             (wgpu::PrimitiveTopology::PointList, wgpu::PolygonMode::Fill) => {
-                draw_topology!(1, List, PointRasterizer);
+                draw_topology!(1, List, NoClipper, PointRasterizer);
             }
 
             //(wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Point) => {
@@ -428,7 +439,7 @@ impl DrawCall {
             //    draw_topology!(2, List, LineRasterizer);
             //}
             (wgpu::PrimitiveTopology::LineList, wgpu::PolygonMode::Fill) => {
-                draw_topology!(2, List, LineRasterizer);
+                draw_topology!(2, List, LineClipper, LineRasterizer);
             }
             //(wgpu::PrimitiveTopology::LineStrip, wgpu::PolygonMode::Point) => {
             //    draw_topology!(2, Strip, PointRasterizer);
@@ -437,7 +448,7 @@ impl DrawCall {
             //    draw_topology!(2, Strip, LineRasterizer);
             //}
             (wgpu::PrimitiveTopology::LineStrip, wgpu::PolygonMode::Fill) => {
-                draw_topology!(2, Strip, LineRasterizer);
+                draw_topology!(2, Strip, LineClipper, LineRasterizer);
             }
 
             //(wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Point) => {
@@ -447,7 +458,7 @@ impl DrawCall {
             //    draw_topology!(3, List, LineRasterizer);
             //}
             (wgpu::PrimitiveTopology::TriangleList, wgpu::PolygonMode::Fill) => {
-                draw_topology!(3, List, TriRasterizer);
+                draw_topology!(3, List, TriClipper, TriRasterizer);
             }
             //(wgpu::PrimitiveTopology::TriangleStrip, wgpu::PolygonMode::Point) => {
             //    draw_topology!(3, Strip, PointRasterizer);
@@ -456,7 +467,7 @@ impl DrawCall {
             //    draw_topology!(3, Strip, LineRasterizer);
             //}
             (wgpu::PrimitiveTopology::TriangleStrip, wgpu::PolygonMode::Fill) => {
-                draw_topology!(3, Strip, TriRasterizer);
+                draw_topology!(3, Strip, TriClipper, TriRasterizer);
             }
             _ => {
                 panic!("Unsupported: {topology:?} {polygon_mode:?}");
@@ -611,6 +622,13 @@ impl ScissorRect {
             offset: Point2::origin(),
             size: framebuffer_size,
         }
+    }
+
+    pub fn is_inside(&self, point: Point2<u32>) -> bool {
+        point.x >= self.offset.x
+            && point.y >= self.offset.y
+            && point.x < self.offset.x + self.size.x
+            && point.y < self.offset.y + self.size.y
     }
 }
 

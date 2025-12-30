@@ -96,6 +96,15 @@ where
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoClipper;
 
+impl NoClipper {
+    /// Note: the draw call dispatch macro expects this method to exist, so we
+    /// just create one. Would probably be better to have that on the trait or
+    /// something.
+    pub fn new(clip_volume: ClipVolume) -> Self {
+        Self
+    }
+}
+
 impl<const N: usize> Clip<N> for NoClipper {
     type Interpolation = Select<N>;
 
@@ -141,7 +150,7 @@ pub struct ClipVolume(pub [ClipPlane; 6]);
 impl ClipVolume {
     /// Clip planes used by WebGPU
     #[rustfmt::skip]
-    const WEBGPU: Self = Self([
+    pub const WEBGPU: Self = Self([
                                                         // point is outside if dot(point, plane) < 0.
                                                         // which corresponds to:
         ClipPlane(Vector4::new( 1.0,  0.0,  0.0, 1.0)), // left:   x < -w
@@ -348,7 +357,13 @@ pub mod cohen_sutherland {
 
     #[derive(Clone, Copy, Debug)]
     pub struct CohenSutherland {
-        pub clip_planes: ClipVolume,
+        pub clip_volume: ClipVolume,
+    }
+
+    impl CohenSutherland {
+        pub fn new(clip_volume: ClipVolume) -> Self {
+            Self { clip_volume }
+        }
     }
 
     impl Clip<2> for CohenSutherland {
@@ -367,7 +382,7 @@ pub mod cohen_sutherland {
             // `Barycentric<N>`) with the primitives. but we think that clipping
             // the positions is enough as the rasterizer will take care of interpolation
 
-            if let Some(clipped) = clip(primitive.clip_positions(), &self.clip_planes) {
+            if let Some(clipped) = clip(primitive.clip_positions(), &self.clip_volume) {
                 let [a, b] = primitive.vertices;
                 Some(Primitive::new(
                     [
@@ -548,6 +563,8 @@ pub mod cohen_sutherland {
     }
 }
 
+pub type TriClipper = tri_clip::TriClipper;
+
 mod tri_clip {
     use std::{
         collections::VecDeque,
@@ -713,6 +730,16 @@ mod tri_clip {
         clip_volume: ClipVolume,
     }
 
+    impl TriClipper {
+        pub fn new(clip_volume: ClipVolume) -> Self {
+            Self {
+                // my guestimate for upper limit: 2**6
+                queue: VecDeque::with_capacity(64),
+                clip_volume,
+            }
+        }
+    }
+
     impl Clone for TriClipper {
         fn clone(&self) -> Self {
             Self {
@@ -768,6 +795,50 @@ mod tri_clip {
                     face: primitive.face.clone(),
                 }
             })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use approx::assert_abs_diff_eq;
+        use nalgebra::Vector4;
+
+        use crate::render_pass::clipper::{
+            ClipPosition,
+            ClipVolume,
+            tri_clip::TriClipper,
+        };
+
+        fn clip_tri(tri: [ClipPosition; 3]) -> Vec<[Vector4<f32>; 3]> {
+            let mut clipper = TriClipper::new(ClipVolume::WEBGPU);
+            clipper
+                .clip_tri(tri)
+                .map(|v| v.map(|v| v.position))
+                .collect()
+        }
+
+        #[test]
+        fn it_passes_through_tris_that_are_full_inside() {
+            let tri = [
+                Vector4::new(0.0, 0.5, 0.0, 1.0),
+                Vector4::new(-0.5, -0.5, 0.0, 1.0),
+                Vector4::new(0.5, -0.5, 0., 1.0),
+            ];
+
+            let clipped = clip_tri(tri.map(ClipPosition));
+            assert_abs_diff_eq!(&clipped[..], &[tri][..]);
+        }
+
+        #[test]
+        fn it_rejects_tris_that_are_fully_outside() {
+            let tri = [
+                Vector4::new(-2.0, 0.5, 0.0, 1.0),
+                Vector4::new(-2.5, -0.5, 0.0, 1.0),
+                Vector4::new(-1.5, -0.5, 0., 1.0),
+            ];
+
+            let clipped = clip_tri(tri.map(ClipPosition));
+            assert!(clipped.is_empty());
         }
     }
 }
