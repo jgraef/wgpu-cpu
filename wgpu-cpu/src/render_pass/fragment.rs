@@ -79,13 +79,9 @@ impl FragmentState {
         })
     }
 
-    pub fn early_depth_test(&self, evaluate: impl FnOnce() -> bool) -> bool {
+    pub fn early_depth_test(&self) -> Option<naga::EarlyDepthTest> {
         let entry_point = self.module.entry_point(self.entry_point);
-        match entry_point.early_depth_test() {
-            None => true,
-            Some(naga::EarlyDepthTest::Force) => evaluate(),
-            Some(naga::EarlyDepthTest::Allow { conservative }) => todo!("EarlyDepthTest::Allow"),
-        }
+        entry_point.early_depth_test()
     }
 }
 
@@ -158,12 +154,38 @@ impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
             color_attachments: &mut self.color_attachments,
             depth_stencil_attachment: self.depth_stencil_attachment.as_deref_mut(),
             depth_stencil_state: self.depth_stencil_state,
+            depth_test_result: None,
         };
 
         // perform early depth test
-        if !self.fragment_state.early_depth_test(|| output.depth_test()) {
-            // early depth test rejected
-            return;
+        let (early_depth_test, late_depth_test) = match self.fragment_state.early_depth_test() {
+            None => {
+                // only do late depth test
+                (false, true)
+            }
+            Some(naga::EarlyDepthTest::Force) => {
+                // only do early depth test
+                (true, false)
+            }
+            Some(naga::EarlyDepthTest::Allow { conservative: _ }) => {
+                // do both
+                (true, true)
+            }
+        };
+
+        if early_depth_test {
+            let depth_test_result = output.depth_test();
+
+            if !depth_test_result {
+                // early depth test reject
+                return;
+            }
+
+            if !late_depth_test {
+                // if we don't want to perform a late depth test we can store the result of the
+                // early depth test
+                output.depth_test_result = Some(depth_test_result);
+            }
         }
 
         // run fragment shader
@@ -393,6 +415,7 @@ pub struct FragmentOutput<'state, 'pass> {
     pub color_attachments: &'state mut [Option<AcquiredColorAttachment<'pass>>],
     pub depth_stencil_attachment: Option<&'state mut AcquiredDepthStencilAttachment<'pass>>,
     pub depth_stencil_state: Option<&'state wgpu::DepthStencilState>,
+    pub depth_test_result: Option<bool>,
 }
 
 impl<'state, 'pass> FragmentOutput<'state, 'pass> {
@@ -440,7 +463,16 @@ impl<'state, 'pass> ShaderOutput for FragmentOutput<'state, 'pass> {
                 }
             }
             Binding::Location { location, .. } => {
-                if self.depth_test() {
+                let depth_test_result = if let Some(depth_test_result) = self.depth_test_result {
+                    depth_test_result
+                }
+                else {
+                    let depth_test_result = self.depth_test();
+                    self.depth_test_result = Some(depth_test_result);
+                    depth_test_result
+                };
+
+                if depth_test_result {
                     let color = *bytemuck::from_bytes::<Vector4<f32>>(source);
                     let color_attachment =
                         self.color_attachments[*location as usize].as_mut().unwrap();

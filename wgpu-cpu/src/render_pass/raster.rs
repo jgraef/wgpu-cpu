@@ -305,41 +305,59 @@ impl Rasterize<3> for TriRasterizer {
         // to interpolate with?
         let total_area = shoelace(vp_a, vp_b, vp_c);
 
-        let barycentric = move |vp_p: Point2<f32>| {
-            // https://haqr.eu/tinyrenderer/barycentric/
+        let output = if total_area == 0.0 {
+            // we're looking onto the side of a triangle
+            None
+        }
+        else {
+            let barycentric = move |vp_p: Point2<f32>| {
+                // https://haqr.eu/tinyrenderer/barycentric/
 
-            Barycentric::from([
-                shoelace(vp_p, vp_b, vp_c) / total_area,
-                shoelace(vp_p, vp_c, vp_a) / total_area,
-                shoelace(vp_p, vp_a, vp_b) / total_area,
-            ])
+                Barycentric::from([
+                    shoelace(vp_p, vp_b, vp_c) / total_area,
+                    shoelace(vp_a, vp_p, vp_c) / total_area,
+                    shoelace(vp_a, vp_b, vp_p) / total_area,
+                ])
+            };
+
+            let output = scanlines([a.framebuffer, b.framebuffer, c.framebuffer]).flat_map(
+                move |scanline| {
+                    scanline.into_iter().filter_map(move |framebuffer| {
+                        if !self.target.in_scissor_rect(framebuffer) {
+                            return None;
+                        }
+
+                        // calculate fragment interpolation
+                        // fixme: there's a bug that some fragments are not interpolated correctly,
+                        // resulting in occluded fragments being shown at front. it looks like their
+                        // depth value gets blown up
+                        let viewport = framebuffer.coords.cast::<f32>().into();
+                        let barycentric = barycentric(viewport);
+
+                        // apply interpolation derived from clipping
+                        let barycentric = barycentric.interpolate(
+                            primitive
+                                .vertices
+                                .each_ref()
+                                .map(|vertex| vertex.interpolation),
+                        );
+
+                        let fragment =
+                            barycentric.interpolate([a.fragment, b.fragment, c.fragment]);
+
+                        Some(RasterizerOutput {
+                            framebuffer,
+                            fragment,
+                            sample_index: None,
+                            interpolation: barycentric,
+                        })
+                    })
+                },
+            );
+
+            Some(output)
         };
 
-        scanlines([a.framebuffer, b.framebuffer, c.framebuffer]).flat_map(move |scanline| {
-            scanline.into_iter().filter_map(move |framebuffer| {
-                if !self.target.in_scissor_rect(framebuffer) {
-                    return None;
-                }
-
-                let viewport = framebuffer.coords.cast::<f32>().into();
-
-                let barycentric = barycentric(viewport);
-                let barycentric = barycentric.interpolate(
-                    primitive
-                        .vertices
-                        .each_ref()
-                        .map(|vertex| vertex.interpolation),
-                );
-
-                let fragment = barycentric.interpolate([a.fragment, b.fragment, c.fragment]);
-
-                Some(RasterizerOutput {
-                    framebuffer,
-                    fragment,
-                    sample_index: None,
-                    interpolation: barycentric,
-                })
-            })
-        })
+        output.into_iter().flatten()
     }
 }

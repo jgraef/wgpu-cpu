@@ -415,6 +415,10 @@ impl ApplicationHandler for App {
             } => {
                 match state {
                     ElementState::Pressed => {
+                        if physical_key == PhysicalKey::Code(KeyCode::Escape) {
+                            event_loop.exit();
+                        }
+
                         self.keys_down.insert(physical_key);
                     }
                     ElementState::Released => {

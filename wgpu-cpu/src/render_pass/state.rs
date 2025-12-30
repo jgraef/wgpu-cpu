@@ -536,29 +536,29 @@ pub fn draw<const PRIMITIVE_SIZE: usize, const SEP: bool, Index, Assembly, Clipp
 
         if let Some(fragment_processing) = &mut fragment_processing {
             for (primitive_index, primitive) in primitives.enumerate() {
+                let (front_facing, cull_face) =
+                    primitive
+                        .try_front_face()
+                        .map_or((true, false), |front_face| {
+                            let front_facing =
+                                front_face == pipeline.descriptor.primitive.front_face;
+
+                            let cull_face = match pipeline.descriptor.primitive.cull_mode {
+                                Some(wgpu::Face::Front) => front_facing,
+                                Some(wgpu::Face::Back) => !front_facing,
+                                None => false,
+                            };
+
+                            (front_facing, cull_face)
+                        });
+
+                if cull_face {
+                    tracing::trace!(primitive = ?primitive.clip_positions(), "culled");
+                    continue;
+                }
+
                 for primitive in clipper.clip(primitive) {
                     //tracing::debug!(primitive = ?primitive.clip_positions());
-
-                    let (front_facing, cull_face) =
-                        primitive
-                            .try_front_face()
-                            .map_or((true, false), |front_face| {
-                                let front_facing =
-                                    front_face == pipeline.descriptor.primitive.front_face;
-
-                                let cull_face = match pipeline.descriptor.primitive.cull_mode {
-                                    Some(wgpu::Face::Front) => front_facing,
-                                    Some(wgpu::Face::Back) => !front_facing,
-                                    None => false,
-                                };
-
-                                (front_facing, cull_face)
-                            });
-
-                    if cull_face {
-                        tracing::trace!(primitive = ?primitive.clip_positions(), "culled");
-                        continue;
-                    }
 
                     let primitive =
                         primitive.map_vertices(|vertex| vertex.map_interpolation(Into::into));

@@ -638,6 +638,7 @@ mod tri_clip {
             [true, true, true] => Default::default(),
             [false, false, false] => std::iter::once(vertices).collect(),
             [true, true, false] => {
+                tracing::trace!(?vertices, ?plane, "A outside, B outside, C inside");
                 // A outside, B outside, C inside
                 // find CA intersection -> A'
                 // find BC intersection -> B'
@@ -650,6 +651,7 @@ mod tri_clip {
                 std::iter::once(new_vertices).collect()
             }
             [false, true, true] => {
+                tracing::trace!(?vertices, ?plane, "A inside, B outside, C outside");
                 // A inside, B outside, C outside
                 // find AB intersection -> B'
                 // find AC intersection -> C'
@@ -662,6 +664,7 @@ mod tri_clip {
                 std::iter::once(new_vertices).collect()
             }
             [true, false, true] => {
+                tracing::trace!(?vertices, ?plane, "A outside, B inside, C outside");
                 // A outside, B inside, C outside
                 // find AB intersection -> A'
                 // find BC intersection -> C'
@@ -670,7 +673,7 @@ mod tri_clip {
                 let (t_ab, a_new) = clip(0, 1);
                 let (t_bc, c_new) = clip(1, 2);
 
-                let new_vertices = [a_new, vertices[2], c_new];
+                let new_vertices = [a_new, vertices[1], c_new];
                 std::iter::once(new_vertices).collect()
             }
             [true, false, false] => {
@@ -839,6 +842,53 @@ mod tri_clip {
 
             let clipped = clip_tri(tri.map(ClipPosition));
             assert!(clipped.is_empty());
+        }
+
+        #[test]
+        fn it_clips_if_one_vertex_is_outside() {
+            let tri = [
+                Vector4::new(0.0, 1.5, 0.0, 1.0),
+                Vector4::new(-0.5, 0.5, 0.0, 1.0),
+                Vector4::new(0.5, 0.5, 0., 1.0),
+            ];
+
+            let clipped = clip_tri(tri.map(ClipPosition));
+
+            assert_abs_diff_eq!(
+                &clipped[..],
+                &[
+                    [
+                        Vector4::new(-0.25, 1.0, 0.0, 1.0),
+                        Vector4::new(-0.5, 0.5, 0.0, 1.0),
+                        Vector4::new(0.25, 1.0, 0.0, 1.0),
+                    ],
+                    [
+                        Vector4::new(-0.5, 0.5, 0.0, 1.0),
+                        Vector4::new(0.5, 0.5, 0.0, 1.0),
+                        Vector4::new(0.25, 1.0, 0.0, 1.0),
+                    ]
+                ][..]
+            );
+        }
+
+        #[test]
+        fn it_clips_if_one_vertex_is_inside() {
+            let tri = [
+                Vector4::new(0.0, -0.5, 0.0, 1.0),
+                Vector4::new(-0.5, -1.5, 0.0, 1.0),
+                Vector4::new(0.5, -1.5, 0., 1.0),
+            ];
+
+            let clipped = clip_tri(tri.map(ClipPosition));
+
+            assert_abs_diff_eq!(
+                &clipped[..],
+                &[[
+                    Vector4::new(0.0, -0.5, 0.0, 1.0),
+                    Vector4::new(-0.25, -1.0, 0.0, 1.0),
+                    Vector4::new(0.25, -1.0, 0.0, 1.0),
+                ]][..]
+            );
         }
     }
 }
