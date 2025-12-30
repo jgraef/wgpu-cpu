@@ -652,11 +652,11 @@ mod tri_clip {
             [false, true, true] => {
                 // A inside, B outside, C outside
                 // find AB intersection -> B'
-                // find CA intersection -> C'
+                // find AC intersection -> C'
                 // new triangle A B' C'
 
                 let (t_ab, b_new) = clip(0, 1);
-                let (t_ca, c_new) = clip(2, 0);
+                let (t_ac, c_new) = clip(2, 0);
 
                 let new_vertices = [vertices[0], b_new, c_new];
                 std::iter::once(new_vertices).collect()

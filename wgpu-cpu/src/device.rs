@@ -334,7 +334,12 @@ impl wgpu::custom::QueueInterface for Queue {
         offset: wgpu::BufferAddress,
         data: &[u8],
     ) {
-        todo!()
+        // todo: should we send this through the queue so it doesn't block?
+        let buffer = buffer.as_custom::<Buffer>().unwrap();
+        let offset: usize = offset.try_into().expect("buffer offset overflow");
+        let buffer_slice = buffer.slice(offset..(offset + data.len()));
+        let mut buffer_guard = buffer_slice.write();
+        buffer_guard.copy_from_slice(data);
     }
 
     fn create_staging_buffer(

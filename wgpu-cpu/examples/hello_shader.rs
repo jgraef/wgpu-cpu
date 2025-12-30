@@ -335,7 +335,11 @@ impl ApplicationHandler for App {
                         Ok(target_texture) => {
                             let target_texture_view =
                                 target_texture.texture.create_view(&Default::default());
-                            self.render(&window.pipeline, &target_texture_view, None);
+                            self.render(
+                                &window.pipeline,
+                                &target_texture_view,
+                                window.depth_texture_view.as_ref(),
+                            );
                             target_texture.present();
                         }
                         Err(error) => {
