@@ -34,6 +34,7 @@ use crate::{
         UnexpectedType,
     },
     util::ClifOutput,
+    value::NotAHandlePointer,
 };
 
 // todo: check which of these should panic instead (because we assume the source
@@ -71,8 +72,11 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     // this should probaly panic
-    #[error("transparent")]
+    #[error(transparent)]
     ExpressionNotConstant(#[from] ExpressionNotConstant),
+
+    #[error(transparent)]
+    NotAHandlePointer(#[from] NotAHandlePointer),
 }
 
 /// JIT-compile a [`naga::Module`] for execution on the CPU.

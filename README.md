@@ -29,3 +29,4 @@ Issues that can be raised with `wgpu` (marked items are patched in a local copy 
 - [ ] naga: make `naga::ir::Binding` `Copy`. This might be useful, but we don't need it anymore.
 - [ ] naga: bools have size and alignment 1. See `naga_interpreter::tests::naga_bool_width_is_32bit`.
 - [x] naga: way to convert `Alignment` to `NonZeroU32` (or anything usable). cranelift wants to know this, just using `round_up` won't always do. Alternative: just offer a getter for the log2 of the alignment
+- [ ] `map_label` for various descriptor structs (e.g. `SamplerDescriptor`)

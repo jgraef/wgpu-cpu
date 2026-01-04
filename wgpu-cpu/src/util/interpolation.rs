@@ -151,6 +151,9 @@ impl<const N: usize> Interpolate<N> for Barycentric<N> {
     where
         T: Mul<f32, Output = T> + Add<T, Output = T> + Copy,
     {
+        // todo: this is a dot-product. using a existing function might improve
+        // performance
+
         let mut accu = points[0] * self.coefficients[0];
         for i in 1..N {
             accu = accu + points[i] * self.coefficients[i];

@@ -31,6 +31,7 @@ use crate::{
         PipelineLayout,
         RenderPipeline,
     },
+    sampler::Sampler,
     shader::ShaderModule,
     texture::Texture,
     util::make_label_owned,
@@ -182,7 +183,7 @@ impl wgpu::custom::DeviceInterface for Device {
     }
 
     fn create_sampler(&self, desc: &wgpu::SamplerDescriptor<'_>) -> wgpu::custom::DispatchSampler {
-        todo!()
+        wgpu::custom::DispatchSampler::custom(Sampler::new(desc))
     }
 
     fn create_query_set(
@@ -374,7 +375,62 @@ impl wgpu::custom::QueueInterface for Queue {
         data_layout: wgpu::TexelCopyBufferLayout,
         size: wgpu::Extent3d,
     ) {
-        todo!()
+        if texture.mip_level != 0 {
+            todo!("write to mip_level: {}", texture.mip_level);
+        }
+        if texture.aspect != wgpu::TextureAspect::All {
+            todo!(
+                "implement write_texture for texture aspects other than wgpu::TextureAspect::All"
+            );
+        }
+
+        let origin = texture.origin;
+        let size = texture.texture.size();
+        let texture = texture.texture.as_custom::<Texture>().unwrap();
+
+        assert!(origin.x + size.width <= size.width);
+        assert!(origin.y + size.height <= size.height);
+        assert!(origin.z + size.depth_or_array_layers <= size.depth_or_array_layers);
+
+        let destination_layout = texture.data_layout;
+
+        let mut source_offset =
+            usize::try_from(data_layout.offset).expect("source offset overflow");
+        let source_bytes_per_row = data_layout.bytes_per_row.map_or_else(
+            || {
+                assert_eq!(size.height, 1);
+                assert_eq!(size.depth_or_array_layers, 1);
+                data.len()
+            },
+            |bytes_per_row| usize::try_from(bytes_per_row).expect("bytes_per_row overflow"),
+        );
+        let source_bytes_per_layer = data_layout.rows_per_image.map_or_else(
+            || {
+                assert_eq!(size.depth_or_array_layers, 1);
+                data.len()
+            },
+            |rows_per_image| {
+                usize::try_from(rows_per_image).expect("rows_per_image overflow")
+                    * source_bytes_per_row
+            },
+        );
+
+        let mut destination_offset = destination_layout.offset;
+        let mut destination_buffer = texture.buffer.write();
+
+        for z in 0..size.depth_or_array_layers {
+            let mut source_row_offset = source_offset;
+
+            for y in 0..size.height {
+                destination_buffer[destination_offset..][..source_bytes_per_row]
+                    .copy_from_slice(&data[source_row_offset..][..source_bytes_per_row]);
+
+                source_row_offset += source_bytes_per_row;
+                destination_offset += source_bytes_per_row;
+            }
+
+            source_offset += source_bytes_per_layer;
+        }
     }
 
     fn submit(

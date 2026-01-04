@@ -4,6 +4,10 @@ use crate::{
     Error,
     expression::CompileExpression,
     function::FunctionCompiler,
+    types::{
+        PointerType,
+        PointerTypeBase,
+    },
     value::{
         Pointer,
         PointerRange,
@@ -29,7 +33,10 @@ impl CompileExpression for GlobalVariableExpression {
                     .private_memory(compiler.context, &mut compiler.function_builder);
 
                 PointerValue {
-                    ty: global_variable.pointer_type,
+                    ty: PointerType {
+                        base_type: PointerTypeBase::Pointer(global_variable.ty),
+                        address_space: global_variable.address_space,
+                    },
                     inner: PointerValueInner::StaticPointer(PointerRange {
                         pointer: Pointer {
                             value: base_pointer,
@@ -41,17 +48,61 @@ impl CompileExpression for GlobalVariableExpression {
                 }
             }
             GlobalVariableInner::Resource { binding } => {
-                let pointer = compiler.runtime_context.buffer(
-                    compiler.context,
-                    &mut compiler.function_builder,
-                    binding,
-                    global_variable.address_space.access(),
-                    compiler.abort_block,
-                );
+                dbg!(&global_variable);
 
-                PointerValue {
-                    ty: global_variable.pointer_type,
-                    inner: PointerValueInner::DynamicPointer(pointer),
+                match global_variable.address_space {
+                    naga::AddressSpace::Uniform | naga::AddressSpace::Storage { access: _ } => {
+                        let pointer = compiler.runtime_context.buffer_resource(
+                            compiler.context,
+                            &mut compiler.function_builder,
+                            binding,
+                            global_variable.address_space.access(),
+                            compiler.abort_block,
+                        )?;
+
+                        PointerValue {
+                            ty: PointerType {
+                                base_type: PointerTypeBase::Pointer(global_variable.ty),
+                                address_space: global_variable.address_space,
+                            },
+                            inner: PointerValueInner::DynamicPointer(pointer),
+                        }
+                    }
+                    naga::AddressSpace::Handle => {
+                        let ty = &compiler.context.source.types[global_variable.ty].inner;
+                        let pointer = match ty {
+                            naga::TypeInner::Image {
+                                dim,
+                                arrayed,
+                                class,
+                            } => {
+                                compiler.runtime_context.image_resource(
+                                    compiler.context,
+                                    &mut compiler.function_builder,
+                                    binding,
+                                    compiler.abort_block,
+                                )?
+                            }
+                            naga::TypeInner::Sampler { comparison } => {
+                                compiler.runtime_context.sampler_resource(
+                                    compiler.context,
+                                    &mut compiler.function_builder,
+                                    binding,
+                                    compiler.abort_block,
+                                )?
+                            }
+                            _ => panic!("Unsupported handle type: {ty:?}"),
+                        };
+
+                        PointerValue {
+                            ty: PointerType {
+                                base_type: PointerTypeBase::Pointer(global_variable.ty),
+                                address_space: global_variable.address_space,
+                            },
+                            inner: PointerValueInner::Handle(pointer),
+                        }
+                    }
+                    _ => panic!("Unsupported: {:?}", global_variable.address_space),
                 }
             }
         };

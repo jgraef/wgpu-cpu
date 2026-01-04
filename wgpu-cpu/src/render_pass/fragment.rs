@@ -10,7 +10,6 @@ use naga_cranelift::{
     CompiledModule,
     bindings::{
         BindingLocation,
-        NullBinding,
         ShaderInput,
         ShaderOutput,
     },
@@ -27,7 +26,9 @@ use nalgebra::{
 };
 
 use crate::{
+    bind_group::BindGroup,
     render_pass::{
+        binding::AcquiredBindingResources,
         bytes_of_bool_as_u8,
         clipper::{
             ClipPosition,
@@ -94,6 +95,7 @@ pub struct FragmentProcessingState<'pass, 'state> {
     pub depth_stencil_state: Option<&'state wgpu::DepthStencilState>,
     pub color_attachments: &'state mut [Option<AcquiredColorAttachment<'pass>>],
     pub depth_stencil_attachment: Option<&'state mut AcquiredDepthStencilAttachment<'pass>>,
+    pub binding_resources: AcquiredBindingResources<'state>,
     pub fragment_state: &'state FragmentState,
 }
 
@@ -102,10 +104,12 @@ impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
         pipeline_state: &'state RenderPipelineState,
         color_attachments: &'state mut [Option<AcquiredColorAttachment<'pass>>],
         depth_stencil_attachment: Option<&'state mut AcquiredDepthStencilAttachment<'pass>>,
+        bind_groups: &'state [Option<BindGroup>],
     ) -> Option<Self> {
         let pipeline_descriptor = &pipeline_state.pipeline.descriptor;
         let fragment_state = pipeline_descriptor.fragment.as_ref()?;
         let primitive_state = &pipeline_descriptor.primitive;
+        let binding_resources = AcquiredBindingResources::new(bind_groups);
 
         Some(Self {
             front_face: primitive_state.front_face,
@@ -113,6 +117,7 @@ impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
             depth_stencil_state: pipeline_descriptor.depth_stencil.as_ref(),
             color_attachments,
             depth_stencil_attachment,
+            binding_resources,
             fragment_state,
         })
     }
@@ -194,7 +199,7 @@ impl<'pass, 'state> FragmentProcessingState<'pass, 'state> {
             .module
             .entry_point(self.fragment_state.entry_point);
 
-        match entry_point.run(&input, &mut output, NullBinding) {
+        match entry_point.run(&input, &mut output, &self.binding_resources) {
             Ok(()) => {}
             Err(EntryPointError::Killed) => {
                 // the fragment shader ran discard. it won't have written to

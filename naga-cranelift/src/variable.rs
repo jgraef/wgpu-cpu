@@ -2,12 +2,10 @@ use std::collections::HashMap;
 
 use cranelift_codegen::ir;
 
-use crate::types::PointerType;
-
 #[derive(Clone, Copy, Debug)]
 pub struct GlobalVariable {
+    pub ty: naga::Handle<naga::Type>,
     pub address_space: naga::AddressSpace,
-    pub pointer_type: PointerType,
     pub inner: GlobalVariableInner,
 }
 

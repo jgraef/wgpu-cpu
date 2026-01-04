@@ -19,6 +19,7 @@ use naga_cranelift::{
 };
 
 use crate::{
+    bind_group::BindGroup,
     buffer::{
         BufferReadGuard,
         BufferSlice,
@@ -253,7 +254,7 @@ impl<'state> VertexProcessingState<'state> {
     pub fn new(
         pipeline_state: &'state RenderPipelineState,
         vertex_buffers: &'state [Option<BufferSlice>],
-        binding_resources: AcquiredBindingResources<'state>,
+        bind_groups: &'state [Option<BindGroup>],
     ) -> Self {
         let vertex_state = &pipeline_state.pipeline.descriptor.vertex;
 
@@ -269,7 +270,8 @@ impl<'state> VertexProcessingState<'state> {
                 VertexBufferInput::new(buffer.read(), layout.array_stride, layout.step_mode)
             })
             .collect::<Vec<_>>();
-        tracing::debug!(?vertex_buffers, vertex_locations = ?vertex_state.vertex_buffer_locations);
+
+        let binding_resources = AcquiredBindingResources::new(bind_groups);
 
         Self {
             inter_stage_buffer_pool: &pipeline_state.interstage_user_pool,

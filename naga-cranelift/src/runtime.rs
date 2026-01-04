@@ -1,3 +1,4 @@
+use core::f32;
 use std::{
     fmt::Debug,
     marker::PhantomData,
@@ -25,16 +26,24 @@ use crate::{
         AbortCode,
         AbortPayload,
     },
-    types::Type,
+    types::{
+        FloatWidth,
+        ScalarType,
+        Type,
+        VectorType,
+    },
     util::alignment_log2,
     value::{
         AsIrValues,
+        HandlePointer,
         Load,
         Pointer,
         PointerOffset,
         PointerRange,
+        ScalarValue,
         StackLocation,
         Value,
+        VectorValue,
     },
     variable::PrivateMemoryLayout,
 };
@@ -58,6 +67,9 @@ pub trait Runtime: Sized {
     /// call to [`EntryPoint::function`](super::product::EntryPoint::function)
     /// will return that error.
     type Error;
+
+    type Image;
+    type Sampler;
 
     /// Copy shader parameters to stack.
     ///
@@ -102,12 +114,38 @@ pub trait Runtime: Sized {
     /// # TODO
     ///
     /// Is this usable and safe?
-    fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error>;
+    fn buffer_resource(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error>;
 
     /// # TODO
     ///
     /// Is this usable and safe?
-    fn buffer_mut(&mut self, binding: naga::ResourceBinding) -> Result<&mut [u8], Self::Error>;
+    fn buffer_resource_mut(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&mut [u8], Self::Error>;
+
+    fn image_resource(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&Self::Image, Self::Error>;
+
+    fn sampler_resource(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&Self::Sampler, Self::Error>;
+
+    fn image_sample(
+        &mut self,
+        image: &Self::Image,
+        sampler: &Self::Sampler,
+        gather: Option<naga::SwizzleComponent>,
+        coordinate: [f32; 2],
+        array_index: Option<u32>,
+        offset: Option<u32>,
+        level: naga::SampleLevel,
+        depth_ref: Option<f32>,
+        clamp_to_edge: bool,
+    ) -> Result<[f32; 4], Self::Error>;
 }
 
 impl<R> Runtime for &mut R
@@ -115,6 +153,8 @@ where
     R: Runtime,
 {
     type Error = R::Error;
+    type Image = R::Image;
+    type Sampler = R::Sampler;
 
     fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), Self::Error> {
         R::copy_inputs_to(self, target)
@@ -128,12 +168,55 @@ where
         R::initialize_global_variables(self, private_data)
     }
 
-    fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
-        R::buffer(self, binding)
+    fn buffer_resource(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
+        R::buffer_resource(self, binding)
     }
 
-    fn buffer_mut(&mut self, binding: naga::ResourceBinding) -> Result<&mut [u8], Self::Error> {
-        R::buffer_mut(self, binding)
+    fn buffer_resource_mut(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&mut [u8], Self::Error> {
+        R::buffer_resource_mut(self, binding)
+    }
+
+    fn image_resource(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&Self::Image, Self::Error> {
+        R::image_resource(self, binding)
+    }
+
+    fn sampler_resource(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&Self::Sampler, Self::Error> {
+        R::sampler_resource(self, binding)
+    }
+
+    fn image_sample(
+        &mut self,
+        image: &Self::Image,
+        sampler: &Self::Sampler,
+        gather: Option<naga::SwizzleComponent>,
+        coordinate: [f32; 2],
+        array_index: Option<u32>,
+        offset: Option<u32>,
+        level: naga::SampleLevel,
+        depth_ref: Option<f32>,
+        clamp_to_edge: bool,
+    ) -> Result<[f32; 4], Self::Error> {
+        R::image_sample(
+            self,
+            image,
+            sampler,
+            gather,
+            coordinate,
+            array_index,
+            offset,
+            level,
+            depth_ref,
+            clamp_to_edge,
+        )
     }
 }
 
@@ -202,6 +285,24 @@ where
 /// https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs
 #[repr(C)]
 pub struct DynRuntimeData {
+    _data: (),
+    _marker: PhantomData<(*mut u8, std::marker::PhantomPinned)>,
+}
+
+/// Type representing the struct pointed to by an opaque image pointer.
+///
+/// https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs
+#[repr(C)]
+pub struct Image {
+    _data: (),
+    _marker: PhantomData<(*mut u8, std::marker::PhantomPinned)>,
+}
+
+/// Type representing the struct pointed to by an opaque sampler pointer.
+///
+/// https://doc.rust-lang.org/nomicon/ffi.html#representing-opaque-structs
+#[repr(C)]
+pub struct Sampler {
     _data: (),
     _marker: PhantomData<(*mut u8, std::marker::PhantomPinned)>,
 }
@@ -298,13 +399,41 @@ pub struct RuntimeVtable {
     pub initialize_global_variables:
         unsafe extern "C" fn(*mut DynRuntimeData, *mut u8, usize) -> AbortCode,
 
-    pub buffer: unsafe extern "C" fn(
+    pub buffer_resource: unsafe extern "C" fn(
         *mut DynRuntimeData,
         group: u32,
         binding: u32,
         access: u32,
         pointer_out: &mut *const u8,
         len_out: &mut usize,
+    ) -> AbortCode,
+
+    pub image_resource: unsafe extern "C" fn(
+        *mut DynRuntimeData,
+        group: u32,
+        binding: u32,
+        pointer_out: &mut *const Image,
+    ) -> AbortCode,
+
+    pub sampler_resource: unsafe extern "C" fn(
+        *mut DynRuntimeData,
+        group: u32,
+        binding: u32,
+        pointer_out: &mut *const Sampler,
+    ) -> AbortCode,
+
+    pub image_sample: unsafe extern "C" fn(
+        *mut DynRuntimeData,
+        image: *const Image,
+        sampler: *const Sampler,
+        gather: u32,
+        u: f32,
+        v: f32,
+        array_index: u32,
+        offset: u32,
+        depth_ref: f32,
+        clamp_to_edge: u8,
+        texel_out: &mut [f32; 4],
     ) -> AbortCode,
 }
 
@@ -391,7 +520,7 @@ impl RuntimeVtable {
             data.with_runtime(|runtime| runtime.initialize_global_variables(target))
         }
 
-        unsafe extern "C" fn buffer<R>(
+        unsafe extern "C" fn buffer_resource<R>(
             data: *mut DynRuntimeData,
             group: u32,
             binding: u32,
@@ -413,11 +542,11 @@ impl RuntimeVtable {
                 let binding = naga::ResourceBinding { group, binding };
 
                 let (pointer, len) = if access.contains(naga::StorageAccess::STORE) {
-                    let buffer = runtime.buffer_mut(binding)?;
+                    let buffer = runtime.buffer_resource_mut(binding)?;
                     (buffer.as_mut_ptr() as *const u8, buffer.len())
                 }
                 else if access.contains(naga::StorageAccess::LOAD) {
-                    let buffer = runtime.buffer(binding)?;
+                    let buffer = runtime.buffer_resource(binding)?;
                     (buffer.as_ptr(), buffer.len())
                 }
                 else {
@@ -431,11 +560,110 @@ impl RuntimeVtable {
             })
         }
 
+        unsafe extern "C" fn image_resource<R>(
+            data: *mut DynRuntimeData,
+            group: u32,
+            binding: u32,
+            pointer_out: &mut *const Image,
+        ) -> AbortCode
+        where
+            R: Runtime,
+        {
+            let data = unsafe {
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
+            };
+
+            data.with_runtime(move |runtime| {
+                let binding = naga::ResourceBinding { group, binding };
+                let pointer = runtime.image_resource(binding)?;
+                *pointer_out = pointer as *const _ as *const _;
+                Ok(())
+            })
+        }
+
+        unsafe extern "C" fn sampler_resource<R>(
+            data: *mut DynRuntimeData,
+            group: u32,
+            binding: u32,
+            pointer_out: &mut *const Sampler,
+        ) -> AbortCode
+        where
+            R: Runtime,
+        {
+            let data = unsafe {
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
+            };
+
+            data.with_runtime(move |runtime| {
+                let binding = naga::ResourceBinding { group, binding };
+                let pointer = runtime.sampler_resource(binding)?;
+                *pointer_out = pointer as *const _ as *const _;
+                Ok(())
+            })
+        }
+
+        unsafe extern "C" fn image_sample<R>(
+            data: *mut DynRuntimeData,
+            image: *const Image,
+            sampler: *const Sampler,
+            gather: u32,
+            u: f32,
+            v: f32,
+            array_index: u32,
+            offset: u32,
+            depth_ref: f32,
+            clamp_to_edge: u8,
+            texel_out: &mut [f32; 4],
+        ) -> AbortCode
+        where
+            R: Runtime,
+        {
+            let data = unsafe {
+                // SAFETY: The compiled code must call this function with a `*mut DynRuntime`
+                // that corresponds to a valid `&mut RuntimeData<R>`
+                RuntimeData::<R>::from_pointer_mut(data)
+            };
+
+            let u32_opt = |x: u32| (x != u32::MAX).then_some(x);
+            let f32_opt = |x: f32| (!x.is_nan()).then_some(x);
+
+            let image = unsafe { &*(image as *const R::Image) };
+            let sampler = unsafe { &*(sampler as *const R::Sampler) };
+
+            let gather = u32_opt(gather).map(naga::SwizzleComponent::from_index);
+            let array_index = u32_opt(array_index);
+            let offset = u32_opt(offset);
+            let depth_ref = f32_opt(depth_ref);
+            let clamp_to_edge = clamp_to_edge != 0;
+
+            data.with_runtime(move |runtime| {
+                *texel_out = runtime.image_sample(
+                    image,
+                    sampler,
+                    gather,
+                    [u, v],
+                    array_index,
+                    offset,
+                    naga::SampleLevel::Auto,
+                    depth_ref,
+                    clamp_to_edge,
+                )?;
+                Ok(())
+            })
+        }
+
         RuntimeVtable {
             copy_inputs_to: copy_inputs_to::<R>,
             copy_outputs_from: copy_outputs_from::<R>,
             initialize_global_variables: initialize_global_variables::<R>,
-            buffer: buffer::<R>,
+            buffer_resource: buffer_resource::<R>,
+            image_resource: image_resource::<R>,
+            sampler_resource: sampler_resource::<R>,
+            image_sample: image_sample::<R>,
         }
     }
 }
@@ -449,7 +677,10 @@ pub struct RuntimeMethodSignatures {
     pub copy_outputs_from: ir::SigRef,
     pub initialize_global_variables: ir::SigRef,
     pub kill: ir::SigRef,
-    pub buffer: ir::SigRef,
+    pub buffer_resource: ir::SigRef,
+    pub image_resource: ir::SigRef,
+    pub sampler_resource: ir::SigRef,
+    pub image_sample: ir::SigRef,
 }
 
 impl RuntimeMethodSignatures {
@@ -506,7 +737,7 @@ impl RuntimeMethodSignatures {
             call_conv: context.target_config.default_call_conv,
         });
 
-        let buffer = function_builder.import_signature(ir::Signature {
+        let buffer_resource = function_builder.import_signature(ir::Signature {
             params: vec![
                 // context pointer
                 context_param,
@@ -525,12 +756,74 @@ impl RuntimeMethodSignatures {
             call_conv: context.target_config.default_call_conv,
         });
 
+        let image_resource = function_builder.import_signature(ir::Signature {
+            params: vec![
+                // context pointer
+                context_param,
+                // binding group
+                ir::AbiParam::new(ir::types::I32),
+                // binding index
+                ir::AbiParam::new(ir::types::I32),
+                // buffer pointer, return by reference
+                pointer_param,
+            ],
+            returns: vec![result],
+            call_conv: context.target_config.default_call_conv,
+        });
+
+        let sampler_resource = function_builder.import_signature(ir::Signature {
+            params: vec![
+                // context pointer
+                context_param,
+                // binding group
+                ir::AbiParam::new(ir::types::I32),
+                // binding index
+                ir::AbiParam::new(ir::types::I32),
+                // buffer pointer, return by reference
+                pointer_param,
+            ],
+            returns: vec![result],
+            call_conv: context.target_config.default_call_conv,
+        });
+
+        let image_sample = function_builder.import_signature(ir::Signature {
+            params: vec![
+                // context pointer
+                context_param,
+                // image
+                pointer_param,
+                // sampler
+                pointer_param,
+                // gather
+                ir::AbiParam::new(ir::types::I32),
+                // coordinate.u
+                ir::AbiParam::new(ir::types::F32),
+                // coordinate.v
+                ir::AbiParam::new(ir::types::F32),
+                // array_index
+                ir::AbiParam::new(ir::types::I32),
+                // offset
+                ir::AbiParam::new(ir::types::I32),
+                // depth_ref
+                ir::AbiParam::new(ir::types::F32),
+                // clamp_to_edge
+                ir::AbiParam::new(ir::types::I8),
+                // buffer pointer, return by reference
+                pointer_param,
+            ],
+            returns: vec![result],
+            call_conv: context.target_config.default_call_conv,
+        });
+
         Self {
             copy_inputs_to,
             copy_outputs_from,
             initialize_global_variables,
             kill,
-            buffer,
+            buffer_resource,
+            image_resource,
+            sampler_resource,
+            image_sample,
         }
     }
 }
@@ -615,14 +908,14 @@ impl RuntimeContextValue {
             .store(self.memory_flags, pointer, self.pointer, offset);
     }
 
-    pub fn buffer(
+    pub fn buffer_resource(
         &self,
         context: &Context,
         function_builder: &mut FunctionBuilder,
         resource_binding: naga::ir::ResourceBinding,
         access: naga::StorageAccess,
         abort_block: ir::Block,
-    ) -> PointerRange<ir::Value> {
+    ) -> Result<PointerRange<ir::Value>, Error> {
         // values for arguments
         let group = function_builder
             .ins()
@@ -658,7 +951,7 @@ impl RuntimeContextValue {
             .stack_addr(pointer_type, len_out_stack_slot, 0);
 
         // call runtime
-        runtime_method!(self, buffer).call(
+        runtime_method!(self, buffer_resource).call(
             context,
             function_builder,
             [group, binding, access, pointer_out, len_out],
@@ -675,14 +968,198 @@ impl RuntimeContextValue {
 
         // we probably need to think about what memory flags to use here (depends on
         // address space i think)
-        PointerRange {
+        Ok(PointerRange {
             pointer: Pointer {
                 value: pointer,
                 memory_flags: self.memory_flags,
                 offset: 0,
             },
             len,
+        })
+    }
+
+    pub fn image_resource(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        resource_binding: naga::ir::ResourceBinding,
+        abort_block: ir::Block,
+    ) -> Result<HandlePointer, Error> {
+        // values for arguments
+        let group = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(resource_binding.group));
+        let binding = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(resource_binding.binding));
+
+        // the runtime api method will return the pointer by reference.
+        let pointer_type = context.pointer_type();
+        let pointer_out_stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
+            kind: ir::StackSlotKind::ExplicitSlot,
+            size: pointer_type.bytes(),
+            align_shift: 1, // i think cranelift will figure it out
+            key: None,
+        });
+        let pointer_out =
+            function_builder
+                .ins()
+                .stack_addr(pointer_type, pointer_out_stack_slot, 0);
+
+        // call runtime
+        runtime_method!(self, image_resource).call(
+            context,
+            function_builder,
+            [group, binding, pointer_out],
+            abort_block,
+        );
+
+        // load returned pointer and len
+        let pointer = function_builder
+            .ins()
+            .stack_load(pointer_type, pointer_out_stack_slot, 0);
+
+        Ok(HandlePointer(pointer))
+    }
+
+    pub fn sampler_resource(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        resource_binding: naga::ir::ResourceBinding,
+        abort_block: ir::Block,
+    ) -> Result<HandlePointer, Error> {
+        // values for arguments
+        let group = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(resource_binding.group));
+        let binding = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(resource_binding.binding));
+
+        // the runtime api method will return the pointer by reference.
+        let pointer_type = context.pointer_type();
+        let pointer_out_stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
+            kind: ir::StackSlotKind::ExplicitSlot,
+            size: pointer_type.bytes(),
+            align_shift: 1, // i think cranelift will figure it out
+            key: None,
+        });
+        let pointer_out =
+            function_builder
+                .ins()
+                .stack_addr(pointer_type, pointer_out_stack_slot, 0);
+
+        // call runtime
+        runtime_method!(self, sampler_resource).call(
+            context,
+            function_builder,
+            [group, binding, pointer_out],
+            abort_block,
+        );
+
+        // load returned pointer and len
+        let pointer = function_builder
+            .ins()
+            .stack_load(pointer_type, pointer_out_stack_slot, 0);
+
+        Ok(HandlePointer(pointer))
+    }
+
+    pub fn image_sample(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        abort_block: ir::Block,
+        image: HandlePointer,
+        sampler: HandlePointer,
+        gather: Option<naga::SwizzleComponent>,
+        coordinate: VectorValue,
+        array_index: Option<ScalarValue>,
+        offset: Option<ScalarValue>,
+        level: naga::SampleLevel,
+        depth_ref: Option<ScalarValue>,
+        clamp_to_edge: bool,
+    ) -> Result<VectorValue, Error> {
+        let gather = gather.map_or(u32::MAX, |swizzle_component| swizzle_component.index());
+        let gather = function_builder
+            .ins()
+            .iconst(ir::types::I32, i64::from(gather));
+
+        let coordinates = coordinate.components(function_builder);
+        assert_eq!(coordinates.len(), 2);
+
+        let array_index = array_index.map_or_else(
+            || {
+                function_builder
+                    .ins()
+                    .iconst(ir::types::I32, i64::from(u32::MAX))
+            },
+            |value| value.value,
+        );
+
+        let offset = offset.map_or_else(
+            || {
+                function_builder
+                    .ins()
+                    .iconst(ir::types::I32, i64::from(u32::MAX))
+            },
+            |value| value.value,
+        );
+
+        match level {
+            naga::SampleLevel::Auto => {}
+            _ => todo!("sample level: {level:?}"),
         }
+
+        let depth_ref = depth_ref.map_or_else(
+            || function_builder.ins().f32const(f32::NAN),
+            |value| value.value,
+        );
+
+        let clamp_to_edge = function_builder
+            .ins()
+            .iconst(ir::types::I8, clamp_to_edge as i64);
+
+        let texel_type = VectorType {
+            size: naga::VectorSize::Quad,
+            scalar: ScalarType::Float(FloatWidth::F32),
+        };
+        let texel_out_stack_slot = function_builder.create_sized_stack_slot(ir::StackSlotData {
+            kind: ir::StackSlotKind::ExplicitSlot,
+            size: 16,       // todo: don't hardcode this
+            align_shift: 4, // this is log_2, so it's 16 bytes alignment
+            key: None,
+        });
+        let texel_out =
+            function_builder
+                .ins()
+                .stack_addr(context.pointer_type(), texel_out_stack_slot, 0);
+
+        runtime_method!(self, image_sample).call(
+            context,
+            function_builder,
+            [
+                image.0,
+                sampler.0,
+                gather,
+                coordinates[0],
+                coordinates[1],
+                array_index,
+                offset,
+                depth_ref,
+                clamp_to_edge,
+                texel_out,
+            ],
+            abort_block,
+        );
+
+        VectorValue::load(
+            context,
+            function_builder,
+            texel_type,
+            StackLocation::from(texel_out_stack_slot),
+        )
     }
 }
 
@@ -1005,6 +1482,8 @@ where
     B: BindingResources,
 {
     type Error = DefaultRuntimeError;
+    type Image = B::Image;
+    type Sampler = B::Sampler;
 
     fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), DefaultRuntimeError> {
         for layout in self.input_layout {
@@ -1031,21 +1510,64 @@ where
     }
 
     fn initialize_global_variables(&mut self, private_data: &mut [u8]) -> Result<(), Self::Error> {
-        tracing::debug!("initialize global variables: {private_data:p}");
-
         let initialized = &self.private_memory_layout.initialized;
         private_data[..initialized.len()].copy_from_slice(initialized);
         private_data[initialized.len()..].fill(0);
         Ok(())
     }
 
-    fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
-        let buffer = self.binding_resources.read(binding);
+    fn buffer_resource(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
+        let buffer = self.binding_resources.buffer(binding);
         Ok(buffer)
     }
 
-    fn buffer_mut(&mut self, binding: naga::ResourceBinding) -> Result<&mut [u8], Self::Error> {
-        todo!("buffer_mut: {binding:?}");
+    fn buffer_resource_mut(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&mut [u8], Self::Error> {
+        todo!("buffer_resource_mut: {binding:?}");
+    }
+
+    fn image_resource(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&Self::Image, Self::Error> {
+        let image = self.binding_resources.image(binding);
+        Ok(image)
+    }
+
+    fn sampler_resource(
+        &mut self,
+        binding: naga::ResourceBinding,
+    ) -> Result<&Self::Sampler, Self::Error> {
+        let sampler = self.binding_resources.sampler(binding);
+        Ok(sampler)
+    }
+
+    fn image_sample(
+        &mut self,
+        image: &Self::Image,
+        sampler: &Self::Sampler,
+        gather: Option<naga::SwizzleComponent>,
+        coordinate: [f32; 2],
+        array_index: Option<u32>,
+        offset: Option<u32>,
+        level: naga::SampleLevel,
+        depth_ref: Option<f32>,
+        clamp_to_edge: bool,
+    ) -> Result<[f32; 4], Self::Error> {
+        let texel = self.binding_resources.image_sample(
+            image,
+            sampler,
+            gather,
+            coordinate,
+            array_index,
+            offset,
+            level,
+            depth_ref,
+            clamp_to_edge,
+        );
+        Ok(texel)
     }
 }
 

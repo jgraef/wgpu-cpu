@@ -11,7 +11,6 @@ use half::f16;
 use crate::{
     Error,
     compiler::Context,
-    function::FunctionCompiler,
     types::{
         ArrayType,
         FloatWidth,
@@ -214,6 +213,9 @@ impl From<ir::StackSlot> for StackLocation {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct HandlePointer(pub ir::Value);
+
 pub trait PointerOffset: Copy {
     #[must_use]
     fn add_offset(self, offset: u32) -> Self;
@@ -390,15 +392,17 @@ pub struct ScalarValue {
 }
 
 impl ScalarValue {
-    pub fn compile_neg_zero(compiler: &mut FunctionCompiler, float_width: FloatWidth) -> Self {
+    pub fn compile_neg_zero(
+        function_builder: &mut FunctionBuilder,
+        float_width: FloatWidth,
+    ) -> Self {
         let value = match float_width {
             FloatWidth::F16 => {
-                compiler
-                    .function_builder
+                function_builder
                     .ins()
                     .f16const(ieee16_from_f16(f16::NEG_ZERO))
             }
-            FloatWidth::F32 => compiler.function_builder.ins().f32const(-0.0),
+            FloatWidth::F32 => function_builder.ins().f32const(-0.0),
         };
 
         Self {
@@ -407,9 +411,8 @@ impl ScalarValue {
         }
     }
 
-    pub fn compile_u32(compiler: &mut FunctionCompiler, literal: u32) -> Self {
-        let value = compiler
-            .function_builder
+    pub fn compile_u32(function_builder: &mut FunctionBuilder, literal: u32) -> Self {
+        let value = function_builder
             .ins()
             .iconst(ir::types::I32, i64::from(literal));
         Self {
@@ -515,6 +518,9 @@ impl PointerValue {
             PointerValueInner::StackLocation(stack_location) => {
                 Value::load(context, function_builder, base_type, stack_location)?
             }
+            PointerValueInner::Handle(_) => {
+                panic!("Invalid to dereference handle pointer");
+            }
         };
 
         Ok(value)
@@ -535,6 +541,9 @@ impl PointerValue {
             }
             PointerValueInner::StackLocation(stack_location) => {
                 value.store(context, function_builder, stack_location)?
+            }
+            PointerValueInner::Handle(_) => {
+                panic!("Invalid to dereference handle pointer");
             }
         }
 
@@ -565,6 +574,7 @@ impl PointerValue {
                     .as_pointer_range(context, function_builder)
                     .as_dynamic(context, function_builder)
             }
+            _ => panic!("Invald to add offset to handle pointer"),
         };
 
         Self {
@@ -602,6 +612,7 @@ impl AsIrValue for PointerValue {
                 //todo!();
                 None
             }
+            PointerValueInner::Handle(pointer) => Some(pointer.0),
         }
     }
 }
@@ -678,11 +689,29 @@ impl PointerOffset for PointerValue {
     }
 }
 
+impl TryFrom<PointerValue> for HandlePointer {
+    type Error = NotAHandlePointer; // todo
+
+    fn try_from(value: PointerValue) -> Result<Self, Self::Error> {
+        match value.inner {
+            PointerValueInner::Handle(handle_pointer) => Ok(handle_pointer),
+            _ => Err(NotAHandlePointer { pointer: value }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("Not a handle pointer: {pointer:?}")]
+pub struct NotAHandlePointer {
+    pub pointer: PointerValue,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum PointerValueInner {
     StaticPointer(PointerRange<u32>),
     DynamicPointer(PointerRange<ir::Value>),
     StackLocation(StackLocation),
+    Handle(HandlePointer),
 }
 
 impl PointerOffset for PointerValueInner {
@@ -693,6 +722,7 @@ impl PointerOffset for PointerValueInner {
             Self::StackLocation(stack_location) => {
                 Self::StackLocation(stack_location.add_offset(offset))
             }
+            _ => panic!("Invald to add offset to handle pointer"),
         }
     }
 }
@@ -731,6 +761,21 @@ impl VectorValue {
             ty: self.ty.with_scalar(ty),
             values,
         })
+    }
+
+    pub fn components(&self, function_builder: &mut FunctionBuilder) -> ArrayVec<ir::Value, 4> {
+        if self.values.len() == 1 {
+            let mut values = ArrayVec::new();
+
+            for i in 0..u8::from(self.ty.size) {
+                values.push(function_builder.ins().extractlane(self.values[0], i));
+            }
+
+            values
+        }
+        else {
+            self.values.clone()
+        }
     }
 }
 
@@ -1123,6 +1168,83 @@ impl TypeOf for ArrayValue {
     }
 }
 
+/*
+#[derive(Clone, Copy, Debug)]
+pub enum ImageValue {}
+
+impl TypeOf for ImageValue {
+    type Type = ImageType;
+
+    fn type_of(&self) -> Self::Type {
+        match *self {}
+    }
+}
+
+impl AsIrValue for ImageValue {
+    fn try_as_ir_value(&self) -> Option<ir::Value> {
+        todo!()
+    }
+}
+
+impl<P> Load<P, ImageType> for ImageValue {
+    fn load(
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        ty: ImageType,
+        pointer: P,
+    ) -> Result<Self, Error> {
+        let _ = (context, function_builder, ty, pointer);
+        panic!("Images can't be dereferenced");
+    }
+}
+
+impl<P> Store<P> for ImageValue {
+    fn store(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        pointer: P,
+    ) -> Result<(), Error> {
+        let _ = (context, function_builder, pointer);
+        panic!("Images can't be dereferenced");
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SamplerValue {}
+
+impl TypeOf for SamplerValue {
+    type Type = SamplerType;
+
+    fn type_of(&self) -> Self::Type {
+        match *self {}
+    }
+}
+
+impl<P> Load<P, SamplerType> for SamplerValue {
+    fn load(
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        ty: SamplerType,
+        pointer: P,
+    ) -> Result<Self, Error> {
+        let _ = (context, function_builder, ty, pointer);
+        panic!("Samplers can't be dereferenced");
+    }
+}
+
+impl<P> Store<P> for SamplerValue {
+    fn store(
+        &self,
+        context: &Context,
+        function_builder: &mut FunctionBuilder,
+        pointer: P,
+    ) -> Result<(), Error> {
+        let _ = (context, function_builder, pointer);
+        panic!("Samplers can't be dereferenced");
+    }
+} */
+
 macro_rules! define_value {
     (@impl_load_store([$(($variant:ident, $ty:ty)),*], $pointer:ty)) => {
         impl Load<$pointer, Type> for Value {
@@ -1141,6 +1263,7 @@ macro_rules! define_value {
                             pointer
                         )?)
                     },)*
+                    _ => panic!("Invalid to load {ty:?}"),
                 };
                 Ok(value)
             }
@@ -1203,6 +1326,7 @@ macro_rules! define_value {
 
                 let output = match ty {
                     $(Type::$variant(ty) => Self::$variant(FromIrValues::try_from_ir_values_fn(context, ty, f)?),)*
+                    _ => panic!("Invalid to construct {ty:?} from IR values"),
                 };
                 Ok(output)
             }
@@ -1241,6 +1365,8 @@ define_value!(
     Pointer(PointerValue),
     Struct(StructValue),
     Array(ArrayValue),
+    //Image(ImageValue),
+    //Sampler(SamplerValue),
 );
 
 fn try_map_array_vec_as_scalars<const N: usize, E>(

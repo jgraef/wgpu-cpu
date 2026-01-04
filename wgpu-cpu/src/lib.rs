@@ -9,6 +9,7 @@ mod engine;
 mod instance;
 mod pipeline;
 mod render_pass;
+mod sampler;
 mod shader;
 #[cfg(feature = "softbuffer")]
 mod surface;

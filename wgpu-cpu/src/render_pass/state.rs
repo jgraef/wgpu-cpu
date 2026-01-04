@@ -15,7 +15,6 @@ use crate::{
     pipeline::RenderPipeline,
     render_pass::{
         RenderPassDescriptor,
-        binding::AcquiredBindingResources,
         clipper::{
             Clip,
             ClipVolume,
@@ -246,13 +245,17 @@ impl DrawCall {
 
         let clip_volume = ClipVolume::WEBGPU;
 
-        let binding_resources = AcquiredBindingResources::new(&state.bind_groups);
+        // note: we pass the bind groups to each stage which acquires resources
+        // individually. this will of course not work if one requires exclusive access
+        // (which we don't support yet). but we want to filter by what the shader
+        // actually uses in the future anyway, so this might need some work.
         let vertex_processing_state =
-            VertexProcessingState::new(pipeline_state, &state.vertex_buffers, binding_resources);
+            VertexProcessingState::new(pipeline_state, &state.vertex_buffers, &state.bind_groups);
         let fragment_processing_state = FragmentProcessingState::new(
             pipeline_state,
             &mut state.color_attachments,
             state.depth_stencil_attachment.as_mut(),
+            &state.bind_groups,
         );
 
         let primitive = &pipeline_state.pipeline.descriptor.primitive;

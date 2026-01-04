@@ -4,9 +4,13 @@ use std::{
     sync::Arc,
 };
 
-use crate::buffer::{
-    Buffer,
-    BufferSlice,
+use crate::{
+    buffer::{
+        Buffer,
+        BufferSlice,
+    },
+    sampler::Sampler,
+    texture::TextureViewAttachment,
 };
 
 #[derive(Clone, Debug)]
@@ -79,6 +83,8 @@ pub struct BindGroupEntry {
 #[derive(Debug)]
 pub enum BindingResource {
     Buffer(BufferSlice),
+    Sampler(Sampler),
+    TextureView(TextureViewAttachment),
 }
 
 impl BindingResource {
@@ -95,9 +101,13 @@ impl BindingResource {
                 Self::Buffer(buffer_slice)
             }
             wgpu::BindingResource::BufferArray(buffer_bindings) => todo!(),
-            wgpu::BindingResource::Sampler(sampler) => todo!(),
+            wgpu::BindingResource::Sampler(sampler) => {
+                Self::Sampler(sampler.as_custom::<Sampler>().unwrap().clone())
+            }
             wgpu::BindingResource::SamplerArray(samplers) => todo!(),
-            wgpu::BindingResource::TextureView(texture_view) => todo!(),
+            wgpu::BindingResource::TextureView(texture_view) => {
+                Self::TextureView(TextureViewAttachment::from_wgpu(texture_view).unwrap())
+            }
             wgpu::BindingResource::TextureViewArray(texture_views) => todo!(),
             wgpu::BindingResource::AccelerationStructure(tlas) => todo!(),
             wgpu::BindingResource::ExternalTexture(external_texture) => todo!(),

@@ -554,6 +554,52 @@ impl AsIrTypes for ArrayType {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageType {
+    pub dimension: naga::ImageDimension,
+    pub arrayed: bool,
+    pub class: naga::ImageClass,
+}
+
+impl AsIrTypes for ImageType {
+    fn try_as_ir_type(&self, context: &Context) -> Option<ir::Type> {
+        let _ = context;
+        None
+    }
+
+    fn as_ir_types<'a>(&'a self, context: &'a Context) -> impl Iterator<Item = ir::Type> + 'a {
+        let _ = context;
+        std::iter::empty()
+    }
+
+    fn try_ir_size(&self, context: &Context) -> Option<usize> {
+        let _ = context;
+        None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SamplerType {
+    pub comparision: bool,
+}
+
+impl AsIrTypes for SamplerType {
+    fn try_as_ir_type(&self, context: &Context) -> Option<ir::Type> {
+        let _ = context;
+        None
+    }
+
+    fn as_ir_types<'a>(&'a self, context: &'a Context) -> impl Iterator<Item = ir::Type> + 'a {
+        let _ = context;
+        std::iter::empty()
+    }
+
+    fn try_ir_size(&self, context: &Context) -> Option<usize> {
+        let _ = context;
+        None
+    }
+}
+
 macro_rules! define_type {
     ($($variant:ident($ty:ty),)*) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -610,6 +656,8 @@ define_type!(
     Pointer(PointerType),
     Struct(StructType),
     Array(ArrayType),
+    Image(ImageType),
+    Sampler(SamplerType),
 );
 
 impl Type {
@@ -652,11 +700,21 @@ impl Type {
                 span: _,
             } => Self::Struct(StructType { handle }),
             Image {
-                dim: _,
-                arrayed: _,
-                class: _,
-            } => todo!("image type"),
-            Sampler { comparison: _ } => todo!("sampler type"),
+                dim,
+                arrayed,
+                class,
+            } => {
+                Self::Image(ImageType {
+                    dimension: *dim,
+                    arrayed: *arrayed,
+                    class: *class,
+                })
+            }
+            Sampler { comparison } => {
+                Self::Sampler(SamplerType {
+                    comparision: *comparison,
+                })
+            }
             AccelerationStructure { vertex_return: _ } => {
                 todo!("acceleration structure type")
             }

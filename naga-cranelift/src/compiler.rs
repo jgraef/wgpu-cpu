@@ -84,8 +84,6 @@ use crate::{
     simd::SimdContext,
     types::{
         AsIrTypes,
-        PointerType,
-        PointerTypeBase,
         Type,
     },
     util::{
@@ -551,17 +549,12 @@ where
         assert!(self.global_variables.is_empty());
 
         for (handle, global_variable) in self.context.source.global_variables.iter() {
-            let pointer_type = PointerType {
-                base_type: PointerTypeBase::Pointer(global_variable.ty),
-                address_space: global_variable.space,
-            };
-
             if let Some(binding) = global_variable.binding {
                 self.global_variables.insert(
                     handle,
                     GlobalVariable {
+                        ty: global_variable.ty,
                         address_space: global_variable.space,
-                        pointer_type,
                         inner: GlobalVariableInner::Resource { binding },
                     },
                 );
@@ -570,8 +563,8 @@ where
                 self.global_variables.insert(
                     handle,
                     GlobalVariable {
+                        ty: global_variable.ty,
                         address_space: global_variable.space,
-                        pointer_type,
                         // offset and len will be patched later when we finalize the layout
                         inner: GlobalVariableInner::Memory { offset: 0, len: 0 },
                     },

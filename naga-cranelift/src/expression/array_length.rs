@@ -32,13 +32,16 @@ impl CompileExpression for ArrayLengthExpression {
         let base_type: ArrayType = array_pointer.ty.base_type(&compiler.context).try_into()?;
 
         let value = if let Some(size) = base_type.size {
-            ScalarValue::compile_u32(compiler, size)
+            ScalarValue::compile_u32(&mut compiler.function_builder, size)
         }
         else {
             match array_pointer.inner {
                 PointerValueInner::StaticPointer(pointer_range) => {
                     assert!(pointer_range.len.is_multiple_of(base_type.stride));
-                    ScalarValue::compile_u32(compiler, pointer_range.len / base_type.stride)
+                    ScalarValue::compile_u32(
+                        &mut compiler.function_builder,
+                        pointer_range.len / base_type.stride,
+                    )
                 }
                 PointerValueInner::DynamicPointer(pointer_range) => {
                     let mut value = compiler
@@ -71,12 +74,16 @@ impl CompileExpression for ArrayLengthExpression {
                     }
                 }
                 PointerValueInner::StackLocation(stack_location) => {
-                    let size = &compiler.function_builder.func.sized_stack_slots
+                    let size = compiler.function_builder.func.sized_stack_slots
                         [stack_location.stack_slot]
                         .size;
                     assert!(size.is_multiple_of(base_type.stride));
-                    ScalarValue::compile_u32(compiler, size / base_type.stride)
+                    ScalarValue::compile_u32(
+                        &mut compiler.function_builder,
+                        size / base_type.stride,
+                    )
                 }
+                PointerValueInner::Handle(_) => panic!("Invalid to take length of handle pointer"),
             }
         };
 

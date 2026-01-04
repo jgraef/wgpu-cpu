@@ -6,3 +6,7 @@ members = ["naga-cranelift", "wgpu-cpu", "wgpu-cpu-tests"]
 wgpu = { git = "https://github.com/jgraef/wgpu.git", branch = "switch/cpu-renderer" }
 naga = { git = "https://github.com/jgraef/wgpu.git", branch = "switch/cpu-renderer" }
 approx = { git = "https://github.com/jgraef/approx.git", branch = "array" }
+
+[profile.dev.package.wgpu-cpu]
+# without optimizations the renderer is painfully slow. opt-level 1 gives the a pretty good improvement, while not taking so long to compile.
+opt-level = 1

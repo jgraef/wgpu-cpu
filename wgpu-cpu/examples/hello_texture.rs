@@ -1,6 +1,9 @@
 use std::{
     collections::HashSet,
-    f32::consts::FRAC_PI_4,
+    f32::consts::{
+        FRAC_PI_4,
+        TAU,
+    },
     path::{
         Path,
         PathBuf,
@@ -15,10 +18,12 @@ use bytemuck::{
 use clap::Parser;
 use color_eyre::eyre::Error;
 use dotenvy::dotenv;
+use image::ImageReader;
 use nalgebra::{
     Isometry3,
     Matrix4,
     Perspective3,
+    Point2,
     Point3,
     Translation3,
     Vector2,
@@ -56,8 +61,11 @@ struct Args {
     #[clap(short, long)]
     output: Option<PathBuf>,
 
-    #[clap(short, long, default_value = "wgpu-cpu/examples/teapot.obj")]
+    #[clap(short, long, default_value = "wgpu-cpu/examples/cube.obj")]
     mesh: PathBuf,
+
+    #[clap(short, long, default_value = "wgpu-cpu/examples/test_pattern.png")]
+    texture: PathBuf,
 
     #[clap(short = 'W', long, default_value = "600")]
     width: u32,
@@ -74,9 +82,9 @@ pub fn main() -> Result<(), Error> {
     let args = Args::parse();
     let image_size = Vector2::new(args.width, args.height);
 
-    tracing::info!(?args, "Hello Mesh!");
+    tracing::info!(?args, "Hello Texture!");
 
-    let mut app = App::new(&args.mesh, image_size)?;
+    let mut app = App::new(&args.mesh, args.texture, image_size)?;
 
     if let Some(output) = &args.output {
         app.render_to_file(&output, image_size)?;
@@ -101,13 +109,18 @@ struct App {
     pipeline_layout: wgpu::PipelineLayout,
     window: Option<AppWindow>,
     mesh: Mesh,
+    texture_bind_group: wgpu::BindGroup,
     camera: Camera,
     initial_window_size: Vector2<u32>,
     keys_down: HashSet<PhysicalKey>,
 }
 
 impl App {
-    pub fn new(mesh: impl AsRef<Path>, initial_window_size: Vector2<u32>) -> Result<Self, Error> {
+    pub fn new(
+        mesh: impl AsRef<Path>,
+        texture: impl AsRef<Path>,
+        initial_window_size: Vector2<u32>,
+    ) -> Result<Self, Error> {
         let instance = wgpu_cpu::instance(Default::default());
 
         let (adapter, device, queue) = pollster::block_on(async {
@@ -116,7 +129,7 @@ impl App {
             Ok::<_, Error>((adapter, device, queue))
         })?;
 
-        let shader_module = device.create_shader_module(wgpu::include_wgsl!("hello_mesh.wgsl"));
+        let shader_module = device.create_shader_module(wgpu::include_wgsl!("hello_texture.wgsl"));
 
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -133,18 +146,96 @@ impl App {
                 }],
             });
 
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("texture"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("hello_triangle pipeline layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
             immediate_size: 0,
         });
 
         let mesh = Mesh::load(mesh, &device)?;
 
+        let texture_bind_group = {
+            let label = texture.as_ref().display().to_string();
+            let image = ImageReader::open(&texture)?.decode()?.into_rgba8();
+
+            let texture = device.create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some(&label),
+                    size: wgpu::Extent3d {
+                        width: image.width(),
+                        height: image.height(),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                Default::default(),
+                image.as_raw(),
+            );
+
+            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&label),
+                ..Default::default()
+            });
+
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("sampler"),
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                address_mode_w: wgpu::AddressMode::Repeat,
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&label),
+                layout: &texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            })
+        };
+
         let camera = {
             let transform = Isometry3::face_towards(
-                &(mesh.center + Vector3::new(0.0, 0.0, mesh.size.max() * -1.0)),
-                &(mesh.center + Vector3::new(0.0, mesh.size.y * 0.25, 0.0)),
+                &(mesh.center + Vector3::new(0.0, 0.0, mesh.size.max() * 1.5)),
+                &mesh.center,
                 &Vector3::y(),
             );
 
@@ -165,6 +256,7 @@ impl App {
             pipeline_layout,
             window: None,
             mesh,
+            texture_bind_group,
             camera,
             initial_window_size,
             keys_down: HashSet::new(),
@@ -185,7 +277,7 @@ impl App {
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &wgpu::vertex_attr_array![
                             0 => Float32x4, // position
-                            1 => Float32x4, // color
+                            1 => Float32x2, // uv
                         ],
                     }],
                 },
@@ -227,7 +319,7 @@ impl App {
         let window = Arc::new(
             event_loop.create_window(
                 WindowAttributes::default()
-                    .with_title("Hello Mesh")
+                    .with_title("Hello Texture")
                     .with_inner_size(PhysicalSize::new(
                         self.initial_window_size.x,
                         self.initial_window_size.y,
@@ -330,6 +422,7 @@ impl App {
 
             render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, Some(&self.camera.bind_group), &[]);
+            render_pass.set_bind_group(1, Some(&self.texture_bind_group), &[]);
             render_pass
                 .set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
@@ -519,7 +612,7 @@ fn create_depth_texture(
 #[repr(C)]
 struct Vertex {
     position: Vector4<f32>,
-    color: Vector4<f32>,
+    uv: Point2<f32>,
 }
 
 #[derive(Debug)]
@@ -537,13 +630,9 @@ impl Mesh {
         let (models, _) = tobj::load_obj(path.as_ref(), &tobj::GPU_LOAD_OPTIONS)?;
         let mesh = models.into_iter().next().unwrap().mesh;
 
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("index buffer"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
         let positions = bytemuck::cast_slice::<f32, Point3<f32>>(&mesh.positions);
+        let uvs = (!mesh.texcoords.is_empty())
+            .then(|| bytemuck::cast_slice::<f32, Point2<f32>>(&mesh.texcoords));
 
         let mut min = Vector3::max_value();
         let mut max = Vector3::min_value();
@@ -557,18 +646,35 @@ impl Mesh {
 
         let vertices = positions
             .iter()
-            .map(|position| {
+            .enumerate()
+            .map(|(i, position)| {
+                let uv = uvs.as_ref().map_or_else(
+                    || {
+                        let normal = (position - center).normalize();
+                        let mut uv = Vector2::new(
+                            normal.x.atan2(normal.z) / TAU + 0.5,
+                            0.5 * normal.z + 0.5,
+                        );
+                        uv *= 5.0;
+                        uv.into()
+                        //Vector2::new(normal.x / 2.0 + 0.5, normal.y / 2.0 +
+                        // 0.5).into()
+                    },
+                    |uvs| uvs[i],
+                );
+
                 Vertex {
                     position: position.to_homogeneous(),
-                    color: Vector4::new(
-                        (position.x - min.x) / size.x,
-                        (position.y - min.y) / size.y,
-                        (position.z - min.z) / size.z,
-                        1.0,
-                    ),
+                    uv,
                 }
             })
             .collect::<Vec<_>>();
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("index buffer"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertex buffer"),

@@ -41,7 +41,24 @@ where
 }
 
 pub trait BindingResources {
-    fn read(&self, binding: naga::ResourceBinding) -> &[u8];
+    type Image;
+    type Sampler;
+
+    fn buffer(&self, binding: naga::ResourceBinding) -> &[u8];
+    fn image(&self, binding: naga::ResourceBinding) -> &Self::Image;
+    fn sampler(&self, binding: naga::ResourceBinding) -> &Self::Sampler;
+    fn image_sample(
+        &mut self,
+        image: &Self::Image,
+        sampler: &Self::Sampler,
+        gather: Option<naga::SwizzleComponent>,
+        coordinate: [f32; 2],
+        array_index: Option<u32>,
+        offset: Option<u32>,
+        level: naga::SampleLevel,
+        depth_ref: Option<f32>,
+        clamp_to_edge: bool,
+    ) -> [f32; 4];
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -62,9 +79,48 @@ impl ShaderOutput for NullBinding {
 }
 
 impl BindingResources for NullBinding {
-    fn read(&self, binding: naga::ResourceBinding) -> &[u8] {
+    type Image = ();
+    type Sampler = ();
+
+    fn buffer(&self, binding: naga::ResourceBinding) -> &[u8] {
         let _ = binding;
         &[]
+    }
+
+    fn image(&self, binding: naga::ResourceBinding) -> &Self::Image {
+        let _ = binding;
+        &()
+    }
+
+    fn sampler(&self, binding: naga::ResourceBinding) -> &Self::Sampler {
+        let _ = binding;
+        &()
+    }
+
+    fn image_sample(
+        &mut self,
+        image: &Self::Image,
+        sampler: &Self::Sampler,
+        gather: Option<naga::SwizzleComponent>,
+        coordinate: [f32; 2],
+        array_index: Option<u32>,
+        offset: Option<u32>,
+        level: naga::SampleLevel,
+        depth_ref: Option<f32>,
+        clamp_to_edge: bool,
+    ) -> [f32; 4] {
+        let _ = (
+            image,
+            sampler,
+            gather,
+            coordinate,
+            array_index,
+            offset,
+            level,
+            depth_ref,
+            clamp_to_edge,
+        );
+        [0.0; 4]
     }
 }
 

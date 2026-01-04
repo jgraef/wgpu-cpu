@@ -835,32 +835,66 @@ fn runtime_panic() {
     pub struct PanicInTheRuntime;
     impl Runtime for PanicInTheRuntime {
         type Error = Infallible;
+        type Image = ();
+        type Sampler = ();
 
         fn copy_inputs_to(&mut self, _target: &mut [u8]) -> Result<(), Self::Error> {
             // note: this is never called because the shader doesn't take any inputs
-            panic!("copy_inputs_to")
+            panic!("copy_inputs_to");
         }
 
         fn copy_outputs_from(&mut self, _source: &[u8]) -> Result<(), Self::Error> {
-            panic!("copy_outputs_from")
+            panic!("copy_outputs_from");
         }
 
         fn initialize_global_variables(
             &mut self,
             _private_data: &mut [u8],
         ) -> Result<(), Self::Error> {
-            panic!("initialize_global_variables")
+            panic!("initialize_global_variables");
         }
 
-        fn buffer(&mut self, _binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
-            panic!("buffer")
+        fn buffer_resource(
+            &mut self,
+            _binding: naga::ResourceBinding,
+        ) -> Result<&[u8], Self::Error> {
+            panic!("buffer_resource");
         }
 
-        fn buffer_mut(
+        fn buffer_resource_mut(
             &mut self,
             _binding: naga::ResourceBinding,
         ) -> Result<&mut [u8], Self::Error> {
-            panic!("buffer_mut")
+            panic!("buffer_resource_mut");
+        }
+
+        fn image_resource(
+            &mut self,
+            _binding: naga::ResourceBinding,
+        ) -> Result<&Self::Image, Self::Error> {
+            panic!("image_resource");
+        }
+
+        fn sampler_resource(
+            &mut self,
+            _binding: naga::ResourceBinding,
+        ) -> Result<&Self::Sampler, Self::Error> {
+            panic!("sampler_resource");
+        }
+
+        fn image_sample(
+            &mut self,
+            _image: &Self::Image,
+            _sampler: &Self::Sampler,
+            _gather: Option<naga::SwizzleComponent>,
+            _coordinate: [f32; 2],
+            _array_index: Option<u32>,
+            _offset: Option<u32>,
+            _level: naga::SampleLevel,
+            _depth_ref: Option<f32>,
+            _clamp_to_edge: bool,
+        ) -> Result<[f32; 4], Self::Error> {
+            panic!("image_sample");
         }
     }
 
@@ -993,6 +1027,8 @@ fn array_length() {
 
     impl<'a> Runtime for DynamicArrayRuntime<'a> {
         type Error = Infallible;
+        type Image = ();
+        type Sampler = ();
 
         fn copy_inputs_to(&mut self, target: &mut [u8]) -> Result<(), Self::Error> {
             target.fill(0);
@@ -1014,18 +1050,50 @@ fn array_length() {
             Ok(())
         }
 
-        fn buffer(&mut self, binding: naga::ResourceBinding) -> Result<&[u8], Self::Error> {
+        fn buffer_resource(
+            &mut self,
+            binding: naga::ResourceBinding,
+        ) -> Result<&[u8], Self::Error> {
             assert_eq!(binding.group, 0);
             assert_eq!(binding.binding, 0);
 
             Ok(bytemuck::cast_slice(&*self.buffer))
         }
 
-        fn buffer_mut(
+        fn buffer_resource_mut(
             &mut self,
             _binding: naga::ResourceBinding,
         ) -> Result<&mut [u8], Self::Error> {
             Ok(&mut [])
+        }
+
+        fn image_resource(
+            &mut self,
+            _binding: naga::ResourceBinding,
+        ) -> Result<&Self::Image, Self::Error> {
+            panic!("unsupported");
+        }
+
+        fn sampler_resource(
+            &mut self,
+            _binding: naga::ResourceBinding,
+        ) -> Result<&Self::Sampler, Self::Error> {
+            panic!("unsupported");
+        }
+
+        fn image_sample(
+            &mut self,
+            _image: &Self::Image,
+            _sampler: &Self::Sampler,
+            _gather: Option<naga::SwizzleComponent>,
+            _coordinate: [f32; 2],
+            _array_index: Option<u32>,
+            _offset: Option<u32>,
+            _level: naga::SampleLevel,
+            _depth_ref: Option<f32>,
+            _clamp_to_edge: bool,
+        ) -> Result<[f32; 4], Self::Error> {
+            panic!("unsupported");
         }
     }
 

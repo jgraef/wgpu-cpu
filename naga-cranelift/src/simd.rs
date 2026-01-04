@@ -176,6 +176,11 @@ impl SimdRegister {
     }
 
     pub fn new(base_type: ir::Type, lanes: u32) -> Self {
+        // # FIXME
+        //
+        // Small vector types are broken: https://github.com/bytecodealliance/wasmtime/issues/12197#issuecomment-3687778494
+        const MIN_LANE_COUNT: u32 = 4;
+
         const VECTOR_SIZES: [naga::VectorSize; 3] = [
             naga::VectorSize::Bi,
             naga::VectorSize::Tri,
@@ -184,7 +189,8 @@ impl SimdRegister {
 
         let vector = VECTOR_SIZES.map(|vector_size| {
             let required_lanes = u32::from(vector_size).next_power_of_two();
-            if required_lanes <= lanes {
+
+            if required_lanes <= lanes && required_lanes >= MIN_LANE_COUNT {
                 VectorIrType::Vector {
                     ty: base_type.by(required_lanes).unwrap(),
                 }
@@ -199,12 +205,12 @@ impl SimdRegister {
                 let column_lanes = u32::from(columns).next_power_of_two();
                 let full_lanes = (u32::from(columns) * u32::from(rows)).next_power_of_two();
 
-                if lanes >= full_lanes {
+                if full_lanes <= lanes && full_lanes >= MIN_LANE_COUNT {
                     MatrixIrType::FullVector {
                         ty: base_type.by(full_lanes).unwrap(),
                     }
                 }
-                else if lanes >= column_lanes {
+                else if column_lanes <= lanes && column_lanes >= MIN_LANE_COUNT {
                     MatrixIrType::ColumnVector {
                         ty: base_type.by(column_lanes).unwrap(),
                     }
